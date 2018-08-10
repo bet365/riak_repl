@@ -88,6 +88,8 @@ create_config_for_remote_cluster(ClusterName, AgreedVersion) ->
     Config = get_versioned_config(AgreedVersion),
     invert_config(ClusterName, Config).
 
+%% returns {{whitelist, Whitelist}, {blacklist, Blacklist}, {matched_rules, {X, Y}}}
+%% whitelist and blacklist are remote names!
 get_filter_rules(Object) ->
     case ?STATUS of
         enabled ->
@@ -98,6 +100,7 @@ get_filter_rules(Object) ->
             ?DEFAULT_FILTERING_RULES
     end.
 
+% Returns true or false to say if we need to filter based on an object and remote name
 filter({fullsync, disabled, _Version, _Config, _RemoteName}, _Object) ->
     false;
 filter({fullsync, enabled, 0, _Config, _RemoteName}, _Object) ->
@@ -109,6 +112,7 @@ filter({fullsync, enabled, Version, Config, RemoteName}, Object) ->
     AllowedRemotes = allowed_remotes([RemoteName], FilteredRemotes),
     not lists:member(RemoteName, AllowedRemotes).
 
+%% reutrns true or false to say if you can send an object to a remote name
 filter(realtime, RemoteName, Meta) ->
     realtime_filter(?STATUS, RemoteName, Meta).
 
@@ -119,6 +123,7 @@ downgrade_config(Config, Version) ->
     downgrade_config_helper(Config, Version, []).
 downgrade_config_helper([], _, NewConfig) ->
     NewConfig;
+%% TODO change format of config here
 downgrade_config_helper([ Rule = {{MatchType, _MatchValue}, {FilterType, _RemoteNodes}} | Rest], Version, NewConfig) ->
     case {lists:member(MatchType, ?SUPPORTED_MATCH_TYPES(Version)), lists:member(FilterType, ?SUPPORTED_FILTER_TYPES(Version))} of
         {true, true} ->
@@ -151,17 +156,18 @@ invert_config_helper(ClusterName, [{{MatchType, MatchValue}, {FilterType, Remote
             end
     end.
 
-filter_helper(0, _Config, {_Bucket, _Metadatas}, FilteredRemotes) ->
+filter_helper(0, _Config, _ObjectData, FilteredRemotes) ->
     FilteredRemotes;
-filter_helper(_V, [], _D, FilteredRemotes) ->
+filter_helper(_V, [], _ObjectData, FilteredRemotes) ->
     FilteredRemotes;
-filter_helper(Version, [{{MatchType, MatchValue}, {FilterType, RemoteNodes}} | RestOfRules], Data, FilteredRemotes) ->
-    case does_data_match_rule(MatchType, MatchValue, Data) of
+%% TODO change format of config here
+filter_helper(Version, [{{MatchType, MatchValue}, {FilterType, RemoteNodes}} | RestOfRules], ObjectData, FilteredRemotes) ->
+    case does_data_match_rule(MatchType, MatchValue, ObjectData) of
         true ->
             NewFilteredRemotes = add_filtered_remote(FilterType, RemoteNodes, FilteredRemotes),
-            filter_helper(Version, RestOfRules, Data, NewFilteredRemotes);
+            filter_helper(Version, RestOfRules, ObjectData, NewFilteredRemotes);
         false ->
-            filter_helper(Version, RestOfRules, Data, FilteredRemotes)
+            filter_helper(Version, RestOfRules, ObjectData, FilteredRemotes)
     end.
 
 

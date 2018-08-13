@@ -40,7 +40,8 @@
 
 -define(SERVER, ?MODULE).
 -define(SUPPORTED_MATCH_TYPES(Version), supported_match_types(Version)).
--define(SUPPORTED_FILTER_TYPES(Version), supported_filter_types(Version)).
+-define(SUPPORTED_MATCH_VALUE_FORMATS(Version, MatchType, MatchValue), supported_match_value_formats(Version, MatchType, MatchValue)).
+-define(SUPPORTED_KEYWORDS(Version), supported_keywords(Version)).
 -define(STATUS, app_helper:get_env(riak_repl, object_filtering_status, disabled)).
 -define(CONFIG, app_helper:get_env(riak_repl, object_filtering_config, [])).
 -define(VERSION, app_helper:get_env(riak_repl, object_filtering_version, 0)).
@@ -54,20 +55,23 @@
 %%%===================================================================
 %%% Macro Helper Functions
 %%%===================================================================
-%%supported_match_types(1.1) ->
-%%    [bucket, metadata, key];
 supported_match_types(1.0) ->
-    [bucket, metadata];
+    [bucket, metadata, not_bucket, not_metadata];
 supported_match_types(_) ->
     [].
 
-%%supported_filter_types(1.1) ->
-%%    supported_filter_types(1.0);
-supported_filter_types(1.0) ->
-    [blacklist, whitelist];
-supported_filter_types(_) ->
-    [].
+supported_match_value_formats(1.0, bucket, MatchValue) -> is_binary(MatchValue);
+supported_match_value_formats(1.0, not_bucket, MatchValue) -> is_binary(MatchValue);
+supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) -> true;
+supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) -> true;
+supported_match_value_formats(1.0, not_metadata, _) -> false;
+supported_match_value_formats(1.0, not_metadata, _) -> false;
+supported_match_value_formats(0, _, _) -> false.
 
+supported_keywords(1.0) ->
+    ['*', all];
+supported_keywords(_) ->
+    [].
 %%%===================================================================
 %%% API (Function Callbacks)
 %%%===================================================================
@@ -215,15 +219,14 @@ object_filtering_enable() ->
 
 object_filtering_config_file(Action, Path) ->
     case file:consult(Path) of
-        {ok, FilteringRules} ->
-            case check_filtering_rules(FilteringRules) of
+        {ok, FilteringConfig} ->
+            case check_filtering_rules(FilteringConfig) of
                 ok ->
                     case Action of
                         check -> ok;
                         load ->
-                            SortedConfig = sort_config(FilteringRules),
-                            riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, SortedConfig),
-                            application:set_env(riak_repl, object_filtering_config, SortedConfig),
+                            riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, FilteringConfig),
+                            application:set_env(riak_repl, object_filtering_config, FilteringConfig),
                             ok
                     end;
                 Error2 ->
@@ -241,61 +244,93 @@ object_filtering_clear_config() ->
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, []),
     ok.
 
+-define(ERROR_NO_FULES, {error, {no_rules, ?VERSION}}).
+-define(ERROR_RULE_FORMAT(Rule), {error, {rule_format, ?VERSION, Rule}}).
+-define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, ?VERSION}}).
+-define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
+-define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 
-check_filtering_rules([]) -> {error, {no_rules, ?VERSION}};
-check_filtering_rules(FilteringRules) -> check_filtering_rules_helper(FilteringRules, 1).
-check_filtering_rules_helper([], _) -> ok;
-check_filtering_rules_helper([{{MatchType, MatchValue}, {FilterType, RemoteNodes}} | RestOfRules], N) ->
-    case duplicate_rule({MatchType, MatchValue}, RestOfRules) of
-        false ->
-            case lists:member(MatchType, ?SUPPORTED_MATCH_TYPES(?VERSION)) of
-                true ->
-                    case lists:member(FilterType, ?SUPPORTED_FILTER_TYPES(?VERSION)) of
-                        true ->
-                            case is_list_of_names(RemoteNodes) of
-                                true ->
-                                    check_filtering_rules_helper(RestOfRules, N+1);
-                                false ->
-                                    {error, {filter_value, ?VERSION, N, RemoteNodes, lists}}
-                            end;
-                        false ->
-                            {error, {filter_type, ?VERSION, N, FilterType, ?SUPPORTED_FILTER_TYPES(?VERSION)}}
-                    end;
-                false ->
-                    {error, {match_type, ?VERSION, N, MatchType, ?SUPPORTED_MATCH_TYPES(?VERSION)}}
-            end;
+invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, ?VERSION, RemoteName, Rule}};
+invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?VERSION, RemoteName, Rule}}.
+
+
+check_filtering_rules([]) -> ?ERROR_NO_FULES(?VERSION);
+check_filtering_rules(FilteringRules) ->
+    AllRemotes = lists:sort(lists:foldl(fun({RemoteName, _}, Acc) -> [RemoteName] ++ Acc end, [], FilteringRules)),
+    NoDuplicateRemotes = lists:usort(AllRemotes),
+    case AllRemotes == NoDuplicateRemotes of
         true ->
-            {error, {duplicate_rule, ?VERSION, N, MatchType, MatchValue}}
-    end.
-
-
-duplicate_rule(Rule, RestOfRules) ->
-    case lists:keyfind(Rule, 1, RestOfRules) of
+            check_filtering_rules_helper(FilteringRules, check_rule_format, ok);
         false ->
-            false;
-        _ ->
-            true
+            ?ERROR_DUPLICATE_REMOTE_ENTRIES
     end.
 
-sort_config(Config) ->
-    sort_config_helper(Config, []).
-sort_config_helper([], Sorted) ->
-    Sorted;
-sort_config_helper([Rule = {_, {blacklist, _}} | Rest], Sorted) ->
-    sort_config_helper(Rest, Sorted++[Rule]);
-sort_config_helper([Rule | Rest], Sorted) ->
-    sort_config_helper(Rest, [Rule]++Sorted).
+check_filtering_rules_helper([], complete, Outcome) -> Outcome;
+check_filtering_rules_helper(_, _NextCheck, {error, Error}) -> {error, Error};
+check_filtering_rules_helper(Rules = [_|Rest], NextCheck, ok) ->
+    case NextCheck of
+        complete ->
+            check_filtering_rules_helper(Rest, check_rule_format, ok);
+        check_rule_format ->
+            check_rule_format(Rules, check_remote_name);
+        check_remote_name ->
+            check_remote_name(Rules, check_allowed_rules);
+        check_allowed_rules ->
+            check_rules(allowed, Rules, check_blocked_rules);
+        check_blocked_rules ->
+            check_rules(blocked, Rules, complete)
+    end.
 
-is_list_of_names([]) -> false;
-is_list_of_names(Names) -> is_list_of_names_helper(Names).
-is_list_of_names_helper([]) -> true;
-is_list_of_names_helper([Name|Rest]) ->
-    case is_list(Name) of
+check_rule_format(Rules = [{_RemoteName, {allow, _AllowedRule}, {block, _BlockedRules}} | _RestOfRemotes], NextCheck) ->
+    check_filtering_rules_helper(Rules, NextCheck, ok);
+check_rule_format(Rules = [Rule|_R], NextCheck) ->
+    check_filtering_rules_helper(Rules, NextCheck, ?ERROR_RULE_FORMAT(Rule)).
+
+check_remote_name(Rules = [{RemoteName, _} | _RestOfRemotes], NextCheck) ->
+    Check = lists:foldl(fun(E, Acc) ->
+                            case {is_integer(E), Acc} of
+                                {true, []} ->
+                                    [true];
+                                {true, [true]} ->
+                                    [true];
+                                {true, _} ->
+                                    Acc;
+                                {false, _} ->
+                                    [false]
+                            end
+                        end, [], RemoteName),
+    case Check of
+        [true] ->
+            check_filtering_rules_helper(Rules, NextCheck, ok);
+        [false] ->
+            check_filtering_rules_helper(Rules, NextCheck, ?ERROR_INVALID_REMOTE_NAME(RemoteName))
+    end.
+
+check_rules(RuleType, Rules = [{RemoteName, {allow, AllowedRules}, _} | _], NextCheck) ->
+    check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, AllowedRules));
+check_rules(RuleType, Rules = [{RemoteName, _, {block, BlockedRules}} | _], NextCheck) ->
+    check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, BlockedRules)).
+
+check_rules_helper(_RemoteName, _RuleType, []) ->
+    ok;
+check_rules_helper(RemoteName, RuleType, [Rule | Rest]) ->
+    case is_rule_supported(Rule) of
         true ->
-            is_list_of_names_helper(Rest);
+            check_rules_helper(RemoteName, RuleType, Rest);
         false ->
-            false
+            ?ERROR_INVALID_RULE(RemoteName, RuleType, Rule)
     end.
+
+is_rule_supported(Rule) when is_list(Rule) -> is_multi_rule_supported(Rule);
+is_rule_supported(Rule) -> is_single_rule_supported(Rule).
+
+is_single_rule_supported({MatchType, _MatchValue}) ->
+    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES).
+
+
+
+
+
 
 %% ===================================================================
 %% EUnit tests

@@ -47,7 +47,7 @@
 -define(BT_META_TYPE, bucket_type).
 -define(BT_META_PROPS_HASH, properties_hash_val).
 -define(BT_META_BUCKET_NAME, bucket_name).
--define(BT_OBJECT_FILTERING_RULES, object_filtering_rules).
+-define(BT_OBJECT_FILTERING_RULES, realtime_object_filtering_config).
 
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).

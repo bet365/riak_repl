@@ -39,9 +39,10 @@
     code_change/3]).
 
 -define(SERVER, ?MODULE).
--define(SUPPORTED_MATCH_TYPES(Version), supported_match_types(Version)).
--define(SUPPORTED_MATCH_VALUE_FORMATS(Version, MatchType, MatchValue), supported_match_value_formats(Version, MatchType, MatchValue)).
--define(SUPPORTED_KEYWORDS(Version), supported_keywords(Version)).
+-define(SUPPORTED_MATCH_TYPES, supported_match_types(?VERSION)).
+-define(SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue), supported_match_value_formats(?VERSION, MatchType, MatchValue)).
+-define(SUPPORTED_KEYWORDS, supported_keywords(?VERSION)).
+-define(WILDCARD, '*').
 -define(STATUS, app_helper:get_env(riak_repl, object_filtering_status, disabled)).
 -define(CONFIG, app_helper:get_env(riak_repl, object_filtering_config, [])).
 -define(VERSION, app_helper:get_env(riak_repl, object_filtering_version, 0)).
@@ -60,16 +61,21 @@ supported_match_types(1.0) ->
 supported_match_types(_) ->
     [].
 
-supported_match_value_formats(1.0, bucket, MatchValue) -> is_binary(MatchValue);
-supported_match_value_formats(1.0, not_bucket, MatchValue) -> is_binary(MatchValue);
-supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) -> true;
-supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) -> true;
-supported_match_value_formats(1.0, not_metadata, _) -> false;
-supported_match_value_formats(1.0, not_metadata, _) -> false;
-supported_match_value_formats(0, _, _) -> false.
+supported_match_value_formats(1.0, bucket, MatchValue) ->
+    is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, not_bucket, MatchValue) ->
+    is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, metadata, {_DictKey, DictValue}) ->
+    true  or lists:member(DictValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, not_metadata, {_DictKey, DictValue}) ->
+    true or lists:member(DictValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, not_metadata, _) ->
+    false;
+supported_match_value_formats(0, _, _) ->
+    false.
 
 supported_keywords(1.0) ->
-    ['*', all];
+    [all];
 supported_keywords(_) ->
     [].
 %%%===================================================================
@@ -254,9 +260,9 @@ invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, ?
 invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?VERSION, RemoteName, Rule}}.
 
 
-check_filtering_rules([]) -> ?ERROR_NO_FULES(?VERSION);
+check_filtering_rules([]) -> ?ERROR_NO_FULES();
 check_filtering_rules(FilteringRules) ->
-    AllRemotes = lists:sort(lists:foldl(fun({RemoteName, _}, Acc) -> [RemoteName] ++ Acc end, [], FilteringRules)),
+    AllRemotes = lists:sort(lists:foldl(fun({RemoteName, _, _}, Acc) -> [RemoteName] ++ Acc end, [], FilteringRules)),
     NoDuplicateRemotes = lists:usort(AllRemotes),
     case AllRemotes == NoDuplicateRemotes of
         true ->
@@ -286,7 +292,7 @@ check_rule_format(Rules = [{_RemoteName, {allow, _AllowedRule}, {block, _Blocked
 check_rule_format(Rules = [Rule|_R], NextCheck) ->
     check_filtering_rules_helper(Rules, NextCheck, ?ERROR_RULE_FORMAT(Rule)).
 
-check_remote_name(Rules = [{RemoteName, _} | _RestOfRemotes], NextCheck) ->
+check_remote_name(Rules = [{RemoteName, _, _} | _RestOfRemotes], NextCheck) ->
     Check = lists:foldl(fun(E, Acc) ->
                             case {is_integer(E), Acc} of
                                 {true, []} ->
@@ -307,9 +313,19 @@ check_remote_name(Rules = [{RemoteName, _} | _RestOfRemotes], NextCheck) ->
     end.
 
 check_rules(RuleType, Rules = [{RemoteName, {allow, AllowedRules}, _} | _], NextCheck) ->
-    check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, AllowedRules));
+    case AllowedRules of
+        [[?WILDCARD]] ->
+            check_filtering_rules_helper(Rules, NextCheck, ok);
+        _ ->
+            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, AllowedRules))
+    end;
 check_rules(RuleType, Rules = [{RemoteName, _, {block, BlockedRules}} | _], NextCheck) ->
-    check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, BlockedRules)).
+    case BlockedRules of
+        [?WILDCARD] ->
+            check_filtering_rules_helper(Rules, NextCheck, ok);
+        _ ->
+            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, BlockedRules))
+    end.
 
 check_rules_helper(_RemoteName, _RuleType, []) ->
     ok;
@@ -324,8 +340,11 @@ check_rules_helper(RemoteName, RuleType, [Rule | Rest]) ->
 is_rule_supported(Rule) when is_list(Rule) -> is_multi_rule_supported(Rule);
 is_rule_supported(Rule) -> is_single_rule_supported(Rule).
 
-is_single_rule_supported({MatchType, _MatchValue}) ->
-    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES).
+is_single_rule_supported({MatchType, MatchValue}) ->
+    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES) and ?SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue).
+
+is_multi_rule_supported([Rule|Rest]) ->
+    is_single_rule_supported(Rule) and is_multi_rule_supported(Rest).
 
 
 

@@ -241,19 +241,22 @@ decide_common_strategy(OurCaps, TheirCaps) ->
 
 %% Based on the agreed common protocol level and the supported
 %% mode of AAE, decide what strategy we are capable of offering.
-decide_our_caps(CommonMajor, Cluster) ->
+decide_our_caps(RequestedStrategy) ->
     SupportedStrategy =
-        case {riak_kv_entropy_manager:enabled(), CommonMajor} of
-            {_,1} -> keylist;
-            {false,_} -> keylist;
-            {true,_} -> aae
+        case {riak_kv_entropy_manager:enabled(), RequestedStrategy} of
+            {false, _} -> keylist;
+            {true, aae} -> aae;
+            {true, keylist} -> keylist;
+            {true, _UnSupportedStrategy} -> RequestedStrategy
         end,
+    [{strategy, SupportedStrategy}].
+decide_our_caps(RequestedStrategy, Cluster) ->
+    Strategy = decide_our_caps(RequestedStrategy),
     ConfigForRemote = riak_repl2_object_filter:get_config(Cluster),
     OFStatus = riak_repl2_object_filter:get_status(),
     OFVersion = riak_repl2_object_filter:get_version(),
     ObjectFiltering = {object_filtering, {OFStatus, OFVersion, ConfigForRemote}},
-    [{strategy, SupportedStrategy}, {bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
-
+    Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
 
 %% Depending on the protocol version number, send our capabilities
 %% as a list of properties, in binary.

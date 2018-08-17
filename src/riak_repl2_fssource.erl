@@ -314,7 +314,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% Based on the agreed common protocol level and the supported
 %% mode of AAE, decide what strategy we are capable of offering.
-decide_our_caps(RequestedStrategy, Cluster) ->
+decide_our_caps(RequestedStrategy) ->
     SupportedStrategy =
         case {riak_kv_entropy_manager:enabled(), RequestedStrategy} of
             {false, _} -> keylist;
@@ -322,11 +322,14 @@ decide_our_caps(RequestedStrategy, Cluster) ->
             {true, keylist} -> keylist;
             {true, _UnSupportedStrategy} -> RequestedStrategy
         end,
+    [{strategy, SupportedStrategy}].
+decide_our_caps(RequestedStrategy, Cluster) ->
+    Strategy = decide_our_caps(RequestedStrategy),
     ConfigForRemote = riak_repl2_object_filter:get_config(Cluster),
     OFStatus = riak_repl2_object_filter:get_status(),
     OFVersion = riak_repl2_object_filter:get_version(),
     ObjectFiltering = {object_filtering, {OFStatus, OFVersion, ConfigForRemote}},
-    [{strategy, SupportedStrategy}, {bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
+    Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
 
 %% decide what strategy to use, given our own capabilties and those
 %% of the remote source.

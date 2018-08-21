@@ -310,25 +310,24 @@ maybe_get_object_filtering_configurations(OurCaps, TheirCaps) ->
     OurObjectFiltering = proplists:get_value(object_filtering, OurCaps, not_supported),
     TheirObjectFiltering = proplists:get_value(object_filtering, TheirCaps, not_supported),
 
-    AgreeConfigFun = fun(V1, V2, OurStatus, OurConfig, RemoteConfig) ->
+    AgreeConfigFun = fun(V1, V2, OurStatus, RemoteConfig) ->
         V = lists:min([V1, V2]),
-        AdditionalConfig = riak_repl2_object_filter:convert_fullsync_config(RemoteConfig, V),
         case OurStatus of
             enabled ->
-                {enabled, V, OurConfig ++ AdditionalConfig};
+                {enabled, V, riak_repl2_object_filter:fullsync_config(RemoteConfig, V, append)};
             _ ->
-                {enabled, V, AdditionalConfig}
+                {enabled, V, riak_repl2_object_filter:fullsync_config(RemoteConfig, V, use_only)}
         end
         end,
 
     case {OurObjectFiltering, TheirObjectFiltering} of
-        {{enabled, OurVersion, OurConfig}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, enabled, OurConfig, TheirConfig);
+        {{enabled, OurVersion, _}, {enabled, TheirVersion, TheirConfig}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, enabled, TheirConfig);
 
-        {{disabled, OurVersion, OurConfig}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, disabled, OurConfig, TheirConfig);
+        {{disabled, OurVersion, _}, {enabled, TheirVersion, TheirConfig}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, disabled, TheirConfig);
 
-        {{enabled, OurVersion, OurConfig}, {disabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, enabled, OurConfig, TheirConfig);
+        {{enabled, OurVersion, _}, {disabled, TheirVersion, TheirConfig}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, enabled, TheirConfig);
         _ -> Default
     end.

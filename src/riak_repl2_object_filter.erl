@@ -17,7 +17,7 @@
     print_config/0]).
 
 -export([
-    convert_fullsync_config/2,
+    fullsync_config/3,
     get_realtime_config/1,
     get_versioned_config/1,
     get_versioned_config/2,
@@ -49,6 +49,12 @@
 -define(CLUSTERNAME, app_helper:get_env(riak_repl, clustername, "undefined")).
 -define(CURRENT_VERSION, 1.0).
 
+-define(ERROR_NO_FULES, {error, {no_rules, ?VERSION}}).
+-define(ERROR_RULE_FORMAT(Rule), {error, {rule_format, ?VERSION, Rule}}).
+-define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, ?VERSION}}).
+-define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
+-define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
+
 -define(DEFAULT_FILTERING_RULES, {{whitelist, []}, {blacklist, []}, {matched_rules, {0,0}}}).
 
 -record(state, {}).
@@ -65,10 +71,10 @@ supported_match_value_formats(1.0, bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
 supported_match_value_formats(1.0, not_bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
-supported_match_value_formats(1.0, metadata, {_DictKey, DictValue}) ->
-    true  or lists:member(DictValue, ?SUPPORTED_KEYWORDS);
-supported_match_value_formats(1.0, not_metadata, {_DictKey, DictValue}) ->
-    true or lists:member(DictValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->
+    true;
+supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) ->
+    true;
 supported_match_value_formats(1.0, not_metadata, _) ->
     false;
 supported_match_value_formats(0, _, _) ->
@@ -78,6 +84,9 @@ supported_keywords(1.0) ->
     [all];
 supported_keywords(_) ->
     [].
+
+invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, ?VERSION, RemoteName, Rule}};
+invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?VERSION, RemoteName, Rule}}.
 %%%===================================================================
 %%% API (Function Callbacks)
 %%%===================================================================
@@ -99,8 +108,9 @@ get_version() ->
 
 
 %% converts a remote clusters config to be a config that is used for our local cluster
-convert_fullsync_config(_RemoteConfig, _AgreedVersion) ->
-    ok.
+fullsync_config(_RemoteConfig, _AgreedVersion, append) -> ok;
+fullsync_config(_RemoteConfig, _AgreedVersion, use_only) -> ok.
+
 % Returns true or false to say if we need to filter based on an object and remote name
 filter({fullsync, disabled, _Version, _Config, _RemoteName}, _Object) ->
     false;
@@ -112,7 +122,7 @@ filter({fullsync, enabled, _Version, _Config, _RemoteName}, Object) ->
     false.
 
 
-%% returns a list of allowd and blocked remotes
+%% returns a list of allowed and blocked remotes
 get_realtime_config(_Object) ->
     ok.
 %% reutrns true or false to say if you can send an object to a remote name
@@ -120,20 +130,28 @@ filter(realtime, _RemoteName, _Meta) ->
     false.
 
 %%%===================================================================
-%%% API (Function Callbacks) Helper Functions
+%%% API (Private) Helper Functions
 %%%===================================================================
 get_versioned_config(Version) ->
-    get_versioned_config(all, Version).
-get_versioned_config(all, _Version) ->
-    ?CONFIG;
-get_versioned_config(_RemoteCluster, Version) ->
-    case Version >= ?VERSION of
-        true ->
-            ?CONFIG;
-        false ->
-            ?CONFIG
-%%            downgrade_config(Config, Version)
-    end.
+    get_versioned_config(all_remotes, Version).
+get_versioned_config(all_remotes, Version) ->
+    maybe_downgrade_config(?CONFIG, Version);
+get_versioned_config(RemoteCluster, Version) ->
+    maybe_downgrade_config([lists:keyfind(RemoteCluster, 1, ?CONFIG)], Version).
+
+maybe_downgrade_config([false], _Version) -> [];
+maybe_downgrade_config([], _Version) -> [];
+maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} | Rest], Version) ->
+    DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
+    DowngradedBlockedRules = maybe_downgrade_rules(BlockedRules, Version, []),
+    DowngradeRest = maybe_downgrade_config(Rest, Version),
+    [{Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}] ++ DowngradeRest.
+
+maybe_downgrade_rules([], _Version, Downgraded) -> Downgraded;
+%%maybe_downgrade_rules
+
+%%should_object_be_filtered(_ConfigForRemote, _ObjectData = {_Bucket, _MetaData}) ->
+%%    true.
 
 %%%===================================================================
 %%% API
@@ -250,15 +268,6 @@ object_filtering_clear_config() ->
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, []),
     ok.
 
--define(ERROR_NO_FULES, {error, {no_rules, ?VERSION}}).
--define(ERROR_RULE_FORMAT(Rule), {error, {rule_format, ?VERSION, Rule}}).
--define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, ?VERSION}}).
--define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
--define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
-
-invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, ?VERSION, RemoteName, Rule}};
-invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?VERSION, RemoteName, Rule}}.
-
 
 check_filtering_rules([]) -> ?ERROR_NO_FULES();
 check_filtering_rules(FilteringRules) ->
@@ -271,7 +280,7 @@ check_filtering_rules(FilteringRules) ->
             ?ERROR_DUPLICATE_REMOTE_ENTRIES
     end.
 
-check_filtering_rules_helper([], complete, Outcome) -> Outcome;
+check_filtering_rules_helper(R, complete, Outcome) when length(R) == 1 -> Outcome;
 check_filtering_rules_helper(_, _NextCheck, {error, Error}) -> {error, Error};
 check_filtering_rules_helper(Rules = [_|Rest], NextCheck, ok) ->
     case NextCheck of
@@ -312,19 +321,19 @@ check_remote_name(Rules = [{RemoteName, _, _} | _RestOfRemotes], NextCheck) ->
             check_filtering_rules_helper(Rules, NextCheck, ?ERROR_INVALID_REMOTE_NAME(RemoteName))
     end.
 
-check_rules(RuleType, Rules = [{RemoteName, {allow, AllowedRules}, _} | _], NextCheck) ->
+check_rules(allowed, Rules = [{RemoteName, {allow, AllowedRules}, _} | _], NextCheck) ->
     case AllowedRules of
-        [[?WILDCARD]] ->
+        [?WILDCARD] ->
             check_filtering_rules_helper(Rules, NextCheck, ok);
         _ ->
-            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, AllowedRules))
+            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, allowed, AllowedRules))
     end;
-check_rules(RuleType, Rules = [{RemoteName, _, {block, BlockedRules}} | _], NextCheck) ->
+check_rules(blocked, Rules = [{RemoteName, _, {block, BlockedRules}} | _], NextCheck) ->
     case BlockedRules of
         [?WILDCARD] ->
             check_filtering_rules_helper(Rules, NextCheck, ok);
         _ ->
-            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, RuleType, BlockedRules))
+            check_filtering_rules_helper(Rules, NextCheck, check_rules_helper(RemoteName, blocked, BlockedRules))
     end.
 
 check_rules_helper(_RemoteName, _RuleType, []) ->
@@ -337,12 +346,14 @@ check_rules_helper(RemoteName, RuleType, [Rule | Rest]) ->
             ?ERROR_INVALID_RULE(RemoteName, RuleType, Rule)
     end.
 
-is_rule_supported(Rule) when is_list(Rule) -> is_multi_rule_supported(Rule);
+is_rule_supported(Rule) when (is_list(Rule) and (length(Rule) > 1)) -> is_multi_rule_supported(Rule);
 is_rule_supported(Rule) -> is_single_rule_supported(Rule).
 
 is_single_rule_supported({MatchType, MatchValue}) ->
-    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES) and ?SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue).
+    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES) and ?SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue);
+is_single_rule_supported(_) -> false.
 
+is_multi_rule_supported([]) -> true;
 is_multi_rule_supported([Rule|Rest]) ->
     is_single_rule_supported(Rule) and is_multi_rule_supported(Rest).
 

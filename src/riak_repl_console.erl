@@ -1185,18 +1185,25 @@ decode_response({print_config, {Version, Status, Config}}) ->
     io:format("Version: ~p ~n", [Version]),
     io:format("Status: ~p ~n",[Status]),
     print_config(Config);
-decode_response({error,{duplicate_rule, Version, N, MatchType, MatchValue}}) ->
-    io:format("[Object Filtering Version: ~p] Error: [Rule ~p] Duplicate rule found for: ~p, ~p ~n",
-    [Version, N, MatchType, MatchValue]);
-decode_response({error, {match_type, Version, N, MatchType, SupportedMatchTypes}}) ->
-    io:format("[Object Filtering Version: ~p] Error: [Rule ~p] Match Type: ~p not supported, only ~p are supported ~n",
-    [Version, N, MatchType, SupportedMatchTypes]);
-decode_response({error, {filter_type, Version, N, FilterType, SupportedFilterTypes}}) ->
-    io:format("[Object Filtering Version: ~p] Error: [Rule ~p] Filter Type: ~p not supported, only ~p are supported ~n",
-    [Version, N, FilterType, SupportedFilterTypes]);
-decode_response({error, {filter_value, Version, N, RemoteNodes, SupportedFilterValueTypes}}) ->
-    io:format("[Object Filtering Version: ~p] Error: [Rule ~p] Filter Value: ~p not supported, only ~p are supported ~n",
-        [Version, N, RemoteNodes, SupportedFilterValueTypes]);
+decode_response({error,{rule_format, Version, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
+    [Version, Rule]);
+decode_response({error,{duplicate_remote_entries, Version}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Duplicate remote entries found in config. ~n",
+        [Version]);
+decode_response({error,{invalid_remote_name, Version, RemoteName}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid remote name found, ~p ~n",
+        [Version, RemoteName]);
+decode_response({error,{invalid_rule_type_allowed, Version, RemoteName, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in allowed rules). ~n
+                Remote name: ~p ~n
+                Rule: ~p ~n",
+        [Version, RemoteName, Rule]);
+decode_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in blocked rules). ~n
+                Remote name: ~p ~n
+                Rule: ~p ~n",
+        [Version, RemoteName, Rule]);
 decode_response({error, {no_rules, Version}}) ->
     io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
 decode_response({error, Error}) ->

@@ -17,13 +17,10 @@
     print_config/0]).
 
 -export([
-    fullsync_config/3,
+    fullsync_config/4,
     get_realtime_config/1,
-    get_versioned_config/1,
-    get_versioned_config/2,
     get_config/0,
     get_config/1,
-    get_config/2,
     get_status/0,
     get_version/0,
     filter/2,
@@ -56,6 +53,7 @@
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 
 -define(DEFAULT_FILTERING_RULES, {{whitelist, []}, {blacklist, []}, {matched_rules, {0,0}}}).
+-define(DEFAULT_CONFIG(Remote), {Remote, {allow, []}, {block, []}}).
 
 -record(state, {}).
 
@@ -78,6 +76,8 @@ supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) ->
 supported_match_value_formats(1.0, not_metadata, _) ->
     false;
 supported_match_value_formats(0, _, _) ->
+    false;
+supported_match_value_formats(_, _, _) ->
     false.
 
 supported_keywords(1.0) ->
@@ -92,13 +92,13 @@ invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?
 %%%===================================================================
 %% returns the entire config for all clusters
 get_config() ->
-    get_versioned_config(?VERSION).
+    ?CONFIG.
 %% returns config only for the remote that is named in the argument
 get_config(RemoteName) ->
-    get_versioned_config(RemoteName, ?VERSION).
-%% returns config only for the remote named in the argument, at a particular version
-get_config(RemoteName, Version) ->
-    get_versioned_config(RemoteName, Version).
+    case lists:keyfind(RemoteName, 1, ?CONFIG) of
+        false -> ?DEFAULT_CONFIG(RemoteName);
+        Rconfig -> [Rconfig]
+    end.
 %% returns the status of our local cluster for object filtering
 get_status()->
     ?STATUS.
@@ -108,8 +108,14 @@ get_version() ->
 
 
 %% converts a remote clusters config to be a config that is used for our local cluster
-fullsync_config(_RemoteConfig, _AgreedVersion, append) -> ok;
-fullsync_config(_RemoteConfig, _AgreedVersion, use_only) -> ok.
+fullsync_config(RemoteName, RemoteConfig, AgreedVersion, append) ->
+    [{RemoteName, {allow, Allowed1}, {block, Blocked1}}] = get_config(RemoteName),
+    [{_MyClusterName, {allow, Allowed2}, {block, Blocked2}}] = maybe_downgrade_config(RemoteConfig, AgreedVersion),
+    [{Allowed1, Allowed2}, {Blocked1, Blocked2}];
+fullsync_config(_RemoteName, RemoteConfig, AgreedVersion, use_only) ->
+    [{_MyClusterName, {allow, Allowed2}, {block, Blocked2}}] = maybe_downgrade_config(RemoteConfig, AgreedVersion),
+    [{['*'], Allowed2}, {[], Blocked2}].
+
 
 % Returns true or false to say if we need to filter based on an object and remote name
 filter({fullsync, disabled, _Version, _Config, _RemoteName}, _Object) ->
@@ -132,12 +138,13 @@ filter(realtime, _RemoteName, _Meta) ->
 %%%===================================================================
 %%% API (Private) Helper Functions
 %%%===================================================================
-get_versioned_config(Version) ->
-    get_versioned_config(all_remotes, Version).
-get_versioned_config(all_remotes, Version) ->
-    maybe_downgrade_config(?CONFIG, Version);
 get_versioned_config(RemoteCluster, Version) ->
-    maybe_downgrade_config([lists:keyfind(RemoteCluster, 1, ?CONFIG)], Version).
+    case lists:keyfind(RemoteCluster, 1, ?CONFIG) of
+        false ->
+            ?DEFAULT_CONFIG(RemoteCluster);
+        Rconfig ->
+            maybe_downgrade_config(Rconfig, Version)
+    end.
 
 maybe_downgrade_config([false], _Version) -> [];
 maybe_downgrade_config([], _Version) -> [];
@@ -148,7 +155,35 @@ maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} |
     [{Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}] ++ DowngradeRest.
 
 maybe_downgrade_rules([], _Version, Downgraded) -> Downgraded;
-%%maybe_downgrade_rules
+maybe_downgrade_rules([Rule| Rules], Version, Downgraded) ->
+    case maybe_downgrade_rule(Rule, Version) of
+        removed ->
+            maybe_downgrade_rules(Rules, Version, Downgraded);
+        R ->
+            maybe_downgrade_rules(Rules, Version, Downgraded++[R])
+    end.
+
+maybe_downgrade_rule(Rule, Version) when is_list(Rule) ->
+    case maybe_downgrade_multi_rule(Rule, Version) of
+        true -> Rule;
+        false -> removed
+    end;
+maybe_downgrade_rule(Rule, Version) ->
+    case maybe_downgrade_single_rule(Rule, Version) of
+        true -> Rule;
+        false -> removed
+    end.
+
+maybe_downgrade_multi_rule([], _Version) -> true;
+maybe_downgrade_multi_rule([Rule | Rest], Version)->
+    maybe_downgrade_single_rule(Rule, Version) and maybe_downgrade_multi_rule(Rest, Version).
+maybe_downgrade_single_rule(Rule, Version) ->
+    case Rule of
+        ?WILDCARD -> true;
+        {MatchType, MatchValue} -> supported_match_value_formats(Version, MatchType, MatchValue)
+    end.
+
+
 
 %%should_object_be_filtered(_ConfigForRemote, _ObjectData = {_Bucket, _MetaData}) ->
 %%    true.

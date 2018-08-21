@@ -436,7 +436,7 @@ maybe_get_object_filtering_configurations(OurCaps, TheirCaps) ->
             _ ->
                 {enabled, V, riak_repl2_object_filter:fullsync_config(RemoteConfig, V, use_only)}
         end
-                     end,
+        end,
 
     case {OurObjectFiltering, TheirObjectFiltering} of
         {{enabled, OurVersion, _}, {enabled, TheirVersion, TheirConfig}} ->

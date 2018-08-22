@@ -19,7 +19,7 @@
 -export([
     get_maybe_downgraded_fullsync_config/2,
     get_maybe_downgraded_fullsync_config/3,
-    get_realtime_config/1,
+    get_realtime_blacklist/1,
     get_config/0,
     get_config/1,
     get_status/0,
@@ -128,7 +128,7 @@ filter({fullsync, enabled, _Version, _Config}, Object) ->
 
 
 %% returns a list of allowed and blocked remotes
-get_realtime_config(_Object) ->
+get_realtime_blacklist(_Object) ->
     ok.
 %% reutrns true or false to say if you can send an object to a remote name
 filter(realtime, _RemoteName, _Meta) ->

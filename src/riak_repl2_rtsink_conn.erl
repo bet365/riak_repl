@@ -313,16 +313,16 @@ maybe_push(Binary, Meta, ObjectFilteringRules) ->
           lager:debug("app env either set to always, or in default; doing cascade"),
           List = riak_repl_util:from_wire(Binary),
           Meta2 = orddict:erase(skip_count, Meta),
-          Meta3 = add_object_filtering_rules_to_meta(Meta2, ObjectFilteringRules),
+          Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
           riak_repl2_rtq:push(length(List), Binary, Meta3)
     end.
 
-add_object_filtering_rules_to_meta(Meta, []) ->
+add_object_filtering_blacklist_to_meta(Meta, []) ->
     lager:error("object filtering rules failed to return the default"),
     Meta;
-add_object_filtering_rules_to_meta(Meta, [Rules]) ->
-    orddict:store(?BT_OBJECT_FILTERING_RULES, Rules, Meta);
-add_object_filtering_rules_to_meta(Meta, [_Rules | _Rest]) ->
+add_object_filtering_blacklist_to_meta(Meta, [Rules]) ->
+    orddict:store(?BT_META_BLACKLIST, Rules, Meta);
+add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
     lager:error("object filtering, repl binary has more than one object!"),
     Meta.
 

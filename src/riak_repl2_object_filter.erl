@@ -54,7 +54,7 @@
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 
 -define(DEFAULT_FILTERING_RULES, {{whitelist, []}, {blacklist, []}, {matched_rules, {0,0}}}).
--define(DEFAULT_CONFIG(Remote), {Remote, {allow, []}, {block, []}}).
+-define(DEFAULT_CONFIG(Remote), {Remote, {allow, ['*']}, {block, []}}).
 
 -record(state, {}).
 
@@ -98,7 +98,7 @@ get_config() ->
 get_config(RemoteName) ->
     case lists:keyfind(RemoteName, 1, ?CONFIG) of
         false -> ?DEFAULT_CONFIG(RemoteName);
-        Rconfig -> [Rconfig]
+        Rconfig -> Rconfig
     end.
 
 get_maybe_downgraded_fullsync_config(Config, Version, RemoteName) ->
@@ -121,10 +121,13 @@ filter({fullsync, disabled, _Version, _Config}, _Object) ->
     false;
 filter({fullsync, enabled, 0, _Config}, _Object) ->
     false;
-filter({fullsync, enabled, _Version, _Config}, Object) ->
-    _Bucket = riak_object:bucket(Object),
-    _Metadatas = riak_object:get_metadatas(Object),
-    false.
+filter({fullsync, enabled, _Version, Config}, Object) ->
+    Bucket = riak_object:bucket(Object),
+    Metadatas = riak_object:get_metadatas(Object),
+    R = filter_object_single_remote(Config, {Bucket, Metadatas}),
+    lager:error("Object: ~p ~n
+                 Result ~p", [Object, R]),
+    R.
 
 
 %% returns a list of allowed and blocked remotes
@@ -137,12 +140,69 @@ filter(realtime, _RemoteName, _Meta) ->
 %%%===================================================================
 %%% API (Private) Helper Functions
 %%%===================================================================
-maybe_downgrade_config([], _Version) -> [];
-maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} | Rest], Version) ->
+
+filter_object_single_remote({_RemoteName, {allow, Allowed}, {block, Blocked}}, ObjectData={_Bucket, _MetaDatas}) ->
+    case rule_check(Blocked, ObjectData) of
+        true -> true;
+        false -> not rule_check(Allowed, ObjectData)
+    end.
+
+rule_check([], _) -> false;
+rule_check([MultiRule| Rest], ObjectData) when is_list(MultiRule) ->
+    case rule_check(MultiRule, ObjectData) of
+        true -> true;
+        false -> rule_check(Rest, ObjectData)
+    end;
+rule_check([Rule| Rest], ObjectData={MatchBucket, MatchMetaDatas}) ->
+     case Rule of
+         '*' ->
+             true;
+         {bucket, MatchBucket} ->
+             true;
+         {bucket, _} ->
+             rule_check(Rest, ObjectData);
+         {not_bucket, MatchBucket} ->
+             rule_check(Rest, ObjectData);
+         {not_bucket, _} ->
+             true;
+         {metadata, {K, V}} ->
+             case check_metadatas(K, V, MatchMetaDatas) of
+                 true -> true;
+                 false -> rule_check(Rest, ObjectData)
+             end;
+         {not_metadata, {K, V}} ->
+             case check_metadatas(K, V, MatchMetaDatas) of
+                 true -> rule_check(Rest, ObjectData);
+                 false -> true
+             end
+     end.
+
+check_metadatas(_, _, []) -> false;
+check_metadatas(Key, Value, [Metadata| Rest]) ->
+    case check_metadata(Key, Value, Metadata) of
+        true -> true;
+        false -> check_metadatas(Key, Value, Rest)
+    end.
+
+check_metadata(Key, Value, Metadata) ->
+    case dict:find(Key, Metadata) of
+        {ok, Value} -> true;
+        {ok, _} -> false;
+        error -> false
+    end.
+
+%%%===================================================================
+%%maybe_downgrade_config([], _Version) -> [];
+%%maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} | Rest], Version) ->
+%%    DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
+%%    DowngradedBlockedRules = maybe_downgrade_rules(BlockedRules, Version, []),
+%%    DowngradeRest = maybe_downgrade_config(Rest, Version),
+%%    [{Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}] ++ DowngradeRest.
+
+maybe_downgrade_config({Remote, {allow, AllowedRules}, {block, BlockedRules}}, Version) ->
     DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
     DowngradedBlockedRules = maybe_downgrade_rules(BlockedRules, Version, []),
-    DowngradeRest = maybe_downgrade_config(Rest, Version),
-    [{Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}] ++ DowngradeRest.
+    {Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}.
 
 maybe_downgrade_rules([], _Version, Downgraded) -> Downgraded;
 maybe_downgrade_rules([Rule| Rules], Version, Downgraded) ->
@@ -172,6 +232,7 @@ maybe_downgrade_single_rule(Rule, Version) ->
         ?WILDCARD -> true;
         {MatchType, MatchValue} -> supported_match_value_formats(Version, MatchType, MatchValue)
     end.
+%%%===================================================================
 
 %%%===================================================================
 %%% API

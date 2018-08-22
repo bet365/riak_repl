@@ -17,7 +17,8 @@
     print_config/0]).
 
 -export([
-    fullsync_config/4,
+    get_maybe_downgraded_fullsync_config/2,
+    get_maybe_downgraded_fullsync_config/3,
     get_realtime_config/1,
     get_config/0,
     get_config/1,
@@ -99,6 +100,14 @@ get_config(RemoteName) ->
         false -> ?DEFAULT_CONFIG(RemoteName);
         Rconfig -> [Rconfig]
     end.
+
+get_maybe_downgraded_fullsync_config(Config, Version, RemoteName) ->
+    {_, A, B} = Config,
+    maybe_downgrade_config({RemoteName, A, B}, Version).
+get_maybe_downgraded_fullsync_config(Config, Version) ->
+    maybe_downgrade_config(Config, Version).
+
+
 %% returns the status of our local cluster for object filtering
 get_status()->
     ?STATUS.
@@ -107,22 +116,12 @@ get_version() ->
     ?VERSION.
 
 
-%% converts a remote clusters config to be a config that is used for our local cluster
-fullsync_config(RemoteName, RemoteConfig, AgreedVersion, append) ->
-    [{RemoteName, {allow, Allowed1}, {block, Blocked1}}] = get_config(RemoteName),
-    [{_MyClusterName, {allow, Allowed2}, {block, Blocked2}}] = maybe_downgrade_config(RemoteConfig, AgreedVersion),
-    [{Allowed1, Allowed2}, {Blocked1, Blocked2}];
-fullsync_config(_RemoteName, RemoteConfig, AgreedVersion, use_only) ->
-    [{_MyClusterName, {allow, Allowed2}, {block, Blocked2}}] = maybe_downgrade_config(RemoteConfig, AgreedVersion),
-    [{['*'], Allowed2}, {[], Blocked2}].
-
-
 % Returns true or false to say if we need to filter based on an object and remote name
-filter({fullsync, disabled, _Version, _Config, _RemoteName}, _Object) ->
+filter({fullsync, disabled, _Version, _Config}, _Object) ->
     false;
-filter({fullsync, enabled, 0, _Config, _RemoteName}, _Object) ->
+filter({fullsync, enabled, 0, _Config}, _Object) ->
     false;
-filter({fullsync, enabled, _Version, _Config, _RemoteName}, Object) ->
+filter({fullsync, enabled, _Version, _Config}, Object) ->
     _Bucket = riak_object:bucket(Object),
     _Metadatas = riak_object:get_metadatas(Object),
     false.
@@ -138,15 +137,6 @@ filter(realtime, _RemoteName, _Meta) ->
 %%%===================================================================
 %%% API (Private) Helper Functions
 %%%===================================================================
-get_versioned_config(RemoteCluster, Version) ->
-    case lists:keyfind(RemoteCluster, 1, ?CONFIG) of
-        false ->
-            ?DEFAULT_CONFIG(RemoteCluster);
-        Rconfig ->
-            maybe_downgrade_config(Rconfig, Version)
-    end.
-
-maybe_downgrade_config([false], _Version) -> [];
 maybe_downgrade_config([], _Version) -> [];
 maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} | Rest], Version) ->
     DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
@@ -182,11 +172,6 @@ maybe_downgrade_single_rule(Rule, Version) ->
         ?WILDCARD -> true;
         {MatchType, MatchValue} -> supported_match_value_formats(Version, MatchType, MatchValue)
     end.
-
-
-
-%%should_object_be_filtered(_ConfigForRemote, _ObjectData = {_Bucket, _MetaData}) ->
-%%    true.
 
 %%%===================================================================
 %%% API

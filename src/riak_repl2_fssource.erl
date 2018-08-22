@@ -127,7 +127,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
     {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
         maybe_get_object_filtering_configurations(OurCaps, TheirCaps),
-    FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig, Cluster},
+    FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
 
 
 
@@ -428,24 +428,19 @@ maybe_get_object_filtering_configurations(OurCaps, TheirCaps) ->
     OurObjectFiltering = proplists:get_value(object_filtering, OurCaps, not_supported),
     TheirObjectFiltering = proplists:get_value(object_filtering, TheirCaps, not_supported),
 
-    AgreeConfigFun = fun(V1, V2, OurStatus, RemoteConfig) ->
+    AgreeConfigFun = fun(V1, V2, Config) ->
         V = lists:min([V1, V2]),
-        case OurStatus of
-            enabled ->
-                {enabled, V, riak_repl2_object_filter:fullsync_config(RemoteConfig, V, append)};
-            _ ->
-                {enabled, V, riak_repl2_object_filter:fullsync_config(RemoteConfig, V, use_only)}
-        end
+        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_fullsync_config(Config, V)}
         end,
 
     case {OurObjectFiltering, TheirObjectFiltering} of
-        {{enabled, OurVersion, _}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, enabled, TheirConfig);
+        {{enabled, OurVersion, Config}, {enabled, TheirVersion}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, Config);
 
-        {{disabled, OurVersion, _}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, disabled, TheirConfig);
+        {{disabled, OurVersion, Config}, {enabled, TheirVersion}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, Config);
 
-        {{enabled, OurVersion, _}, {disabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, enabled, TheirConfig);
+        {{enabled, OurVersion, Config}, {disabled, TheirVersion}} ->
+            AgreeConfigFun(OurVersion, TheirVersion, Config);
         _ -> Default
     end.

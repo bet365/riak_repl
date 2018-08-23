@@ -28,6 +28,10 @@
     filter/3
 ]).
 
+-export([
+    filter_object_rule_test/2
+]).
+
 %% gen_server callbacks
 -export([init/1,
     handle_call/3,
@@ -91,6 +95,11 @@ invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?
 %%%===================================================================
 %%% API (Function Callbacks)
 %%%===================================================================
+
+%% returns true/false for a rule and an object
+filter_object_rule_test(Rule, Object) ->
+    filter_object_rule_check(Rule, get_object_data(Object)).
+
 %% returns the entire config for all clusters
 get_config() ->
     ?CONFIG.
@@ -122,12 +131,7 @@ filter({fullsync, disabled, _Version, _Config}, _Object) ->
 filter({fullsync, enabled, 0, _Config}, _Object) ->
     false;
 filter({fullsync, enabled, _Version, Config}, Object) ->
-    Bucket = riak_object:bucket(Object),
-    Metadatas = riak_object:get_metadatas(Object),
-    R = filter_object_single_remote(Config, {Bucket, Metadatas}),
-    lager:error("Object: ~p ~n
-                 Result ~p", [Object, R]),
-    R.
+    filter_object_single_remote(Config, get_object_data(Object)).
 
 
 %% returns a list of allowed and blocked remotes
@@ -141,50 +145,67 @@ filter(realtime, _RemoteName, _Meta) ->
 %%% API (Private) Helper Functions
 %%%===================================================================
 
-filter_object_single_remote({_RemoteName, {allow, Allowed}, {block, Blocked}}, ObjectData={_Bucket, _MetaDatas}) ->
-    case rule_check(Blocked, ObjectData) of
+get_object_data(Object) ->
+    Bucket = riak_object:bucket(Object),
+    Metadatas = riak_object:get_metadatas(Object),
+    {Bucket, Metadatas}.
+get_object_bucket({Bucket, _})-> Bucket.
+get_object_metadatas({_, MetaDatas}) -> MetaDatas.
+
+filter_object_single_remote({_RemoteName, {allow, Allowed}, {block, Blocked}}, ObjectData) ->
+    case filter_object_rule_check(Blocked, ObjectData) of
         true -> true;
-        false -> not rule_check(Allowed, ObjectData)
+        false -> not filter_object_rule_check(Allowed, ObjectData)
     end.
 
-rule_check([], _) -> false;
-rule_check([MultiRule| Rest], ObjectData) when is_list(MultiRule) ->
-    case rule_check(MultiRule, ObjectData) of
+%% decision on whether or not the object data matches any of the rules
+filter_object_rule_check([], _) -> false;
+filter_object_rule_check([MultiRule| Rest], ObjectData) when is_list(MultiRule) ->
+    case filter_object_check_multi_rule(MultiRule, ObjectData) of
         true -> true;
-        false -> rule_check(Rest, ObjectData)
+        false -> filter_object_rule_check(Rest, ObjectData)
     end;
-rule_check([Rule| Rest], ObjectData={MatchBucket, MatchMetaDatas}) ->
-     case Rule of
-         '*' ->
-             true;
-         {bucket, MatchBucket} ->
-             true;
-         {bucket, _} ->
-             rule_check(Rest, ObjectData);
-         {not_bucket, MatchBucket} ->
-             rule_check(Rest, ObjectData);
-         {not_bucket, _} ->
-             true;
-         {metadata, {K, V}} ->
-             case check_metadatas(K, V, MatchMetaDatas) of
-                 true -> true;
-                 false -> rule_check(Rest, ObjectData)
-             end;
-         {not_metadata, {K, V}} ->
-             case check_metadatas(K, V, MatchMetaDatas) of
-                 true -> rule_check(Rest, ObjectData);
-                 false -> true
-             end
-     end.
-
-check_metadatas(_, _, []) -> false;
-check_metadatas(Key, Value, [Metadata| Rest]) ->
-    case check_metadata(Key, Value, Metadata) of
+filter_object_rule_check([Rule| Rest], ObjectData) ->
+    case filter_object_check_single_rule(Rule, ObjectData) of
         true -> true;
-        false -> check_metadatas(Key, Value, Rest)
+        false -> filter_object_rule_check(Rest, ObjectData)
     end.
 
-check_metadata(Key, Value, Metadata) ->
+filter_object_check_multi_rule([], _) -> true;
+filter_object_check_multi_rule([Rule | Rest], ObjectData) ->
+    case filter_object_check_single_rule(Rule, ObjectData) of
+        true -> filter_object_check_multi_rule(Rest, ObjectData);
+        false -> false
+    end.
+
+filter_object_check_single_rule(Rule, ObjectData) ->
+    MatchBucket = get_object_bucket(ObjectData),
+    MatchMetaDatas = get_object_metadatas(ObjectData),
+    case Rule of
+        '*' ->                          true;
+        {bucket, MatchBucket} ->        true;
+        {bucket, all} ->                true;
+        {bucket, _} ->                  false;
+        {not_bucket, MatchBucket} ->    false;
+        {not_bucket, all} ->            false;
+        {not_bucket, _} ->              true;
+        {metadata, {K, V}} ->           filter_object_check_metadatas(K, V, MatchMetaDatas);
+        {not_metadata, {K, V}} ->       not filter_object_check_metadatas(K, V, MatchMetaDatas)
+    end.
+
+filter_object_check_metadatas(_, _, []) -> false;
+filter_object_check_metadatas(Key, Value, [Metadata| Rest]) ->
+    case filter_object_check_metadata(Key, Value, Metadata) of
+        true -> true;
+        false -> filter_object_check_metadatas(Key, Value, Rest)
+    end.
+
+filter_object_check_metadata(Key, all, Metadata) ->
+    case dict:find(Key, Metadata) of
+        {ok, _} -> true;
+        error -> false
+    end;
+filter_object_check_metadata(Key, Value, Metadata) ->
     case dict:find(Key, Metadata) of
         {ok, Value} -> true;
         {ok, _} -> false;
@@ -448,26 +469,330 @@ is_multi_rule_supported([Rule|Rest]) ->
 %% ===================================================================
 -ifdef(TEST).
 
-object_filter_test() ->
-    {spawn,
-        [setup,
-            fun setup/0,
-            [
-                fun fullsync_filter_test/0,
-                fun fullsync_config_for_remote_cluster_test/0
-            ]
-        ]
+object_filter_test_() ->
+    {setup,
+     fun setup/0,
+     [
+         {"Single Rules", fun test_object_filter_single_rules/0},
+         {"Multi Rules (bucket, metadata)", fun test_object_filter_multi_rules_bucket_metadata/0 },
+         {"Multi Rules (bucket, not_metadata)", fun test_object_filter_multi_rules_bucket_not_metadata/0 },
+         {"Multi Rules (not_bucket, metadata)", fun test_object_filter_multi_rules_not_bucket_metadata/0 },
+         {"Multi Rules (not_bucket, not_metadata)", fun test_object_filter_multi_rules_not_bucket_not_metadata/0 }
+     ]
     }.
 
 setup() ->
     riak_repl_test_util:start_test_ring(),
     riak_repl_test_util:start_lager().
 
-fullsync_filter_test() ->
+%% ===================================================================
+test_object_filter_single_rules() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    O = riak_object:new(B,K,V,M),
+    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,14)],
     pass.
 
-fullsync_config_for_remote_cluster_test() ->
+test_object_filter_single_rules(1, Obj)->
+    Actual = filter_object_rule_test([], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(2, Obj)->
+    Actual = filter_object_rule_test(['*'], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(3, Obj)->
+    Actual = filter_object_rule_test([{bucket, <<"bucket">>}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(4, Obj)->
+    Actual = filter_object_rule_test([{bucket, <<"any other bucket">>}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(5, Obj)->
+    Actual = filter_object_rule_test([{bucket, all}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(6, Obj)->
+    Actual = filter_object_rule_test([{not_bucket, <<"bucket">>}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(7, Obj)->
+    Actual = filter_object_rule_test([{not_bucket, <<"any other bucket">>}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(8, Obj)->
+    Actual = filter_object_rule_test([{not_bucket, all}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(9, Obj)->
+    Actual = filter_object_rule_test([{metadata, {filter, 1}}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(10, Obj)->
+    Actual = filter_object_rule_test([{metadata, {filter, 2}}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(11, Obj)->
+    Actual = filter_object_rule_test([{metadata, {filter, all}}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(12, Obj)->
+    Actual = filter_object_rule_test([{not_metadata, {filter, 1}}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(13, Obj)->
+    Actual = filter_object_rule_test([{not_metadata, {filter, 2}}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(14, Obj)->
+    Actual = filter_object_rule_test([{not_metadata, {filter, all}}], Obj),
+    ?assertEqual(false, Actual).
+%% ===================================================================
+
+%% ===================================================================
+test_object_filter_multi_rules_bucket_metadata() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    O = riak_object:new(B,K,V,M),
+    [test_object_filter_multi_rules_bucket_metadata(N, O) || N <- lists:seq(1,18)],
     pass.
+
+test_object_filter_multi_rules_bucket_metadata(1, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_metadata(2, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(3, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_metadata(4, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(5, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(6, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(7, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_metadata(8, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(9, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(true, Actual);
+
+test_object_filter_multi_rules_bucket_metadata(10, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(11, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(12, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(13, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(14, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(15, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(16, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(17, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_metadata(18, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual).
+%% ===================================================================
+
+%% ===================================================================
+test_object_filter_multi_rules_bucket_not_metadata() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    O = riak_object:new(B,K,V,M),
+    [test_object_filter_multi_rules_bucket_not_metadata(N, O) || N <- lists:seq(1,18)],
+    pass.
+
+test_object_filter_multi_rules_bucket_not_metadata(1, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(2, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(3, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(4, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(5, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(6, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(7, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(8, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(9, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+
+test_object_filter_multi_rules_bucket_not_metadata(10, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(11, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(12, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(13, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(14, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(15, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(16, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(17, Obj)->
+    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_bucket_not_metadata(18, Obj)->
+    Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(true, Actual).
+%% ===================================================================
+
+%% ===================================================================
+test_object_filter_multi_rules_not_bucket_metadata() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    O = riak_object:new(B,K,V,M),
+    [test_object_filter_multi_rules_not_bucket_metadata(N, O) || N <- lists:seq(1,18)],
+    pass.
+
+test_object_filter_multi_rules_not_bucket_metadata(1, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(2, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(3, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(4, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(5, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(6, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(7, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(8, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(9, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+
+test_object_filter_multi_rules_not_bucket_metadata(10, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(11, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(12, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(13, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(14, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(15, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(16, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(17, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_metadata(18, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual).
+%% ===================================================================
+
+%% ===================================================================
+test_object_filter_multi_rules_not_bucket_not_metadata() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    O = riak_object:new(B,K,V,M),
+    [test_object_filter_multi_rules_not_bucket_not_metadata(N, O) || N <- lists:seq(1,18)],
+    pass.
+
+test_object_filter_multi_rules_not_bucket_not_metadata(1, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(2, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(3, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {filter, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(4, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(5, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(6, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {filter, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(7, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(8, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(9, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {filter, all}}]], Obj),
+    ?assertEqual(false, Actual);
+
+test_object_filter_multi_rules_not_bucket_not_metadata(10, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(11, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(12, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {other, 1}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(13, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(14, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(15, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {other, 2}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(16, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"bucket">>}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(17, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, <<"anything">>}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_multi_rules_not_bucket_not_metadata(18, Obj)->
+    Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {other, all}}]], Obj),
+    ?assertEqual(false, Actual).
+%% ===================================================================
+
+
 
 
 

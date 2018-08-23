@@ -135,11 +135,22 @@ filter({fullsync, enabled, _Version, Config}, Object) ->
 
 
 %% returns a list of allowed and blocked remotes
-get_realtime_blacklist(_Object) ->
-    ok.
+get_realtime_blacklist(Object) ->
+    F = fun({Remote, Allowed, Blocked}, Object) ->
+        Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Object)),
+        {Remote, Filter}
+        end,
+    AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- ?CONFIG],
+    [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == false].
+
 %% reutrns true or false to say if you can send an object to a remote name
-filter(realtime, _RemoteName, _Meta) ->
-    false.
+filter(realtime, RemoteName, Meta) ->
+    case orddict:find(?BT_META_BLACKLIST, Meta) of
+        {ok, Blacklist} ->
+            lists:member(RemoteName, Blacklist);
+        _ ->
+            false
+    end.
 
 %%%===================================================================
 %%% API (Private) Helper Functions

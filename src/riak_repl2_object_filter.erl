@@ -136,8 +136,8 @@ filter({fullsync, enabled, _Version, Config}, Object) ->
 
 %% returns a list of allowed and blocked remotes
 get_realtime_blacklist(Object) ->
-    F = fun({Remote, Allowed, Blocked}, Object) ->
-        Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Object)),
+    F = fun({Remote, Allowed, Blocked}, Obj) ->
+        Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),
         {Remote, Filter}
         end,
     AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- ?CONFIG],

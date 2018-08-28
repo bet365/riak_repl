@@ -203,7 +203,7 @@ evaluate_multi_rule_results(Results) ->
     case {A, B, C, D} of
         {true, true, _, _} -> C;
         {true, false, _, _} -> D;
-        {false, true, _,_} -> D;
+        {false, true, _, _} -> D;
         {false, false, _, _} -> not C
     end.
 

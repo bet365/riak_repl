@@ -170,9 +170,8 @@ do_binputs_internal(BinObjs, DoneFun, Pool, Ver) ->
     %% we can drop rtsink and have it resent
     Objects = riak_repl_util:from_wire(Ver, BinObjs),
     CompletePut = fun(Obj) ->
-                    ObjectFilteringRules = riak_repl2_object_filter:get_filter_rules(Obj),
                     riak_repl_util:do_repl_put(Obj),
-                    ObjectFilteringRules
+                    riak_repl2_object_filter:get_realtime_blacklist(Obj)
                   end,
 
     Rules = [CompletePut(Obj) || Obj <- Objects],

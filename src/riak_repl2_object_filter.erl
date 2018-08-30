@@ -57,7 +57,6 @@
 -define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 
--define(DEFAULT_FILTERING_RULES, {{whitelist, []}, {blacklist, []}, {matched_rules, {0,0}}}).
 -define(DEFAULT_CONFIG(Remote), {Remote, {allow, ['*']}, {block, []}}).
 
 -record(state, {}).
@@ -135,6 +134,7 @@ filter({fullsync, enabled, _Version, Config}, Object) ->
 
 
 %% returns a list of allowed and blocked remotes
+%% TODO: check version and status before returining the blacklist!
 get_realtime_blacklist(Object) ->
     F = fun({Remote, Allowed, Blocked}, Obj) ->
         Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),

@@ -134,20 +134,25 @@ filter({fullsync, enabled, _Version, Config}, Object) ->
 
 
 %% returns a list of allowed and blocked remotes
-%% TODO: check version and status before returining the blacklist!
 get_realtime_blacklist(Object) ->
     F = fun({Remote, Allowed, Blocked}, Obj) ->
         Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),
         {Remote, Filter}
         end,
-    AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- ?CONFIG],
-    [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == false].
+    DowngradedConfig = maybe_downgrade_config_list(?CONFIG, ?VERSION),
+    AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- DowngradedConfig],
+    [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == true].
 
 %% reutrns true or false to say if you can send an object to a remote name
 filter(realtime, RemoteName, Meta) ->
-    case orddict:find(?BT_META_BLACKLIST, Meta) of
-        {ok, Blacklist} ->
-            lists:member(RemoteName, Blacklist);
+    case ?STATUS of
+        enabled ->
+            case orddict:find(?BT_META_BLACKLIST, Meta) of
+                {ok, Blacklist} ->
+                    lists:member(RemoteName, Blacklist);
+                _ ->
+                    false
+            end;
         _ ->
             false
     end.
@@ -242,12 +247,11 @@ filter_object_check_metadata(Key, Value, Metadata) ->
     end.
 
 %%%===================================================================
-%%maybe_downgrade_config([], _Version) -> [];
-%%maybe_downgrade_config([{Remote, {allow, AllowedRules}, {block, BlockedRules}} | Rest], Version) ->
-%%    DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
-%%    DowngradedBlockedRules = maybe_downgrade_rules(BlockedRules, Version, []),
-%%    DowngradeRest = maybe_downgrade_config(Rest, Version),
-%%    [{Remote, {allow, DowngradedAllowedRules}, {block, DowngradedBlockedRules}}] ++ DowngradeRest.
+maybe_downgrade_config_list([], _Version) -> [];
+maybe_downgrade_config_list([RemoteConfig | Rest], Version) ->
+    DowngradedRemoteConfig = maybe_downgrade_config(RemoteConfig, Version),
+    DowngradeRest = maybe_downgrade_config_list(Rest, Version),
+    [DowngradedRemoteConfig] ++ DowngradeRest.
 
 maybe_downgrade_config({Remote, {allow, AllowedRules}, {block, BlockedRules}}, Version) ->
     DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),

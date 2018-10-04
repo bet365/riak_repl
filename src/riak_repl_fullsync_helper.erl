@@ -71,7 +71,7 @@ make_keylist(Pid, Partition, Filename, FilterEnabled, FilterConfig) ->
 diff(Pid, Partition, TheirFn, OurFn) ->
     riak_core_gen_server:call(Pid, {diff, Partition, TheirFn, OurFn, -1, true}, ?LONG_TIMEOUT).
 
-diff_stream(Pid, Partition, OurFn, TheirFn, Count) ->
+diff_stream(Pid, Partition, TheirFn, OurFn, Count) ->
     riak_core_gen_server:call(Pid, {diff, Partition, TheirFn, OurFn, Count, false}, ?LONG_TIMEOUT).
 
 %% ====================================================================
@@ -342,25 +342,19 @@ diff_keys({{Key, _}, RNext}, {{Key, _}, LNext}, DiffState) ->
     %% Both keys match, but hashes do not
     diff_keys(RNext(), LNext(), diff_hash(Key, DiffState));
 diff_keys({{RKey, _RHash}, RNext}, {{LKey, _LHash}, _LNext} = L, DiffState)
-    when RKey < LKey ->
-    %% Local list is ahead of remote list
-    %% Remote has data that local does not have
-    %% Local must have deleted the key
-    %% move Remote onwards
-    diff_keys(RNext(), L, DiffState);
+  when RKey < LKey ->
+    diff_keys(RNext(), L, missing_key(RKey, DiffState));
 diff_keys({{RKey, _RHash}, _RNext} = R, {{LKey, _LHash}, LNext}, DiffState)
-    when RKey > LKey ->
+  when RKey > LKey ->
     %% Remote is ahead of local list
-    %% Remote does not have data that local has!
-    %% Send Remote the data
-    diff_keys(R, LNext(), missing_key(LKey, DiffState));
-diff_keys(eof, {{LKey, _LHash}, LNext}, DiffState) ->
-    %% End of remote stream;
-    %% But not the end of the local stream, continue processing local objects, as these are not on the remote!!
-    diff_keys(eof, LNext(), missing_key(LKey, DiffState));
-diff_keys(_, eof, DiffState) ->
-    %% End of local stream
-    %% Done
+    %% TODO: This may represent a deleted key...
+    diff_keys(R, LNext(), DiffState);
+diff_keys({{RKey, _RHash}, RNext}, eof, DiffState) ->
+    %% End of local stream; all keys from remote should be processed
+    diff_keys(RNext(), eof, missing_key(RKey, DiffState));
+diff_keys(eof, _, DiffState) ->
+    %% End of remote stream; all remaining keys are local to this side or
+    %% deleted ops
     DiffState.
 
 %% Called when the hashes differ with the packed bkey

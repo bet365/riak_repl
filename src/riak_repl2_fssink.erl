@@ -163,15 +163,17 @@ handle_info(init_ack, State=#state{socket=Socket,
     {_Proto,{CommonMajor,_CMinor},{CommonMajor,_HMinor}} = Proto,
 
     %% possibly exchange fullsync capabilities with the remote
-    OurCaps = decide_our_caps(CommonMajor, Cluster),
+    OurCaps = decide_our_caps(CommonMajor),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
+
     {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
-        maybe_get_object_filtering_configurations(OurCaps, TheirCaps, Cluster),
+        maybe_get_object_filtering_configurations(TheirCaps, Cluster),
+
+
+
+
     FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
-
-
-
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%
@@ -249,13 +251,8 @@ decide_our_caps(RequestedStrategy) ->
             {true, keylist} -> keylist;
             {true, _UnSupportedStrategy} -> RequestedStrategy
         end,
-    [{strategy, SupportedStrategy}].
-decide_our_caps(RequestedStrategy, _Cluster) ->
-    Strategy = decide_our_caps(RequestedStrategy),
-    OFStatus = riak_repl2_object_filter:get_status(),
-    OFVersion = riak_repl2_object_filter:get_version(),
-    ObjectFiltering = {object_filtering, {OFStatus, OFVersion}},
-    Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
+    [{strategy, SupportedStrategy}, {bucket_filtering, riak_repl_util:bucket_filtering_enabled()}].
+
 
 %% Depending on the protocol version number, send our capabilities
 %% as a list of properties, in binary.
@@ -304,24 +301,17 @@ maybe_exchange_filtered_buckets(true, ClusterName, Socket, Transport) ->
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-maybe_get_object_filtering_configurations(OurCaps, TheirCaps, ClusterName) ->
+maybe_get_object_filtering_configurations(TheirCaps, ClusterName) ->
     Default = {disabled, 0, []},
-    OurObjectFiltering = proplists:get_value(object_filtering, OurCaps, not_supported),
     TheirObjectFiltering = proplists:get_value(object_filtering, TheirCaps, not_supported),
-
-    AgreeConfigFun = fun(V1, V2, RemoteConfig) ->
-        V = lists:min([V1, V2]),
-        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(RemoteConfig, V, ClusterName)}
-        end,
-
-    case {OurObjectFiltering, TheirObjectFiltering} of
-        {{enabled, OurVersion}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, TheirConfig);
-
-        {{disabled, OurVersion}, {enabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, TheirConfig);
-
-        {{enabled, OurVersion}, {disabled, TheirVersion, TheirConfig}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, TheirConfig);
+    OurVersion = riak_repl2_object_filter:get_version(),
+    case TheirObjectFiltering of
+        {enabled, TheirVersion, TheirConfig} ->
+            case TheirVersion == OurVersion of
+                true ->
+                    {_, A, B} = Config
+                    {enabled, TheirVersion}
+            end,
+            {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(TheirConfig, V, ClusterName)};
         _ -> Default
     end.

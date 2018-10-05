@@ -122,15 +122,16 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     %% Strategy still depends on what the sink is capable of.
     {_Proto,{CommonMajor,_CMinor},{CommonMajor,_HMinor}} = Proto,
 
-    OurCaps = decide_our_caps(RequestedStrategy, Cluster),
+    ObjectFilteringStatus = riak_repl2_object_filter:get_status(),
+    ObjectFilteringVersion = riak_repl2_object_filter:get_version(),
+    ObjectFilteringConfig = riak_repl2_object_filter:get_config(fullsync, Cluster),
+    ObjectFiltering = {object_filtering, {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig}},
+    OurCaps = decide_our_caps(RequestedStrategy, ObjectFiltering),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
-    {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
-        maybe_get_object_filtering_configurations(OurCaps, TheirCaps),
+
+
     FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
-
-
-
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%
@@ -323,12 +324,8 @@ decide_our_caps(RequestedStrategy) ->
             {true, _UnSupportedStrategy} -> RequestedStrategy
         end,
     [{strategy, SupportedStrategy}].
-decide_our_caps(RequestedStrategy, Cluster) ->
+decide_our_caps(RequestedStrategy, ObjectFiltering) ->
     Strategy = decide_our_caps(RequestedStrategy),
-    ConfigForRemote = riak_repl2_object_filter:get_config(fullsync, Cluster),
-    OFStatus = riak_repl2_object_filter:get_status(),
-    OFVersion = riak_repl2_object_filter:get_version(),
-    ObjectFiltering = {object_filtering, {OFStatus, OFVersion, ConfigForRemote}},
     Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
 
 %% decide what strategy to use, given our own capabilties and those
@@ -419,28 +416,3 @@ maybe_exchange_filtered_buckets(true, ClusterName, Socket, Transport) ->
     Transport:send(Socket, term_to_binary(BucketsToClusterName)),
     %% is this too lazy?
     lists:usort(BucketsToClusterName ++ TheirConfig).
-
-%% ========================================================================================================= %%
-%% Object Filtering
-%% ========================================================================================================= %%
-maybe_get_object_filtering_configurations(OurCaps, TheirCaps) ->
-    Default = {disabled, 0, []},
-    OurObjectFiltering = proplists:get_value(object_filtering, OurCaps, not_supported),
-    TheirObjectFiltering = proplists:get_value(object_filtering, TheirCaps, not_supported),
-
-    AgreeConfigFun = fun(V1, V2, Config) ->
-        V = lists:min([V1, V2]),
-        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(Config, V)}
-        end,
-
-    case {OurObjectFiltering, TheirObjectFiltering} of
-        {{enabled, OurVersion, Config}, {enabled, TheirVersion}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, Config);
-
-        {{disabled, OurVersion, Config}, {enabled, TheirVersion}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, Config);
-
-        {{enabled, OurVersion, Config}, {disabled, TheirVersion}} ->
-            AgreeConfigFun(OurVersion, TheirVersion, Config);
-        _ -> Default
-    end.

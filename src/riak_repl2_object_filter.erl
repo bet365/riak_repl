@@ -196,8 +196,7 @@ get_realtime_blacklist(Object) ->
         Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),
         {Remote, Filter}
         end,
-    DowngradedConfig = maybe_downgrade_config_list(?RT_CONFIG, ?VERSION),
-    AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- DowngradedConfig],
+    AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- ?MERGED_RT_CONFIG],
     [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == true].
 
 %% reutrns true or false to say if you can send an object to a remote name
@@ -304,12 +303,6 @@ filter_object_check_metadata(Key, Value, Metadata) ->
     end.
 
 %%%===================================================================
-maybe_downgrade_config_list([], _Version) -> [];
-maybe_downgrade_config_list([RemoteConfig | Rest], Version) ->
-    DowngradedRemoteConfig = maybe_downgrade_config(RemoteConfig, Version),
-    DowngradeRest = maybe_downgrade_config_list(Rest, Version),
-    [DowngradedRemoteConfig] ++ DowngradeRest.
-
 maybe_downgrade_config({Remote, {allow, AllowedRules}, {block, BlockedRules}}, Version) ->
     DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
     DowngradedBlockedRules = maybe_downgrade_rules(BlockedRules, Version, []),

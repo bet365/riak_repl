@@ -51,8 +51,9 @@
          object_filtering_disable/1,
          object_filtering_clear_config/1,
          object_filtering_load_config/1,
-         object_filtering_print_config/1,
-         object_filtering_check_config/1]).
+         object_filtering_check_config/1,
+         object_filtering_status_all/1,
+         object_filtering_status/1]).
 
 add_listener(Params) ->
     lager:warning(?V2REPLDEP, []),
@@ -1153,7 +1154,7 @@ enable_flag_to_list(B) when is_boolean(B) -> atom_to_list(B);
 enable_flag_to_list(_) -> "false".
 
 %% ========================================================================================================= %%
-%% Object Filtering
+%% Object Filtering (API for riak-repl calls)
 %% ========================================================================================================= %%
 object_filtering_enable([]) ->
     Response = riak_repl2_object_filter:enable(),
@@ -1167,27 +1168,34 @@ object_filtering_clear_config([]) ->
     Response = riak_repl2_object_filter:clear_config(),
     decode_response(Response).
 
-object_filtering_load_config([ConfigPath]) ->
-    Response = riak_repl2_object_filter:load_config(ConfigPath),
+object_filtering_load_config([Mode, ConfigPath]) ->
+    Response = riak_repl2_object_filter:load_config(Mode, ConfigPath),
     decode_response(Response).
 
 object_filtering_check_config([ConfigPath]) ->
     Response = riak_repl2_object_filter:check_config(ConfigPath),
     decode_response(Response).
 
-object_filtering_print_config([]) ->
-    Response = riak_repl2_object_filter:print_config(),
+object_filtering_status([]) ->
+    Response = riak_repl2_object_filter:status(),
     decode_response(Response).
 
+object_filtering_status_all([]) ->
+    Response = riak_repl2_object_filter:status_all(),
+    decode_response(Response).
+
+
+
+%% Helper Functions
 decode_response(ok) ->
     io:format("ok ~n");
-decode_response({print_config, {Version, Status, Config}}) ->
-    io:format("Version: ~p ~n", [Version]),
-    io:format("Status: ~p ~n",[Status]),
-    print_config(Config);
+decode_response({status_single_node, Status}) ->
+    print_config(Status);
+decode_response({status_all_nodes, AllStatus}) ->
+    [print_config(Status) || Status <- AllStatus];
 decode_response({error,{rule_format, Version, Rule}}) ->
     io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
-    [Version, Rule]);
+        [Version, Rule]);
 decode_response({error,{duplicate_remote_entries, Version}}) ->
     io:format("[Object Filtering Version: ~p] Error: Duplicate remote entries found in config. ~n",
         [Version]);
@@ -1206,11 +1214,17 @@ decode_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) 
         [Version, RemoteName, Rule]);
 decode_response({error, {no_rules, Version}}) ->
     io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
+decode_response({error, unknown_repl_mode, Mode}) ->
+    io:format("Loading Configs Error: unknown_repl_mode ~p ~n", [Mode]);
 decode_response({error, Error}) ->
     io:format("File error: ~p ~n", [Error]).
 
 
-print_config([]) -> ok;
-print_config([Rule | Rest]) ->
-    io:format("~p. ~n", [Rule]),
-    print_config(Rest).
+
+print_config({Node, {Version, Status, ReplConfigHash, FSConfigHash, RTConfigHash}}) ->
+    io:format("Node: ~p\t Version: ~p\t Status: ~p\t Repl Config Hash: ~p \t Fullsync Config Hash: ~p \t Realtime Config Hash: ~p~n",
+        [Node, Version, Status, ReplConfigHash, FSConfigHash, RTConfigHash]).
+%%print_config([]) -> ok;
+%%print_config([Rule | Rest]) ->
+%%    io:format("~p. ~n", [Rule]),
+%%    print_config(Rest).

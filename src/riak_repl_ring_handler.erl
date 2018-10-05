@@ -195,9 +195,6 @@ rt_update_events(Ring) ->
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-    ObjectFilteringStatus = app_helper:get_env(riak_repl, object_filtering_status, disabled),
-    ObjectFilteringConfig = app_helper:get_env(riak_repl, object_filtering_config, []),
-
     NewObjectFilteringStatus = case dict:find(object_filtering_status, RC) of
                                    {ok, S} ->
                                        S;
@@ -205,25 +202,13 @@ rt_update_events(Ring) ->
                                        disabled
                                end,
 
-    NewObjectFilteringConfig = case dict:find(object_filtering_config, RC) of
-                                   {ok, C} ->
-                                       C;
-                                   _ ->
-                                       []
-                               end,
+    NewObjectFilteringConfigs =
+        case dict:find(object_filtering_configs, RC) of
+            {ok, C} -> C;
+            _ -> {[],[],[],[],[]}
+        end,
 
-    case ObjectFilteringStatus == NewObjectFilteringStatus of
-        true ->
-            ok;
-        false ->
-            application:set_env(riak_repl, object_filtering_status, NewObjectFilteringStatus)
-    end,
-    case ObjectFilteringConfig == NewObjectFilteringConfig of
-        true ->
-            ok;
-        false ->
-            application:set_env(riak_repl, object_filtering_config, NewObjectFilteringConfig)
-    end,
+    riak_repl2_object_filter:ring_update(NewObjectFilteringStatus, NewObjectFilteringConfigs),
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%

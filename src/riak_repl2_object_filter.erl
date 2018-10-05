@@ -13,15 +13,18 @@
     disable/0,
     clear_config/0,
     check_config/1,
-    load_config/1,
-    print_config/0]).
+    load_config/2,
+    status/0,
+    status_all/0
+]).
 
 -export([
-    get_maybe_downgraded_fullsync_config/2,
-    get_maybe_downgraded_fullsync_config/3,
+    ring_update/2,
+    get_maybe_downgraded_config/2,
+    get_maybe_downgraded_config/3,
     get_realtime_blacklist/1,
-    get_config/0,
     get_config/1,
+    get_config/2,
     get_status/0,
     get_version/0,
     filter/2,
@@ -45,10 +48,25 @@
 -define(SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue), supported_match_value_formats(?VERSION, MatchType, MatchValue)).
 -define(SUPPORTED_KEYWORDS, supported_keywords(?VERSION)).
 -define(WILDCARD, '*').
+
 -define(STATUS, app_helper:get_env(riak_repl, object_filtering_status, disabled)).
--define(CONFIG, app_helper:get_env(riak_repl, object_filtering_config, [])).
 -define(VERSION, app_helper:get_env(riak_repl, object_filtering_version, 0)).
+-define(REPL_CONFIG, app_helper:get_env(riak_repl, object_filtering_repl_config, [])).
+-define(RT_CONFIG, app_helper:get_env(riak_repl, object_filtering_realtime_config, [])).
+-define(FS_CONFIG, app_helper:get_env(riak_repl, object_filtering_fullsync_config, [])).
+-define(MERGED_RT_CONFIG, app_helper:get_env(riak_repl, object_filtering_merged_realtime_config, [])).
+-define(MERGED_FS_CONFIG, app_helper:get_env(riak_repl, object_filtering_merged_fullsync_config, [])).
 -define(CLUSTERNAME, app_helper:get_env(riak_repl, clustername, "undefined")).
+
+-define(STATUS(S), application:set_env(riak_repl, object_filtering_status, S)).
+-define(VERSION(V), application:set_env(riak_repl, object_filtering_version, V)).
+-define(REPL_CONFIG(C), application:set_env(riak_repl, object_filtering_repl_config, C)).
+-define(RT_CONFIG(C), application:set_env(riak_repl, object_filtering_realtime_config, C)).
+-define(FS_CONFIG(C), application:set_env(riak_repl, object_filtering_fullsync_config, C)).
+-define(MERGED_RT_CONFIG(C), application:set_env(riak_repl, object_filtering_merged_realtime_config, C)).
+-define(MERGED_FS_CONFIG(C), application:set_env(riak_repl, object_filtering_merged_fullsync_config, C)).
+-define(CLUSTERNAME(CName), application:set_env(riak_repl, clustername, CName)).
+
 -define(CURRENT_VERSION, 1.0).
 
 -define(ERROR_NO_FULES, {error, {no_rules, ?VERSION}}).
@@ -58,7 +76,7 @@
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 
 -define(DEFAULT_CONFIG(Remote), {Remote, {allow, ['*']}, {block, []}}).
-
+-define(TIMEOUT, 10000).
 -record(state, {}).
 
 %%%===================================================================
@@ -95,24 +113,53 @@ invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?
 %%% API (Function Callbacks)
 %%%===================================================================
 
+ring_update(NewStatus, {NewReplConfig, NewRTConfig, NewFSConfig, NewMergedRTConfig, NewMergedFSConfig}) ->
+    List =
+        [
+            {NewStatus, ?STATUS, object_filtering_status},
+            {NewReplConfig, ?REPL_CONFIG, object_filtering_repl_config},
+            {NewRTConfig, ?RT_CONFIG, object_filtering_realtime_config},
+            {NewFSConfig, ?FS_CONFIG, object_filtering_fullsync_config},
+            {NewMergedRTConfig, ?MERGED_RT_CONFIG, object_filtering_merged_realtime_config},
+            {NewMergedFSConfig, ?MERGED_FS_CONFIG, object_filtering_merged_fullsync_config}
+        ],
+    UpdateFun =
+        fun(Config, ConfigFun, Key) ->
+            case Config == ConfigFun of
+                true -> ok;
+                false -> application:set_env(riak_repl, Key, Config)
+            end
+        end,
+    [UpdateFun(A, B, C) || {A, B, C} <- List].
+
+
+
 %% returns true/false for a rule and an object
 filter_object_rule_test(Rule, Object) ->
     filter_object_rule_check(Rule, get_object_data(Object)).
 
 %% returns the entire config for all clusters
-get_config() ->
-    ?CONFIG.
+get_config(fullsync) ->
+    ?MERGED_FS_CONFIG;
+get_config(realtime) ->
+    ?MERGED_RT_CONFIG;
+get_config(_) ->
+    [].
 %% returns config only for the remote that is named in the argument
-get_config(RemoteName) ->
-    case lists:keyfind(RemoteName, 1, ?CONFIG) of
+get_config(RemoteName, ReplMode) ->
+    Config = case ReplMode of
+                 fullsync -> ?MERGED_FS_CONFIG;
+                 realtime -> ?MERGED_RT_CONFIG
+             end,
+    case lists:keyfind(RemoteName, 1, Config) of
         false -> ?DEFAULT_CONFIG(RemoteName);
         Rconfig -> Rconfig
     end.
 
-get_maybe_downgraded_fullsync_config(Config, Version, RemoteName) ->
+get_maybe_downgraded_config(Config, Version, RemoteName) ->
     {_, A, B} = Config,
     maybe_downgrade_config({RemoteName, A, B}, Version).
-get_maybe_downgraded_fullsync_config(Config, Version) ->
+get_maybe_downgraded_config(Config, Version) ->
     maybe_downgrade_config(Config, Version).
 
 
@@ -122,6 +169,16 @@ get_status()->
 %% returns the version of our local cluster for object filtering
 get_version() ->
     ?VERSION.
+
+%% Function calls for repl_console
+status_single_node() ->
+    {status_single_node, {node(), {?VERSION, ?STATUS, erlang:phash2(?REPL_CONFIG), erlang:phash2(?FS_CONFIG), erlang:phash2(?RT_CONFIG)}}}.
+
+status_all_nodes() ->
+    {StatusAllNodes, _} = riak_core_util:rpc_every_member(riak_repl2_object_filter, status, [], ?TIMEOUT),
+    Result = [R ||{status_single_node, R} <- StatusAllNodes],
+    {status_all_nodes, lists:sort(Result)}.
+
 
 
 % Returns true or false to say if we need to filter based on an object and remote name
@@ -139,7 +196,7 @@ get_realtime_blacklist(Object) ->
         Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),
         {Remote, Filter}
         end,
-    DowngradedConfig = maybe_downgrade_config_list(?CONFIG, ?VERSION),
+    DowngradedConfig = maybe_downgrade_config_list(?RT_CONFIG, ?VERSION),
     AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- DowngradedConfig],
     [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == true].
 
@@ -294,27 +351,27 @@ maybe_downgrade_single_rule(Rule, Version) ->
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 enable()->
-    gen_server:call(?SERVER, enable).
+    gen_server:call(?SERVER, enable, ?TIMEOUT).
 disable()->
-    gen_server:call(?SERVER, disable).
+    gen_server:call(?SERVER, disable, ?TIMEOUT).
 clear_config() ->
-    gen_server:call(?SERVER, clear_config).
+    gen_server:call(?SERVER, clear_config, ?TIMEOUT).
 check_config(ConfigFilePath) ->
-    gen_server:call(?SERVER, {check_config, ConfigFilePath}).
-load_config(ConfigFilePath) ->
-    gen_server:call(?SERVER, {load_config, ConfigFilePath}).
-print_config() ->
-    gen_server:call(?SERVER, print_config).
+    gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT).
+load_config(ReplMode, ConfigFilePath) ->
+    gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT).
+status() ->
+    status_single_node().
+status_all() ->
+    status_all_nodes().
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 init([]) ->
-    {Status, Config} = riak_repl_ring:get_object_filtering_data(),
-    application:set_env(riak_repl, object_filtering_status, Status),
-    application:set_env(riak_repl, object_filtering_config, Config),
+    load_ring_configs_and_status(),
     Version = riak_core_capability:get({riak_repl, object_filtering_version}, 0),
-    application:set_env(riak_repl, object_filtering_version, Version),
-    application:set_env(riak_repl, clustername, riak_core_connection:symbolic_clustername()),
+    ?VERSION(Version),
+    ?CLUSTERNAME(riak_core_connection:symbolic_clustername()),
     case Version == ?CURRENT_VERSION of
         false ->
             erlang:send_after(5000, self(), poll_core_capability);
@@ -331,12 +388,10 @@ handle_call(Request, _From, State) ->
                        object_filtering_disable();
                    {check_config, Path} ->
                        object_filtering_config_file(check, Path);
-                   {load_config, Path} ->
-                       object_filtering_config_file(load, Path);
+                   {load_config, ReplMode, Path} ->
+                       object_filtering_config_file({load, ReplMode}, Path);
                    clear_config ->
                        object_filtering_clear_config();
-                   print_config ->
-                       object_filtering_config();
                    _ ->
                        error
                end,
@@ -351,7 +406,7 @@ handle_info(poll_core_capability, State) ->
         true ->
             erlang:send_after(5000, self(), poll_core_capability);
         false ->
-            application:set_env(riak_repl, object_filtering_version, Version)
+            ?VERSION(Version)
     end,
     {noreply, State};
 handle_info(_Info, State) ->
@@ -366,6 +421,19 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+update_ring_configs() ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_configs/2,
+        {?REPL_CONFIG, ?RT_CONFIG, ?FS_CONFIG, ?MERGED_RT_CONFIG, ?MERGED_FS_CONFIG}).
+
+load_ring_configs_and_status() ->
+    {Status, {ReplConfig, RealtimeConfig, FullsyncConfig, MergedRTConfig, MergedFSConfig}} = riak_repl_ring:get_object_filtering_data(),
+    ?STATUS(Status),
+    ?REPL_CONFIG(ReplConfig),
+    ?RT_CONFIG(RealtimeConfig),
+    ?FS_CONFIG(FullsyncConfig),
+    ?MERGED_RT_CONFIG(MergedRTConfig),
+    ?MERGED_FS_CONFIG(MergedFSConfig).
+
 object_filtering_disable() ->
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, disabled),
     application:set_env(riak_repl, object_filtering_status, disabled),
@@ -376,17 +444,24 @@ object_filtering_enable() ->
     application:set_env(riak_repl, object_filtering_status, enabled),
     ok.
 
+object_filtering_config_file({load, Mode}, Path) ->
+    Modes = [repl, fullsync, realtime],
+    case lists:member(list_to_atom(Mode), Modes) of
+        true -> object_filtering_config_file_helper({load, list_to_atom(Mode)}, Path);
+        false -> {error, unknown_repl_mode, Mode}
+    end;
 object_filtering_config_file(Action, Path) ->
+    object_filtering_config_file_helper(Action, Path).
+
+object_filtering_config_file_helper(Action, Path) ->
     case file:consult(Path) of
         {ok, FilteringConfig} ->
             case check_filtering_rules(FilteringConfig) of
                 ok ->
                     case Action of
                         check -> ok;
-                        load ->
-                            riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, FilteringConfig),
-                            application:set_env(riak_repl, object_filtering_config, FilteringConfig),
-                            ok
+                        {load, ReplMode} ->
+                            merge_and_load_configs(ReplMode, FilteringConfig)
                     end;
                 Error2 ->
                     Error2
@@ -395,12 +470,70 @@ object_filtering_config_file(Action, Path) ->
             Error1
     end.
 
-object_filtering_config() ->
-    {print_config, {?VERSION, ?STATUS, ?CONFIG}}.
+merge_and_load_configs(repl, ReplConfig) ->
+    %% Change Repl, MergedRT, and MergedFS
+    MergedRT = merge_config(ReplConfig, ?RT_CONFIG),
+    MergedFS = merge_config(ReplConfig, ?FS_CONFIG),
+    ?REPL_CONFIG(ReplConfig),
+    ?MERGED_RT_CONFIG(MergedRT),
+    ?MERGED_FS_CONFIG(MergedFS),
+    update_ring_configs(),
+    ok;
+merge_and_load_configs(realtime, RTConfig) ->
+    %% Change RT, MergedRT
+    MergedRT = merge_config(?REPL_CONFIG, RTConfig),
+    ?RT_CONFIG(RTConfig),
+    ?MERGED_RT_CONFIG(MergedRT),
+    update_ring_configs(),
+    ok;
+merge_and_load_configs(fullsync, FSConfig) ->
+    %% Change FS, MergedFS
+    MergedFS = merge_config(?REPL_CONFIG, FSConfig),
+    ?FS_CONFIG(FSConfig),
+    ?MERGED_FS_CONFIG(MergedFS),
+    update_ring_configs(),
+    ok.
+
+merge_config(Config1, Config2) ->
+    merge_config_helper(Config1, Config2, []).
+merge_config_helper([], [], MergedConfig) ->
+    MergedConfig;
+merge_config_helper([ R = {RemoteName, {allow, AllowedRules1}, {block, BlockedRules1}} | Rest1 ], Config2, MergedConfigA) ->
+    case lists:keytake(RemoteName, 1, Config2) of
+        {value, {RemoteName, {allow, AllowedRules2}, {block, BlockedRules2}}, Rest2} ->
+            MergedAllowedRules = merge_rules(AllowedRules1, AllowedRules2),
+            MergedBlockedRules = merge_rules(BlockedRules1, BlockedRules2),
+            MergedConfigB = MergedConfigA ++ [{RemoteName, {allow, MergedAllowedRules}, {block, MergedBlockedRules}}],
+            merge_config_helper(Rest1, Rest2, MergedConfigB);
+        false ->
+            merge_config_helper(Rest1, Config2, MergedConfigA ++ [R])
+    end.
+
+merge_rules([], []) -> [];
+merge_rules([?WILDCARD], _) -> [?WILDCARD];
+merge_rules(_, [?WILDCARD]) -> [?WILDCARD];
+merge_rules([], Config) -> Config;
+merge_rules(Config, []) -> Config;
+merge_rules(Config1, Config2) ->
+    join_configs(Config1, Config2).
+
+join_configs(Config1, []) ->
+    Config1;
+join_configs(Config1, [Elem|Rest]) ->
+    case lists:member(Elem, Config1) of
+        false -> join_configs(Config1++[Elem], Rest);
+        true -> join_configs(Config1, Rest)
+    end.
+
+
 
 object_filtering_clear_config() ->
-    application:set_env(riak_repl, object_filtering_config, []),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_config/2, []),
+    ?REPL_CONFIG([]),
+    ?RT_CONFIG([]),
+    ?FS_CONFIG([]),
+    ?MERGED_RT_CONFIG([]),
+    ?MERGED_FS_CONFIG([]),
+    update_ring_configs(),
     ok.
 
 
@@ -431,7 +564,7 @@ check_filtering_rules_helper(Rules = [_|Rest], NextCheck, ok) ->
             check_rules(blocked, Rules, complete)
     end.
 
-check_rule_format(Rules = [{_RemoteName, {allow, _AllowedRule}, {block, _BlockedRules}} | _RestOfRemotes], NextCheck) ->
+check_rule_format(Rules = [{_RemoteName, {allow, _AllowedRules}, {block, _BlockedRules}} | _RestOfRemotes], NextCheck) ->
     check_filtering_rules_helper(Rules, NextCheck, ok);
 check_rule_format(Rules = [Rule|_R], NextCheck) ->
     check_filtering_rules_helper(Rules, NextCheck, ?ERROR_RULE_FORMAT(Rule)).
@@ -483,6 +616,7 @@ check_rules_helper(RemoteName, RuleType, [Rule | Rest]) ->
 
 is_rule_supported(Rule) when (is_list(Rule) and (length(Rule) > 1)) -> is_multi_rule_supported(Rule);
 is_rule_supported(Rule) -> is_single_rule_supported(Rule).
+
 
 is_single_rule_supported({MatchType, MatchValue}) ->
     lists:member(MatchType, ?SUPPORTED_MATCH_TYPES) and ?SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue);

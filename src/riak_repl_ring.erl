@@ -59,7 +59,7 @@
          overwrite_active_nodes_and_realtime_connection_data/2,
 
          overwrite_object_filtering_status/2,
-         overwrite_object_filtering_config/2,
+         overwrite_object_filtering_configs/2,
          get_object_filtering_data/0
          ]).
 
@@ -596,9 +596,9 @@ overwrite_object_filtering_status(Ring, ObjectFilteringStatus) ->
                 Ring)}
     end.
 
-overwrite_object_filtering_config(Ring, ObjectFilteringConfig) ->
+overwrite_object_filtering_configs(Ring, ObjectFilteringConfigs) ->
     RC = get_repl_config(ensure_config(Ring)),
-    RC2 = dict:store(object_filtering_config, ObjectFilteringConfig, RC),
+    RC2 = dict:store(object_filtering_configs, ObjectFilteringConfigs, RC),
     case RC == RC2 of
         true ->
             %% nothing changed
@@ -615,10 +615,10 @@ get_object_filtering_data() ->
         {ok, Ring} ->
             RC = get_repl_config(ensure_config(Ring)),
             Status = get_value(object_filtering_status, RC, disabled),
-            Config = get_value(object_filtering_config, RC, []),
+            Config = get_value(object_filtering_configs, RC, {[], [], [], [], []}),
             {Status, Config};
         _RingError ->
-            {disabled, []}
+            {disabled, {[], [], [], [], []}}
     end.
 
 %% ===================================== %%

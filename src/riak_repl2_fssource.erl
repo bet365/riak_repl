@@ -325,7 +325,7 @@ decide_our_caps(RequestedStrategy) ->
     [{strategy, SupportedStrategy}].
 decide_our_caps(RequestedStrategy, Cluster) ->
     Strategy = decide_our_caps(RequestedStrategy),
-    ConfigForRemote = riak_repl2_object_filter:get_config(Cluster),
+    ConfigForRemote = riak_repl2_object_filter:get_config(fullsync, Cluster),
     OFStatus = riak_repl2_object_filter:get_status(),
     OFVersion = riak_repl2_object_filter:get_version(),
     ObjectFiltering = {object_filtering, {OFStatus, OFVersion, ConfigForRemote}},
@@ -430,7 +430,7 @@ maybe_get_object_filtering_configurations(OurCaps, TheirCaps) ->
 
     AgreeConfigFun = fun(V1, V2, Config) ->
         V = lists:min([V1, V2]),
-        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_fullsync_config(Config, V)}
+        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(Config, V)}
         end,
 
     case {OurObjectFiltering, TheirObjectFiltering} of

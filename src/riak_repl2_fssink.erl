@@ -311,7 +311,7 @@ maybe_get_object_filtering_configurations(OurCaps, TheirCaps, ClusterName) ->
 
     AgreeConfigFun = fun(V1, V2, RemoteConfig) ->
         V = lists:min([V1, V2]),
-        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_fullsync_config(RemoteConfig, V, ClusterName)}
+        {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(RemoteConfig, V, ClusterName)}
         end,
 
     case {OurObjectFiltering, TheirObjectFiltering} of

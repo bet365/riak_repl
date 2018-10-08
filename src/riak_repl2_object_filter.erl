@@ -20,8 +20,8 @@
 
 -export([
     ring_update/2,
+    get_maybe_downgraded_remote_config/2,
     get_maybe_downgraded_config/2,
-    get_maybe_downgraded_config/3,
     get_realtime_blacklist/1,
     get_config/1,
     get_config/2,
@@ -156,9 +156,9 @@ get_config(RemoteName, ReplMode) ->
         Rconfig -> Rconfig
     end.
 
-get_maybe_downgraded_config(Config, Version, RemoteName) ->
+get_maybe_downgraded_remote_config(Config, RemoteName) ->
     {_, A, B} = Config,
-    maybe_downgrade_config({RemoteName, A, B}, Version).
+    maybe_downgrade_config({RemoteName, A, B}, ?VERSION).
 get_maybe_downgraded_config(Config, Version) ->
     maybe_downgrade_config(Config, Version).
 

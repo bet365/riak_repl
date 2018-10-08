@@ -170,9 +170,6 @@ handle_info(init_ack, State=#state{socket=Socket,
     {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
         maybe_get_object_filtering_configurations(TheirCaps, Cluster),
 
-
-
-
     FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
@@ -307,11 +304,13 @@ maybe_get_object_filtering_configurations(TheirCaps, ClusterName) ->
     OurVersion = riak_repl2_object_filter:get_version(),
     case TheirObjectFiltering of
         {enabled, TheirVersion, TheirConfig} ->
-            case TheirVersion == OurVersion of
+            case TheirVersion =< OurVersion of
                 true ->
-                    {_, A, B} = Config
-                    {enabled, TheirVersion}
-            end,
-            {enabled, V, riak_repl2_object_filter:get_maybe_downgraded_config(TheirConfig, V, ClusterName)};
-        _ -> Default
+                    {_, A, B} = TheirConfig,
+                    OurConfig = {ClusterName, A, B},
+                    {enabled, TheirVersion, OurConfig};
+                false ->
+                    {enabled, OurVersion, riak_repl2_object_filter:get_maybe_downgraded_remote_config(TheirConfig, ClusterName)}
+            end;
+            _ -> Default
     end.

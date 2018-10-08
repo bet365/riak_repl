@@ -146,7 +146,7 @@ get_config(realtime) ->
 get_config(_) ->
     [].
 %% returns config only for the remote that is named in the argument
-get_config(RemoteName, ReplMode) ->
+get_config(ReplMode, RemoteName) ->
     Config = case ReplMode of
                  fullsync -> ?MERGED_FS_CONFIG;
                  realtime -> ?MERGED_RT_CONFIG

@@ -124,10 +124,10 @@ ring_update(NewStatus, {NewReplConfig, NewRTConfig, NewFSConfig, NewMergedRTConf
             {NewMergedFSConfig, ?MERGED_FS_CONFIG, object_filtering_merged_fullsync_config}
         ],
     UpdateFun =
-        fun(Config, ConfigFun, Key) ->
-            case Config == ConfigFun of
+        fun(New, Old, Key) ->
+            case New == Old of
                 true -> ok;
-                false -> application:set_env(riak_repl, Key, Config)
+                false -> application:set_env(riak_repl, Key, New)
             end
         end,
     [UpdateFun(A, B, C) || {A, B, C} <- List].
@@ -172,7 +172,7 @@ get_version() ->
 
 %% Function calls for repl_console
 status_single_node() ->
-    {status_single_node, {node(), {?VERSION, ?STATUS, erlang:phash2(?REPL_CONFIG), erlang:phash2(?FS_CONFIG), erlang:phash2(?RT_CONFIG)}}}.
+    {status_single_node, {node(), {?VERSION, ?STATUS, erlang:phash2(?MERGED_RT_CONFIG), erlang:phash2(?MERGED_FS_CONFIG), erlang:phash2(?REPL_CONFIG), erlang:phash2(?FS_CONFIG), erlang:phash2(?RT_CONFIG)}}}.
 
 status_all_nodes() ->
     {StatusAllNodes, _} = riak_core_util:rpc_every_member(riak_repl2_object_filter, status, [], ?TIMEOUT),

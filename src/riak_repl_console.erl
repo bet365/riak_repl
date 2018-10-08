@@ -1190,9 +1190,9 @@ object_filtering_status_all([]) ->
 decode_response(ok) ->
     io:format("ok ~n");
 decode_response({status_single_node, Status}) ->
-    print_config(Status);
+    print_status(Status);
 decode_response({status_all_nodes, AllStatus}) ->
-    [print_config(Status) || Status <- AllStatus];
+    [print_status(Status) || Status <- AllStatus];
 decode_response({error,{rule_format, Version, Rule}}) ->
     io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
         [Version, Rule]);
@@ -1221,9 +1221,10 @@ decode_response({error, Error}) ->
 
 
 
-print_config({Node, {Version, Status, ReplConfigHash, FSConfigHash, RTConfigHash}}) ->
-    io:format("Node: ~p\t Version: ~p\t Status: ~p\t Repl Config Hash: ~p \t Fullsync Config Hash: ~p \t Realtime Config Hash: ~p~n",
-        [Node, Version, Status, ReplConfigHash, FSConfigHash, RTConfigHash]).
+print_status({Node, {Version, Status, MergedRTConfigHash, MergedFSConfigHash, _ReplConfigHash, _FSConfigHash, _RTConfigHash}}) ->
+    io:format("Node: ~p\t Version: ~p\t Status: ~p \t Realtime Config Hash: ~p \t Fullsync Config Hash: ~p~n",
+        [Node, Version, Status, MergedRTConfigHash, MergedFSConfigHash]).
+
 %%print_config([]) -> ok;
 %%print_config([Rule | Rest]) ->
 %%    io:format("~p. ~n", [Rule]),

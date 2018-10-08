@@ -20,8 +20,8 @@
 -export([
     status/0,
     status_all/0,
-    get_config_for_shell/1,
-    get_config_for_shell/2
+    get_config_external/1,
+    get_config_external/2
 ]).
 
 
@@ -148,14 +148,14 @@ filter_object_rule_test(Rule, Object) ->
     filter_object_rule_check(Rule, get_object_data(Object)).
 
 % returns config to repl_console or errors out
-get_config_for_shell(Mode) ->
+get_config_external(Mode) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
     case lists:member(ConvertedMode, List) of
         true -> get_config(ConvertedMode);
         false -> {error, unknown_repl_mode_print_config, Mode}
     end.
-get_config_for_shell(Mode, Remote) ->
+get_config_external(Mode, Remote) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
     case lists:member(ConvertedMode, List) of

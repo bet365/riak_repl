@@ -1186,11 +1186,16 @@ object_filtering_status_all([]) ->
     decode_response(Response).
 
 object_filtering_print_config([Mode]) ->
-    Config = riak_repl2_object_filter:get_config(Mode),
+    Config = riak_repl2_object_filter:get_config_external(Mode),
     io:format("~p~n", [Config]);
 object_filtering_print_config([Mode, Remote]) ->
-    Config = riak_repl2_object_filter:get_config(Mode, Remote),
-    io:format("~p~n", [Config]).
+    Response = riak_repl2_object_filter:get_config_external(Mode, Remote),
+    case Response of
+        {error, Error, Mode} ->
+            decode_response({error, Error, Mode});
+        Config ->
+            io:format("~p~n", [Config])
+    end.
 
 
 

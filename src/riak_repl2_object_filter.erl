@@ -11,7 +11,7 @@
     start_link/0,
     enable/0,
     disable/0,
-    clear_config/0,
+    clear_config/1,
     check_config/1,
     load_config/2,
     status/0,

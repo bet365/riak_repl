@@ -347,8 +347,8 @@ enable()->
     gen_server:call(?SERVER, enable, ?TIMEOUT).
 disable()->
     gen_server:call(?SERVER, disable, ?TIMEOUT).
-clear_config() ->
-    gen_server:call(?SERVER, clear_config, ?TIMEOUT).
+clear_config(Mode) ->
+    gen_server:call(?SERVER, {clear_config, Mode}, ?TIMEOUT).
 check_config(ConfigFilePath) ->
     gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT).
 load_config(ReplMode, ConfigFilePath) ->
@@ -383,8 +383,8 @@ handle_call(Request, _From, State) ->
                        object_filtering_config_file(check, Path);
                    {load_config, ReplMode, Path} ->
                        object_filtering_config_file({load, ReplMode}, Path);
-                   clear_config ->
-                       object_filtering_clear_config();
+                   {clear_config, Mode} ->
+                       object_filtering_clear_config(Mode);
                    _ ->
                        error
                end,
@@ -519,15 +519,25 @@ join_configs(Config1, [Elem|Rest]) ->
     end.
 
 
+object_filtering_clear_config(Mode) ->
+    object_filtering_clear_config_helper(list_to_atom(Mode)).
 
-object_filtering_clear_config() ->
+object_filtering_clear_config_helper(all) ->
     ?REPL_CONFIG([]),
     ?RT_CONFIG([]),
     ?FS_CONFIG([]),
     ?MERGED_RT_CONFIG([]),
     ?MERGED_FS_CONFIG([]),
     update_ring_configs(),
-    ok.
+    ok;
+object_filtering_clear_config_helper(repl) ->
+    merge_and_load_configs(repl, []);
+object_filtering_clear_config_helper(realtime) ->
+    merge_and_load_configs(realtime, []);
+object_filtering_clear_config_helper(fullsync) ->
+    merge_and_load_configs(fullsync, []);
+object_filtering_clear_config_helper(Mode) ->
+    {error, unknown_clear_repl_mode, Mode}.
 
 
 check_filtering_rules([]) -> ?ERROR_NO_FULES();

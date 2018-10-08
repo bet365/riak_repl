@@ -1164,8 +1164,8 @@ object_filtering_disable([]) ->
     Response = riak_repl2_object_filter:disable(),
     decode_response(Response).
 
-object_filtering_clear_config([]) ->
-    Response = riak_repl2_object_filter:clear_config(),
+object_filtering_clear_config([Mode]) ->
+    Response = riak_repl2_object_filter:clear_config(Mode),
     decode_response(Response).
 
 object_filtering_load_config([Mode, ConfigPath]) ->
@@ -1215,7 +1215,9 @@ decode_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) 
 decode_response({error, {no_rules, Version}}) ->
     io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
 decode_response({error, unknown_repl_mode, Mode}) ->
-    io:format("Loading Configs Error: unknown_repl_mode ~p ~n", [Mode]);
+    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [Mode]);
+decode_response({error, unknown_clear_repl_mode, Mode}) ->
+    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync]~n", [Mode]);
 decode_response({error, Error}) ->
     io:format("File error: ~p ~n", [Error]).
 

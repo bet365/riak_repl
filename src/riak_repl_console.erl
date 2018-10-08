@@ -53,7 +53,8 @@
          object_filtering_load_config/1,
          object_filtering_check_config/1,
          object_filtering_status_all/1,
-         object_filtering_status/1]).
+         object_filtering_status/1,
+         object_filtering_print_config/1]).
 
 add_listener(Params) ->
     lager:warning(?V2REPLDEP, []),
@@ -1184,6 +1185,13 @@ object_filtering_status_all([]) ->
     Response = riak_repl2_object_filter:status_all(),
     decode_response(Response).
 
+object_filtering_print_config([Mode]) ->
+    Config = riak_repl2_object_filter:get_config(Mode),
+    io:format("~p~n", [Config]);
+object_filtering_print_config([Mode, Remote]) ->
+    Config = riak_repl2_object_filter:get_config(Mode, Remote),
+    io:format("~p~n", [Config]).
+
 
 
 %% Helper Functions
@@ -1218,6 +1226,8 @@ decode_response({error, unknown_repl_mode, Mode}) ->
     io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [Mode]);
 decode_response({error, unknown_clear_repl_mode, Mode}) ->
     io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync]~n", [Mode]);
+decode_response({error, unknown_repl_mode_print_config, Mode}) ->
+    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [realtime, fullsync, loaded_repl, loaded_realtime, loaded_fullsync]~n", [Mode]);
 decode_response({error, Error}) ->
     io:format("File error: ~p ~n", [Error]).
 

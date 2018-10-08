@@ -6,18 +6,26 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
-%% API
+%% API (gen_server calls)
 -export([
     start_link/0,
     enable/0,
     disable/0,
     clear_config/1,
     check_config/1,
-    load_config/2,
-    status/0,
-    status_all/0
+    load_config/2
 ]).
 
+%% API (function calls)
+-export([
+    status/0,
+    status_all/0,
+    get_config_for_shell/1,
+    get_config_for_shell/2
+]).
+
+
+%% Internal API (function calls)
 -export([
     ring_update/2,
     get_maybe_downgraded_remote_config/2,
@@ -31,6 +39,7 @@
     filter/3
 ]).
 
+%% API (for testing)
 -export([
     filter_object_rule_test/2
 ]).
@@ -138,18 +147,43 @@ ring_update(NewStatus, {NewReplConfig, NewRTConfig, NewFSConfig, NewMergedRTConf
 filter_object_rule_test(Rule, Object) ->
     filter_object_rule_check(Rule, get_object_data(Object)).
 
+% returns config to repl_console or errors out
+get_config_for_shell(Mode) ->
+    ConvertedMode = list_to_atom(Mode),
+    List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
+    case lists:member(ConvertedMode, List) of
+        true -> get_config(ConvertedMode);
+        false -> {error, unknown_repl_mode_print_config, Mode}
+    end.
+get_config_for_shell(Mode, Remote) ->
+    ConvertedMode = list_to_atom(Mode),
+    List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
+    case lists:member(ConvertedMode, List) of
+        true -> get_config(ConvertedMode, Remote);
+        false -> {error, unknown_repl_mode_print_config, Mode}
+    end.
+
 %% returns the entire config for all clusters
 get_config(fullsync) ->
     ?MERGED_FS_CONFIG;
 get_config(realtime) ->
     ?MERGED_RT_CONFIG;
+get_config(loaded_repl) ->
+    ?REPL_CONFIG;
+get_config(loaded_realtime) ->
+    ?RT_CONFIG;
+get_config(loaded_fullsync) ->
+    ?FS_CONFIG;
 get_config(_) ->
     [].
 %% returns config only for the remote that is named in the argument
 get_config(ReplMode, RemoteName) ->
     Config = case ReplMode of
                  fullsync -> ?MERGED_FS_CONFIG;
-                 realtime -> ?MERGED_RT_CONFIG
+                 realtime -> ?MERGED_RT_CONFIG;
+                 loaded_repl -> ?REPL_CONFIG;
+                 loaded_realtime -> ?RT_CONFIG;
+                 loaded_fullsync -> ?FS_CONFIG
              end,
     case lists:keyfind(RemoteName, 1, Config) of
         false -> ?DEFAULT_CONFIG(RemoteName);

@@ -1186,26 +1186,25 @@ object_filtering_status_all([]) ->
     decode_response(Response).
 
 object_filtering_print_config([Mode]) ->
-    Config = riak_repl2_object_filter:get_config_external(Mode),
-    io:format("~p~n", [Config]);
+    Response = riak_repl2_object_filter:get_config_external(Mode),
+    decode_response(Response);
 object_filtering_print_config([Mode, Remote]) ->
     Response = riak_repl2_object_filter:get_config_external(Mode, Remote),
-    case Response of
-        {error, Error, Mode} ->
-            decode_response({error, Error, Mode});
-        Config ->
-            io:format("~p~n", [Config])
-    end.
+    decode_response(Response).
 
 
-
-%% Helper Functions
+%% Normal Responses
 decode_response(ok) ->
     io:format("ok ~n");
 decode_response({status_single_node, Status}) ->
     print_status(Status);
 decode_response({status_all_nodes, AllStatus}) ->
     [print_status(Status) || Status <- AllStatus];
+decode_response({config, Config}) ->
+    io:format("~p ~n", [Config]);
+
+
+%% Errors
 decode_response({error,{rule_format, Version, Rule}}) ->
     io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
         [Version, Rule]);
@@ -1227,12 +1226,12 @@ decode_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) 
         [Version, RemoteName, Rule]);
 decode_response({error, {no_rules, Version}}) ->
     io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
-decode_response({error, unknown_repl_mode, Mode}) ->
-    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [Mode]);
-decode_response({error, unknown_clear_repl_mode, Mode}) ->
-    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync]~n", [Mode]);
-decode_response({error, unknown_repl_mode_print_config, Mode}) ->
-    io:format("Loading Configs Error: unknown_repl_mode ~p, supported modes: [realtime, fullsync, loaded_repl, loaded_realtime, loaded_fullsync]~n", [Mode]);
+decode_response({error, unknown_repl_mode, object_filtering_clear_config, Mode}) ->
+    io:format("Error object_filtering_clear_config: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync] ~n", [Mode]);
+decode_response({error, unknown_repl_mode, get_config_external, Mode}) ->
+    io:format("Error get_config_external: unknown_repl_mode ~p, supported modes: [realtime, fullsync, loaded_repl, loaded_realtime, loaded_fullsync]~n", [Mode]);
+decode_response({error, unknown_repl_mode, RelatedFun, Mode}) ->
+    io:format("Error ~p: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [RelatedFun, Mode]);
 decode_response({error, Error}) ->
     io:format("File error: ~p ~n", [Error]).
 

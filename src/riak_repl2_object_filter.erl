@@ -83,6 +83,7 @@
 -define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, ?VERSION}}).
 -define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
+-define(ERROR_UNKNOWN_REPL_MODE(RelatedFun, Mode), {error, unknown_repl_mode, RelatedFun, Mode}).
 
 -define(DEFAULT_CONFIG(Remote), {Remote, {allow, ['*']}, {block, []}}).
 -define(TIMEOUT, 10000).
@@ -152,15 +153,15 @@ get_config_external(Mode) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
     case lists:member(ConvertedMode, List) of
-        true -> get_config(ConvertedMode);
-        false -> {error, unknown_repl_mode_print_config, Mode}
+        true -> {config, get_config(ConvertedMode)};
+        false -> ?ERROR_UNKNOWN_REPL_MODE(get_config_external, Mode)
     end.
 get_config_external(Mode, Remote) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
     case lists:member(ConvertedMode, List) of
-        true -> get_config(ConvertedMode, Remote);
-        false -> {error, unknown_repl_mode_print_config, Mode}
+        true -> {config, get_config(ConvertedMode, Remote)};
+        false -> ?ERROR_UNKNOWN_REPL_MODE(get_config_external, Mode)
     end.
 
 %% returns the entire config for all clusters
@@ -475,7 +476,7 @@ object_filtering_config_file({load, Mode}, Path) ->
     Modes = [repl, fullsync, realtime],
     case lists:member(list_to_atom(Mode), Modes) of
         true -> object_filtering_config_file_helper({load, list_to_atom(Mode)}, Path);
-        false -> {error, unknown_repl_mode, Mode}
+        false -> ?ERROR_UNKNOWN_REPL_MODE(object_filtering_config_file, Mode)
     end;
 object_filtering_config_file(Action, Path) ->
     object_filtering_config_file_helper(Action, Path).
@@ -571,7 +572,7 @@ object_filtering_clear_config_helper(realtime) ->
 object_filtering_clear_config_helper(fullsync) ->
     merge_and_load_configs(fullsync, []);
 object_filtering_clear_config_helper(Mode) ->
-    {error, unknown_clear_repl_mode, Mode}.
+    ?ERROR_UNKNOWN_REPL_MODE(object_filtering_clear_config, Mode).
 
 
 check_filtering_rules([]) -> ?ERROR_NO_FULES();

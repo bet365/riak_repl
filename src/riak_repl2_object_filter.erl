@@ -528,6 +528,8 @@ merge_config_helper([], [], MergedConfig) ->
     MergedConfig;
 merge_config_helper([], Config2, MergedConfig) ->
     MergedConfig ++ Config2;
+merge_config_helper(Config1, [], MergedConfig) ->
+    MergedConfig ++ Config1;
 merge_config_helper([ R = {RemoteName, {allow, AllowedRules1}, {block, BlockedRules1}} | Rest1 ], Config2, MergedConfigA) ->
     case lists:keytake(RemoteName, 1, Config2) of
         {value, {RemoteName, {allow, AllowedRules2}, {block, BlockedRules2}}, Rest2} ->

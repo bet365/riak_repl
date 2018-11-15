@@ -1159,10 +1159,16 @@ enable_flag_to_list(_) -> "false".
 %% ========================================================================================================= %%
 object_filtering_enable([]) ->
     Response = riak_repl2_object_filter:enable(),
+    decode_response(Response);
+object_filtering_enable([Mode]) ->
+    Response = riak_repl2_object_filter:enable(Mode),
     decode_response(Response).
 
 object_filtering_disable([]) ->
     Response = riak_repl2_object_filter:disable(),
+    decode_response(Response);
+object_filtering_disable([Mode]) ->
+    Response = riak_repl2_object_filter:disable(Mode),
     decode_response(Response).
 
 object_filtering_clear_config([Mode]) ->
@@ -1237,9 +1243,9 @@ decode_response({error, Error}) ->
 
 
 
-print_status({Node, {Version, Status, MergedRTConfigHash, MergedFSConfigHash, _ReplConfigHash, _FSConfigHash, _RTConfigHash}}) ->
-    io:format("Node: ~p\t Version: ~p\t Status: ~p \t Realtime Config Hash: ~p \t Fullsync Config Hash: ~p~n",
-        [Node, Version, Status, MergedRTConfigHash, MergedFSConfigHash]).
+print_status({Node, {Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash, _ReplConfigHash, _FSConfigHash, _RTConfigHash}}) ->
+    io:format("Node: ~p\t Version: ~p\t Realtime Status: ~p \t Fullsync Status: ~p \t Realtime Config Hash: ~p \t Fullsync Config Hash: ~p~n",
+        [Node, Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash]).
 
 %%print_config([]) -> ok;
 %%print_config([Rule | Rest]) ->

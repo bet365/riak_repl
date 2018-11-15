@@ -195,11 +195,11 @@ rt_update_events(Ring) ->
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-    NewObjectFilteringStatus = case dict:find(object_filtering_status, RC) of
+    NewObjectFilteringStatuses = case dict:find(object_filtering_statuses, RC) of
                                    {ok, S} ->
                                        S;
                                    _ ->
-                                       disabled
+                                       {disabled, disabled}
                                end,
 
     NewObjectFilteringConfigs =
@@ -208,7 +208,7 @@ rt_update_events(Ring) ->
             _ -> {[],[],[],[],[]}
         end,
 
-    riak_repl2_object_filter:ring_update(NewObjectFilteringStatus, NewObjectFilteringConfigs),
+    riak_repl2_object_filter:ring_update(NewObjectFilteringStatuses, NewObjectFilteringConfigs),
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%

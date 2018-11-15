@@ -584,7 +584,7 @@ get_active_nodes() ->
 %% ========================================================================================================= %%
 overwrite_object_filtering_status(Ring, ObjectFilteringStatus) ->
     RC = get_repl_config(ensure_config(Ring)),
-    RC2 = dict:store(object_filtering_status, ObjectFilteringStatus, RC),
+    RC2 = dict:store(object_filtering_statuses, ObjectFilteringStatus, RC),
     case RC == RC2 of
         true ->
             %% nothing changed
@@ -614,11 +614,11 @@ get_object_filtering_data() ->
     case riak_core_ring_manager:get_my_ring() of
         {ok, Ring} ->
             RC = get_repl_config(ensure_config(Ring)),
-            Status = get_value(object_filtering_status, RC, disabled),
+            Status = get_value(object_filtering_statuses, RC, {disabled, disabled}),
             Config = get_value(object_filtering_configs, RC, {[], [], [], [], []}),
             {Status, Config};
         _RingError ->
-            {disabled, {[], [], [], [], []}}
+            {{disabled, disabled}, {[], [], [], [], []}}
     end.
 
 %% ===================================== %%

@@ -122,7 +122,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     %% Strategy still depends on what the sink is capable of.
     {_Proto,{CommonMajor,_CMinor},{CommonMajor,_HMinor}} = Proto,
 
-    ObjectFilteringStatus = riak_repl2_object_filter:get_status(),
+    ObjectFilteringStatus = riak_repl2_object_filter:get_status(fullsync),
     ObjectFilteringVersion = riak_repl2_object_filter:get_version(),
     ObjectFilteringConfig = riak_repl2_object_filter:get_config(fullsync, Cluster),
     ObjectFiltering = {object_filtering, {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig}},

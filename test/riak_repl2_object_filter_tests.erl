@@ -14,7 +14,14 @@ object_filter_test_() ->
                         {"Multi Rules (bucket, metadata)", fun test_object_filter_multi_rules_bucket_metadata/0},
                         {"Multi Rules (bucket, not_metadata)", fun test_object_filter_multi_rules_bucket_not_metadata/0},
                         {"Multi Rules (not_bucket, metadata)", fun test_object_filter_multi_rules_not_bucket_metadata/0},
-                        {"Multi Rules (not_bucket, not_metadata)", fun test_object_filter_multi_rules_not_bucket_not_metadata/0}
+                        {"Multi Rules (not_bucket, not_metadata)", fun test_object_filter_multi_rules_not_bucket_not_metadata/0},
+                        {"Test Enable Both", fun test_object_filter_enable_both/0},
+                        {"Test Enable Realtime", fun test_object_filter_enable_realtime/0},
+                        {"Test Enable Fullsync", fun test_object_filter_enable_fullsync/0},
+                        {"Test Disable Both", fun test_object_filter_disable_both/0},
+                        {"Test Disable Realtime", fun test_object_filter_disable_realtime/0},
+                        {"Test Disable Fullsync", fun test_object_filter_disable_fullsync/0}
+
                     ]
                 end
             }
@@ -22,11 +29,31 @@ object_filter_test_() ->
     }.
 
 setup() ->
+    catch(meck:unload(riak_core_capability)),
+    meck:new(riak_core_capability, [passthrough]),
+    meck:expect(riak_core_capability, get, 1, fun(_) -> 1.0 end),
+    meck:expect(riak_core_capability, get, 2, fun(_, _) -> 1.0 end),
+
+    catch(meck:unload(riak_core_connection)),
+    meck:new(riak_core_connection, [passthrough]),
+    meck:expect(riak_core_connection, symbolic_clustername, 0, fun() -> "cluster-1" end),
+
+    catch(meck:unload(riak_core_ring_manager)),
+    meck:new(riak_core_ring_manager, [passthrough]),
+    meck:expect(riak_core_ring_manager, ring_trans, 2, fun(_, _) -> ok end),
+
     App1 = riak_repl_test_util:start_test_ring(),
     App2 = riak_repl_test_util:start_lager(),
-    [App1, App2].
+    App3 = riak_repl2_object_filter:start_link(),
+    [App1, App2, App3].
 cleanup(StartedApps) ->
+    process_flag(trap_exit, true),
+    catch(meck:unload(riak_core_capability)),
+    catch(meck:unload(riak_core_connection)),
+    process_flag(trap_exit, false),
     riak_repl_test_util:stop_apps(StartedApps).
+%% ===================================================================
+%% Sing Rules
 %% ===================================================================
 test_object_filter_single_rules() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
@@ -76,8 +103,10 @@ test_object_filter_single_rules(13, Obj)->
 test_object_filter_single_rules(14, Obj)->
     Actual = filter_object_rule_test([{not_metadata, {filter, all}}], Obj),
     ?assertEqual(false, Actual).
-%% ===================================================================
 
+
+%% ===================================================================
+%% Multi Rules: bucket and metadata
 %% ===================================================================
 test_object_filter_multi_rules_bucket_metadata() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
@@ -140,8 +169,10 @@ test_object_filter_multi_rules_bucket_metadata(17, Obj)->
 test_object_filter_multi_rules_bucket_metadata(18, Obj)->
     Actual = filter_object_rule_test([[{bucket, all}, {metadata, {other, all}}]], Obj),
     ?assertEqual(false, Actual).
-%% ===================================================================
 
+
+%% ===================================================================
+%% Multi Rules: bucket and not_metadata
 %% ===================================================================
 test_object_filter_multi_rules_bucket_not_metadata() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
@@ -204,8 +235,10 @@ test_object_filter_multi_rules_bucket_not_metadata(17, Obj)->
 test_object_filter_multi_rules_bucket_not_metadata(18, Obj)->
     Actual = filter_object_rule_test([[{bucket, all}, {not_metadata, {other, all}}]], Obj),
     ?assertEqual(true, Actual).
-%% ===================================================================
 
+
+%% ===================================================================
+%% Multi Rules: not_bucket and metadata
 %% ===================================================================
 test_object_filter_multi_rules_not_bucket_metadata() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
@@ -268,8 +301,10 @@ test_object_filter_multi_rules_not_bucket_metadata(17, Obj)->
 test_object_filter_multi_rules_not_bucket_metadata(18, Obj)->
     Actual = filter_object_rule_test([[{not_bucket, all}, {metadata, {other, all}}]], Obj),
     ?assertEqual(false, Actual).
-%% ===================================================================
 
+
+%% ===================================================================
+%% Multi Rules: not_bucket and not_metadata
 %% ===================================================================
 test_object_filter_multi_rules_not_bucket_not_metadata() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
@@ -332,5 +367,72 @@ test_object_filter_multi_rules_not_bucket_not_metadata(17, Obj)->
 test_object_filter_multi_rules_not_bucket_not_metadata(18, Obj)->
     Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {other, all}}]], Obj),
     ?assertEqual(true, Actual).
+
+
 %% ===================================================================
+%% Enable and Disable
+%% ===================================================================
+test_object_filter_enable_both() ->
+    riak_repl2_object_filter:enable(),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    riak_repl2_object_filter:disable(),
+    pass.
+
+test_object_filter_enable_realtime() ->
+    riak_repl2_object_filter:enable("realtime"),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
+    riak_repl2_object_filter:disable("realtime"),
+    pass.
+
+test_object_filter_enable_fullsync() ->
+    riak_repl2_object_filter:enable("fullsync"),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    riak_repl2_object_filter:disable("realtime"),
+    pass.
+
+test_object_filter_disable_both() ->
+    riak_repl2_object_filter:enable(),
+    riak_repl2_object_filter:disable(),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
+    pass.
+
+test_object_filter_disable_realtime() ->
+    riak_repl2_object_filter:enable(),
+    riak_repl2_object_filter:disable("realtime"),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    riak_repl2_object_filter:disable(),
+    pass.
+
+test_object_filter_disable_fullsync() ->
+    riak_repl2_object_filter:enable(),
+    riak_repl2_object_filter:disable("fullsync"),
+    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
+    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
+    riak_repl2_object_filter:disable(),
+    pass.
+
+
+%% ===================================================================
+%% Load Config
+%% ===================================================================
+
+
+
+%% ===================================================================
+%% Realtime Blacklist
+%% ===================================================================
+
+
+
+%% ===================================================================
+%% Fullsync downgrade config
+%% ===================================================================
+
+
+
 

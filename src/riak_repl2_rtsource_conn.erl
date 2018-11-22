@@ -151,7 +151,7 @@ init([Remote]) ->
   {ok, #state{remote = Remote}}.
 
 handle_call(stop, _From, State) ->
-  {stop, normal, ok, State};
+  {stop, {shutdown, routine}, ok, State};
 handle_call(address, _From, State = #state{address=A, primary=P}) ->
     {reply, {A,P}, State};
 handle_call(get_socketname_primary, _From, State=#state{socket = S, primary = P}) ->
@@ -312,7 +312,8 @@ handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
 
-terminate(Reason, #state{socket = Socket, transport = Transport, address = A, primary = P}) ->
+terminate(Reason, #state{socket = Socket, transport = Transport, address = A, primary = P, helper_pid = H}) ->
+    catch riak_repl2_rtsource_helper:stop(H),
     Key = {A,P},
     lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, Key]),
     Transport:close(Socket),

@@ -59,7 +59,15 @@ start_link(Remote) ->
 
 connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props, Primary) ->
     Transport:controlling_process(Socket, RTSourceConnMgrPid),
-    gen_server:call(RTSourceConnMgrPid, {connected, Socket, Transport, IPPort, Proto, _Props, Primary}).
+    try
+    gen_server:call(RTSourceConnMgrPid,
+        {connected, Socket, Transport, IPPort, Proto, _Props, Primary})
+    catch
+        _:Reason ->
+            lager:warning("Unable to contact RT Source Conn Manager (~p). Killing it to force a reconnect", RTSourceConnMgrPid),
+            exit(RTSourceConnMgrPid, {unable_to_contact, Reason}),
+            ok
+    end.
 
 connect_failed(_ClientProto, Reason, RTSourceConnMgrPid) ->
     gen_server:cast(RTSourceConnMgrPid, {connect_failed, Reason}).
@@ -187,7 +195,7 @@ handle_call(get_rtsource_conn_pids, _From, State = #state{endpoints = E}) ->
     {reply, Result, State};
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
+    {stop, shutdown, ok, State};
 
 handle_call(get_endpoints, _From, State=#state{endpoints = E}) ->
     {reply, E, State};
@@ -243,6 +251,8 @@ handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote
                        case Reason of
                            normal ->
                                lager:info("riak_repl2_rtsource_conn terminated due to reason nomral, Endpoint: ~p", [Key]);
+                           {shutdown, routine} ->
+                               lager:info("riak_repl2_rtsource_conn terminated due to reason routine shutdown, Endpoint: ~p", [Key]);
                            {shutdown, heartbeat_timeout} ->
                                lager:info("riak_repl2_rtsource_conn terminated due to reason heartbeat timeout, Endpoint: ~p", [Key]);
                            {shutdown, Error} ->

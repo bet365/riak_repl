@@ -104,8 +104,12 @@ supported_match_types(1.0) ->
 supported_match_types(_) ->
     [].
 
+supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
+    is_binary(MatchValue1) and is_binary(MatchValue2);
 supported_match_value_formats(1.0, bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
+supported_match_value_formats(1.0, not_bucket, {MatchValue1, MatchValue2}) ->
+    is_binary(MatchValue1) and is_binary(MatchValue2);
 supported_match_value_formats(1.0, not_bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
 supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->

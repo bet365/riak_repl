@@ -62,8 +62,6 @@ init([Remote, Transport, Socket, Version]) ->
     async_pull(State),
     {ok, State}.
 
-handle_call({pull, {error, {terminate, normal}}}, _From, State) ->
-    {stop, normal, ok, State};
 handle_call({pull, {error, Reason}}, _From, State) ->
     riak_repl_stats:rt_source_errors(),
     {stop, {queue_error, Reason}, ok, State};
@@ -75,7 +73,7 @@ handle_call({pull, {Seq, NumObjects, _BinObjs, _Meta} = Entry}, From,
     async_pull(State2),
     {noreply, State2#state{sent_seq = Seq, objects = Objects + NumObjects}};
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
+    {stop, {shutdown, routine}, ok, State};
 handle_call(status, _From, State =
     #state{sent_seq = SentSeq, objects = Objects}) ->
     {reply, [{sent_seq, SentSeq},

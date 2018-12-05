@@ -748,6 +748,11 @@ filter_blacklisted_endpoints(EpAddrs, AllEps) ->
                     end),
     lists:filter(PredicateFun, EpAddrs).
 
+%% @doc Return the value for cm_cancellation_interval
+get_cancellation_interval() ->
+    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+
+
 identity_locator({IP,Port}, _Policy) ->
   {ok, [{{IP,Port}, false}]};
 identity_locator([Ips], _Policy) ->
@@ -771,9 +776,23 @@ cluster_by_name_locator(ClusterName, _Policy) ->
 cluster_by_addr_locator(Addr, _Policy) ->
     {ok, [{Addr, false}]}.
 
-%% @doc Return the value for cm_cancellation_interval
-get_cancellation_interval() ->
-    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+fullsync_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+fullsync_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+realtime_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+realtime_locator(Name, legacy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name);
+realtime_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name).
+
+proxy_get_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+
+
 
 %% @doc Initialize the default set of locator functions.
 initialize_locators() ->
@@ -787,4 +806,13 @@ initialize_locators() ->
     WithClusterAddr = orddict:store(cluster_by_addr,
                                     fun cluster_by_addr_locator/2,
                                     WithClusterName),
-    WithClusterAddr.
+    WithFSRepl = orddict:store(fs_repl,
+                                    fun fullsync_locator/2,
+                                    WithClusterAddr),
+    WithRTRepl = orddict:store(rt_repl,
+                                    fun realtime_locator/2,
+                                    WithFSRepl),
+    WithProxyGet = orddict:store(proxy_get,
+                                    fun proxy_get_locator/2,
+                                    WithRTRepl),
+    WithProxyGet.

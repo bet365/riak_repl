@@ -20,6 +20,11 @@ data_manager_test_() ->
           meck:expect(riak_core_capability, get, 1, fun(_) -> v1 end),
           meck:expect(riak_core_capability, get, 2, fun(_, _) -> v1 end),
 
+          catch(meck:unload(riak_repl2_leader)),
+          meck:new(riak_repl2_leader, [passthrough]),
+          meck:expect(riak_repl2_leader, leader_node, 0, fun() -> node() end),
+
+
           riak_core_node_watcher_events_start(),
 
           %% ring_trans

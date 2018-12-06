@@ -130,7 +130,7 @@ v2_to_v2_comms(_State) ->
               {"assert done",
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
-                       DoneFun(),
+                       DoneFun([]),
                        ?assert(riak_repl2_rtq:all_queues_empty())
                end}
              ]
@@ -188,7 +188,7 @@ v1_to_v1_comms(_State) ->
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
                        %%?assert(is_function(DoneFun)),
-                       DoneFun(),
+                       DoneFun([]),
                        ?assert(riak_repl2_rtq:all_queues_empty())
                end}
              ]

@@ -389,7 +389,7 @@ remove_nodes([Node|Nodes], Remote, ConnectionsDict) ->
 
 become_leader(State, LeaderNode) when State#state.is_leader == false ->
     send_leader_data(),
-    erlang:send_after(5000, self(), reset_restoration_flag),
+    erlang:send_after(1000, self(), reset_restoration_flag),
     State#state{is_leader = true, leader_node = LeaderNode, restoration = true};%% active_nodes = ActiveNodes};
 become_leader(State, LeaderNode) ->
     State#state{is_leader = true, leader_node = LeaderNode}.

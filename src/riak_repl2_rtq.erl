@@ -627,12 +627,19 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2, FEnabled, BFBlacklistedRemotes) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
     {DeliverResults, Cs3} = lists:unzip(DeliverAndCs3),
-    AllSkipped = lists:all(fun
+
+    %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
+    %% We do not want to add an object that all consumers will filter or skip to the queue
+    AllSkippedOrFiltered = lists:all(fun
         (skipped) -> true;
+        (filtered) -> true;
+        (no_fun) -> false;
+        (delivered) -> false;
         (_) -> false
     end, DeliverResults),
+
     State2 = if
-        AllSkipped andalso length(BFFilteredConsumers) > 0 ->
+        AllSkippedOrFiltered andalso length(BFFilteredConsumers) > 0 ->
             State;
         true ->
             ets:insert(QTab, QEntry2),

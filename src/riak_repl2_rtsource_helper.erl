@@ -143,8 +143,17 @@ encode_and_send(QEntry, Remote, Transport, Socket, State) ->
     QEntry2 = merge_forwards_and_routed_meta(QEntry, Remote),
     {Encoded, State2} = encode(QEntry2, State),
     lager:debug("Forwarding to ~p with new data: ~p derived from ~p", [State#state.remote, QEntry2, QEntry]),
-    Transport:send(Socket, Encoded),
+    case Transport:send(Socket, Encoded) of
+        ok -> ok;
+        _ -> failed_to_send(QEntry, Remote)
+    end,
     State2.
+
+failed_to_send({Seq, NumObjects, BinObjs, Meta}, Remote) ->
+    riak_repl2_rtq:push(NumObjects, BinObjs, Meta),
+    %% could ack the sequence number on the rtq?
+    riak_repl2_rtq:ack(Seq, Remote),
+    exit(self(), failed_to_send).
 
 
 encode({Seq, _NumObjs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->

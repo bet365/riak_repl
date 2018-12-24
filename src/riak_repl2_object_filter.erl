@@ -455,9 +455,9 @@ handle_cast(Request, State) ->
 handle_info(poll_core_capability, State) ->
     Version = riak_core_capability:get({riak_repl, object_filtering_version}, 0),
     case Version == ?CURRENT_VERSION of
-        true ->
-            erlang:send_after(5000, self(), poll_core_capability);
         false ->
+            erlang:send_after(5000, self(), poll_core_capability);
+        true ->
             ?VERSION(Version)
     end,
     {noreply, State};

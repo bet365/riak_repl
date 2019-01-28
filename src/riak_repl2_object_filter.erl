@@ -19,6 +19,7 @@
     get_realtime_blacklist/1,
     get_config/1,
     get_config/2,
+    get_config/3,
     get_status/1,
     get_version/0,
     filter/2,
@@ -56,6 +57,7 @@
 
 
 -define(SERVER, ?MODULE).
+-define(LASTMOD,  <<"X-Riak-Last-Modified">>).
 -define(SUPPORTED_MATCH_TYPES, supported_match_types(?VERSION)).
 -define(SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue), supported_match_value_formats(?VERSION, MatchType, MatchValue)).
 -define(SUPPORTED_KEYWORDS, supported_keywords(?VERSION)).
@@ -100,24 +102,48 @@
 %%% Macro Helper Functions
 %%%===================================================================
 supported_match_types(1.0) ->
-    [bucket, metadata, not_bucket, not_metadata];
+    [
+        bucket,
+        metadata,
+        not_bucket,
+        not_metadata,
+        lastmod_age_greater_than,
+        lastmod_age_less_than,
+        lastmod_greater_than,
+        lastmod_less_than
+    ];
 supported_match_types(_) ->
     [].
 
+%% Typed bucket
 supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
     is_binary(MatchValue1) and is_binary(MatchValue2);
+%% Bucket
 supported_match_value_formats(1.0, bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
+%% Typed Bucket
 supported_match_value_formats(1.0, not_bucket, {MatchValue1, MatchValue2}) ->
     is_binary(MatchValue1) and is_binary(MatchValue2);
+%% Bucket
 supported_match_value_formats(1.0, not_bucket, MatchValue) ->
     is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
+
 supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->
     true;
 supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) ->
     true;
 supported_match_value_formats(1.0, not_metadata, _) ->
     false;
+
+supported_match_value_formats(1.0, lastmod_age_greater_than, Age) ->
+    is_integer(Age);
+supported_match_value_formats(1.0, lastmod_age_less_than, Age) ->
+    is_integer(Age);
+supported_match_value_formats(1.0, lastmod_greater_than, TS) ->
+    is_integer(TS);
+supported_match_value_formats(1.0, lastmod_less_than, TS) ->
+    is_integer(TS);
+
 supported_match_value_formats(0, _, _) ->
     false;
 supported_match_value_formats(_, _, _) ->
@@ -169,6 +195,8 @@ get_config(_) ->
     [].
 %% returns config only for the remote that is named in the argument
 get_config(ReplMode, RemoteName) ->
+    get_config(ReplMode, RemoteName, undefined).
+get_config(ReplMode, RemoteName, TimeStamp) ->
     Config = case ReplMode of
                  fullsync -> ?MERGED_FS_CONFIG;
                  realtime -> ?MERGED_RT_CONFIG;
@@ -176,10 +204,14 @@ get_config(ReplMode, RemoteName) ->
                  loaded_realtime -> ?RT_CONFIG;
                  loaded_fullsync -> ?FS_CONFIG
              end,
-    case lists:keyfind(RemoteName, 1, Config) of
-        false -> ?DEFAULT_CONFIG(RemoteName);
-        Rconfig -> Rconfig
-    end.
+
+    ResConfig = case lists:keyfind(RemoteName, 1, Config) of
+                    false -> ?DEFAULT_CONFIG(RemoteName);
+                    Rconfig -> Rconfig
+                end,
+
+    maybe_set_lastmod_age(ReplMode, ResConfig, TimeStamp).
+
 
 get_maybe_downgraded_remote_config(Config, RemoteName) ->
     {_, A, B} = Config,
@@ -312,6 +344,7 @@ evaluate_multi_rule_results(Results) ->
         {false, false, _, _} -> not C
     end.
 
+%% {is_not_rule, should_filter}
 filter_object_check_single_rule(Rule, ObjectData) ->
     MatchBucket = get_object_bucket(ObjectData),
     MatchMetaDatas = get_object_metadatas(ObjectData),
@@ -324,7 +357,11 @@ filter_object_check_single_rule(Rule, ObjectData) ->
         {not_bucket, all} ->            {false, true};
         {not_bucket, _} ->              {false, false};
         {metadata, {K, V}} ->           {true, filter_object_check_metadatas(K, V, MatchMetaDatas)};
-        {not_metadata, {K, V}} ->       {false, filter_object_check_metadatas(K, V, MatchMetaDatas)}
+        {not_metadata, {K, V}} ->       {false, filter_object_check_metadatas(K, V, MatchMetaDatas)};
+        {lastmod_age_greater_than, Age} ->           {false, filter_object_lastmod_age(greater, Age, MatchMetaDatas)};
+        {lastmod_age_less_than, Age} ->           {false, filter_object_lastmod_age(less, Age, MatchMetaDatas)};
+        {lastmod_greater_than, TS} ->   {false, filter_object_lastmod(greater, TS, MatchMetaDatas)};
+        {lastmod_less_than, TS} ->   {false, filter_object_lastmod(less, TS, MatchMetaDatas)}
     end.
 
 filter_object_check_metadatas(_, _, []) -> false;
@@ -345,6 +382,28 @@ filter_object_check_metadata(Key, Value, Metadata) ->
         {ok, _} -> false;
         error -> false
     end.
+
+filter_object_lastmod_age(Mode, Age, MetaDatas) ->
+    NowSecs = timestamp_to_secs(os:timestamp()),
+    TS = NowSecs - Age,
+    filter_object_lastmod(Mode, TS, MetaDatas).
+
+filter_object_lastmod(Mode, FilterTS, MetaDatas) ->
+    AllTimeStamps = lists:foldl(fun(Dict, Acc) ->
+        case dict:find(?LASTMOD, Dict) of
+            {ok, TS} -> [timestamp_to_secs(TS) | Acc];
+            _ -> Acc
+        end end, [], MetaDatas),
+    ObjectTS = lists:max(AllTimeStamps),
+
+    case Mode of
+        greater -> ObjectTS >= FilterTS;
+        less -> ObjectTS =< FilterTS
+    end.
+
+
+
+
 
 %%%===================================================================
 maybe_downgrade_config({Remote, {allow, AllowedRules}, {block, BlockedRules}}, Version) ->
@@ -381,6 +440,46 @@ maybe_downgrade_single_rule(Rule, Version) ->
         {MatchType, MatchValue} -> supported_match_value_formats(Version, MatchType, MatchValue)
     end.
 %% ================================================================================================================== %%
+timestamp_to_secs({M, S, _}) ->
+    {M, S, _} = os:timestamp(),
+    M * 1000000 + S.
+
+maybe_set_lastmod_age(fullsync, Config, undefined) ->
+    Config;
+maybe_set_lastmod_age(fullsync, Config, Timestamp) ->
+    set_lastmod_age(Config, Timestamp);
+maybe_set_lastmod_age(_, Config, _) ->
+    Config.
+
+set_lastmod_age({RemoteName, {allow, Allowed}, {block, Blocked}}, TimeStamp) ->
+    Now = timestamp_to_secs(TimeStamp),
+    UpdatedAllowed = lists:reverse(allow, set_lastmod_age_helper(Allowed, Now, [])),
+    UpdatedBlocked = lists:reverse(block, set_lastmod_age_helper(Blocked, Now, [])),
+    {RemoteName, {allow, UpdatedAllowed}, {block, UpdatedBlocked}}.
+
+set_lastmod_age_helper([Rule | Rules], Now, OutRules) when is_list(Rule) ->
+    OutRules1 = set_lastmod_age_multi(Rule, Now, OutRules),
+    set_lastmod_age_helper(Rules, Now, OutRules1);
+set_lastmod_age_helper([Rule | Rules], Now, OutRules) ->
+    OutRules1 = set_lastmod_age_single(Rule, Now, OutRules),
+    set_lastmod_age_helper(Rules, Now, OutRules1).
+
+set_lastmod_age_multi(RuleList, Now, OutRules) ->
+    Multi = lists:reverse(lists:foldl(fun(Rule, Acc) -> set_lastmod_age_single(Rule, Now, Acc) end, [], RuleList)),
+    [Multi | OutRules].
+
+set_lastmod_age_single({lastmod_age_greater_than, Age}, Now, OutRules) ->
+    TS = Now - Age,
+    [{lastmod_greater_than, TS} | OutRules];
+set_lastmod_age_single({lastmod_age_less_than, Age}, Now, OutRules) ->
+    TS = Now - Age,
+    [{lastmod_less_than, TS} | OutRules];
+set_lastmod_age_single(Rule, _, OutRules) ->
+    [Rule | OutRules].
+
+
+
+
 
 %%%===================================================================
 %%% gen_server API

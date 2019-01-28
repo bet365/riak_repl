@@ -124,7 +124,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
 
     ObjectFilteringStatus = riak_repl2_object_filter:get_status(fullsync),
     ObjectFilteringVersion = riak_repl2_object_filter:get_version(),
-    ObjectFilteringConfig = riak_repl2_object_filter:get_config(fullsync, Cluster),
+    ObjectFilteringConfig = riak_repl2_object_filter:get_config(fullsync, Cluster, os:timestamp()),
     ObjectFiltering = {object_filtering, {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig}},
     OurCaps = decide_our_caps(RequestedStrategy, ObjectFiltering),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),

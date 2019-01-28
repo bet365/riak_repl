@@ -240,13 +240,12 @@ decide_common_strategy(OurCaps, TheirCaps) ->
 
 %% Based on the agreed common protocol level and the supported
 %% mode of AAE, decide what strategy we are capable of offering.
-decide_our_caps(RequestedStrategy) ->
+decide_our_caps(CommonMajor) ->
     SupportedStrategy =
-        case {riak_kv_entropy_manager:enabled(), RequestedStrategy} of
-            {false, _} -> keylist;
-            {true, aae} -> aae;
-            {true, keylist} -> keylist;
-            {true, _UnSupportedStrategy} -> RequestedStrategy
+        case {riak_kv_entropy_manager:enabled(), CommonMajor} of
+            {_,1} -> keylist;
+            {false,_} -> keylist;
+            {true,_} -> aae
         end,
     [{strategy, SupportedStrategy}, {bucket_filtering, riak_repl_util:bucket_filtering_enabled()}].
 

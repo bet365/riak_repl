@@ -101,8 +101,10 @@ supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
     is_binary(MatchValue1) and is_binary(MatchValue2);
 %% Bucket
 supported_match_value_formats(1.0, bucket, MatchValue) ->
-    is_binary(MatchValue) or lists:member(MatchValue, supported_keywords());
+    is_binary(MatchValue);
 supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->
+    true;
+supported_match_value_formats(1.0, metadata, {_DictKey}) ->
     true;
 supported_match_value_formats(1.0, lastmod_age_greater_than, Age) ->
     is_integer(Age);
@@ -121,14 +123,6 @@ supported_match_value_formats(_, _, _) ->
 
 
 
-
-supported_keywords() ->
-    V = app_helper:get_env(riak_repl, object_filtering_version, 0),
-    supported_keywords(V).
-supported_keywords(1.0) ->
-    [all];
-supported_keywords(_) ->
-    [].
 
 invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, get_version(), RemoteName, Rule}};
 invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, get_version(), RemoteName, Rule}}.
@@ -340,8 +334,8 @@ filter_object_check_single_rule(Rule, ObjectData) ->
     case Rule of
         '*' ->                              true;
         {bucket, MatchBucket} ->            true;
-        {bucket, all} ->                    true;
         {bucket, _} ->                      false;
+        {metadata, {K}} ->                  filter_object_check_metadatas(K, any, MatchMetaDatas);
         {metadata, {K, V}} ->               filter_object_check_metadatas(K, V, MatchMetaDatas);
         {lastmod_age_greater_than, Age} ->  filter_object_lastmod_age(greater, Age, MatchMetaDatas);
         {lastmod_age_less_than, Age} ->     filter_object_lastmod_age(less, Age, MatchMetaDatas);
@@ -356,7 +350,7 @@ filter_object_check_metadatas(Key, Value, [Metadata| Rest]) ->
         false -> filter_object_check_metadatas(Key, Value, Rest)
     end.
 
-filter_object_check_metadata(Key, all, Metadata) ->
+filter_object_check_metadata(Key, any, Metadata) ->
     case dict:find(Key, Metadata) of
         {ok, _} -> true;
         error -> false

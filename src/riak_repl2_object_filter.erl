@@ -54,46 +54,17 @@
     terminate/2,
     code_change/3]).
 %% =================================================
-
-
--define(SERVER, ?MODULE).
--define(LASTMOD,  <<"X-Riak-Last-Modified">>).
--define(SUPPORTED_MATCH_TYPES, supported_match_types(?VERSION)).
--define(SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue), supported_match_value_formats(?VERSION, MatchType, MatchValue)).
--define(SUPPORTED_KEYWORDS, supported_keywords(?VERSION)).
--define(WILDCARD, '*').
-
--define(RT_STATUS, app_helper:get_env(riak_repl, object_filtering_realtime_status, disabled)).
--define(FS_STATUS, app_helper:get_env(riak_repl, object_filtering_fullsync_status, disabled)).
-
--define(VERSION, app_helper:get_env(riak_repl, object_filtering_version, 0)).
--define(REPL_CONFIG, app_helper:get_env(riak_repl, object_filtering_repl_config, [])).
--define(RT_CONFIG, app_helper:get_env(riak_repl, object_filtering_realtime_config, [])).
--define(FS_CONFIG, app_helper:get_env(riak_repl, object_filtering_fullsync_config, [])).
--define(MERGED_RT_CONFIG, app_helper:get_env(riak_repl, object_filtering_merged_realtime_config, [])).
--define(MERGED_FS_CONFIG, app_helper:get_env(riak_repl, object_filtering_merged_fullsync_config, [])).
--define(CLUSTERNAME, app_helper:get_env(riak_repl, clustername, "undefined")).
-
--define(RT_STATUS(S), application:set_env(riak_repl, object_filtering_realtime_status, S)).
--define(FS_STATUS(S), application:set_env(riak_repl, object_filtering_fullsync_status, S)).
-
--define(VERSION(V), application:set_env(riak_repl, object_filtering_version, V)).
--define(REPL_CONFIG(C), application:set_env(riak_repl, object_filtering_repl_config, C)).
--define(RT_CONFIG(C), application:set_env(riak_repl, object_filtering_realtime_config, C)).
--define(FS_CONFIG(C), application:set_env(riak_repl, object_filtering_fullsync_config, C)).
--define(MERGED_RT_CONFIG(C), application:set_env(riak_repl, object_filtering_merged_realtime_config, C)).
--define(MERGED_FS_CONFIG(C), application:set_env(riak_repl, object_filtering_merged_fullsync_config, C)).
--define(CLUSTERNAME(CName), application:set_env(riak_repl, clustername, CName)).
-
--define(CURRENT_VERSION, 1.0).
-
--define(ERROR_NO_FULES, {error, {no_rules, ?VERSION}}).
--define(ERROR_RULE_FORMAT(Rule), {error, {rule_format, ?VERSION, Rule}}).
--define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, ?VERSION}}).
--define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, ?VERSION, RemoteName}}).
+-define(ERROR_NO_FULES, {error, {no_rules, get_version()}}).
+-define(ERROR_RULE_FORMAT(Rule), {error, {rule_format, get_version(), Rule}}).
+-define(ERROR_DUPLICATE_REMOTE_ENTRIES, {error, {duplicate_remote_entries, get_version()}}).
+-define(ERROR_INVALID_REMOTE_NAME(RemoteName), {error, {invalid_remote_name, get_version(), RemoteName}}).
 -define(ERROR_INVALID_RULE(RemoteName, RuleType, Rule), invalid_rule(RemoteName, RuleType, Rule)).
 -define(ERROR_UNKNOWN_REPL_MODE(RelatedFun, Mode), {error, unknown_repl_mode, RelatedFun, Mode}).
 
+-define(SERVER, ?MODULE).
+-define(CURRENT_VERSION, 1.0).
+-define(LASTMOD,  <<"X-Riak-Last-Modified">>).
+-define(WILDCARD, '*').
 -define(DEFAULT_CONFIG(Remote), {Remote, {allow, ['*']}, {block, []}}).
 -define(TIMEOUT, 10000).
 -record(state, {}).
@@ -101,12 +72,15 @@
 %%%===================================================================
 %%% Macro Helper Functions
 %%%===================================================================
+
+supported_match_types() ->
+    V = app_helper:get_env(riak_repl, object_filtering_version, 0),
+    supported_match_types(V).
 supported_match_types(1.0) ->
     [
+        lnot,
         bucket,
         metadata,
-        not_bucket,
-        not_metadata,
         lastmod_age_greater_than,
         lastmod_age_less_than,
         lastmod_greater_than,
@@ -115,26 +89,21 @@ supported_match_types(1.0) ->
 supported_match_types(_) ->
     [].
 
+
+
+
+
+supported_match_value_formats(MatchType, MatchValue) ->
+    V = app_helper:get_env(riak_repl, object_filtering_version, 0),
+    supported_match_value_formats(V, MatchType, MatchValue).
 %% Typed bucket
 supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
     is_binary(MatchValue1) and is_binary(MatchValue2);
 %% Bucket
 supported_match_value_formats(1.0, bucket, MatchValue) ->
-    is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
-%% Typed Bucket
-supported_match_value_formats(1.0, not_bucket, {MatchValue1, MatchValue2}) ->
-    is_binary(MatchValue1) and is_binary(MatchValue2);
-%% Bucket
-supported_match_value_formats(1.0, not_bucket, MatchValue) ->
-    is_binary(MatchValue) or lists:member(MatchValue, ?SUPPORTED_KEYWORDS);
-
+    is_binary(MatchValue) or lists:member(MatchValue, supported_keywords());
 supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->
     true;
-supported_match_value_formats(1.0, not_metadata, {_DictKey, _DictValue}) ->
-    true;
-supported_match_value_formats(1.0, not_metadata, _) ->
-    false;
-
 supported_match_value_formats(1.0, lastmod_age_greater_than, Age) ->
     is_integer(Age);
 supported_match_value_formats(1.0, lastmod_age_less_than, Age) ->
@@ -143,19 +112,26 @@ supported_match_value_formats(1.0, lastmod_greater_than, TS) ->
     is_integer(TS);
 supported_match_value_formats(1.0, lastmod_less_than, TS) ->
     is_integer(TS);
-
+supported_match_value_formats(1.0, lnot, _) ->
+    true;
 supported_match_value_formats(0, _, _) ->
     false;
 supported_match_value_formats(_, _, _) ->
     false.
 
+
+
+
+supported_keywords() ->
+    V = app_helper:get_env(riak_repl, object_filtering_version, 0),
+    supported_keywords(V).
 supported_keywords(1.0) ->
     [all];
 supported_keywords(_) ->
     [].
 
-invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, ?VERSION, RemoteName, Rule}};
-invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, ?VERSION, RemoteName, Rule}}.
+invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, get_version(), RemoteName, Rule}};
+invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, get_version(), RemoteName, Rule}}.
 %%%===================================================================
 %%% API (Function Callbacks)
 %%%===================================================================
@@ -182,27 +158,29 @@ get_config_external(Mode, Remote) ->
 
 %% returns the entire config for all clusters
 get_config(fullsync) ->
-    ?MERGED_FS_CONFIG;
+    app_helper:get_env(riak_repl, object_filtering_merged_fullsync_config, []);
 get_config(realtime) ->
-    ?MERGED_RT_CONFIG;
+    app_helper:get_env(riak_repl, object_filtering_merged_realtime_config, []);
 get_config(loaded_repl) ->
-    ?REPL_CONFIG;
+    app_helper:get_env(riak_repl, object_filtering_repl_config, []);
 get_config(loaded_realtime) ->
-    ?RT_CONFIG;
+    app_helper:get_env(riak_repl, object_filtering_realtime_config, []);
 get_config(loaded_fullsync) ->
-    ?FS_CONFIG;
+    app_helper:get_env(riak_repl, object_filtering_fullsync_config, []);
 get_config(_) ->
     [].
+
+
 %% returns config only for the remote that is named in the argument
 get_config(ReplMode, RemoteName) ->
     get_config(ReplMode, RemoteName, undefined).
 get_config(ReplMode, RemoteName, TimeStamp) ->
     Config = case ReplMode of
-                 fullsync -> ?MERGED_FS_CONFIG;
-                 realtime -> ?MERGED_RT_CONFIG;
-                 loaded_repl -> ?REPL_CONFIG;
-                 loaded_realtime -> ?RT_CONFIG;
-                 loaded_fullsync -> ?FS_CONFIG
+                 fullsync -> get_config(fullsync);
+                 realtime -> get_config(realtime);
+                 loaded_repl -> get_config(loaded_repl);
+                 loaded_realtime -> get_config(loaded_realtime);
+                 loaded_fullsync -> get_config(loaded_fullsync)
              end,
 
     ResConfig = case lists:keyfind(RemoteName, 1, Config) of
@@ -215,33 +193,63 @@ get_config(ReplMode, RemoteName, TimeStamp) ->
 
 get_maybe_downgraded_remote_config(Config, RemoteName) ->
     {_, A, B} = Config,
-    maybe_downgrade_config({RemoteName, A, B}, ?VERSION).
+    maybe_downgrade_config({RemoteName, A, B}, get_version()).
 get_maybe_downgraded_config(Config, Version) ->
     maybe_downgrade_config(Config, Version).
 
 
 %% returns the status of our local cluster for object filtering
 get_status(realtime) ->
-    ?RT_STATUS;
+    app_helper:get_env(riak_repl, object_filtering_realtime_status, disabled);
 get_status(fullsync) ->
-    ?FS_STATUS.
+    app_helper:get_env(riak_repl, object_filtering_fullsync_status, disabled).
+
+
 %% returns the version of our local cluster for object filtering
 get_version() ->
-    ?VERSION.
+    app_helper:get_env(riak_repl, object_filtering_version, 0).
+
+
+
+
+
+set_config(fullsync, Config) ->
+    application:set_env(riak_repl, object_filtering_merged_fullsync_config, Config);
+set_config(realtime, Config) ->
+    application:set_env(riak_repl, object_filtering_merged_realtime_config, Config);
+set_config(loaded_repl, Config) ->
+    application:set_env(riak_repl, object_filtering_repl_config, Config);
+set_config(loaded_realtime, Config) ->
+    application:set_env(riak_repl, object_filtering_realtime_config, Config);
+set_config(loaded_fullsync, Config) ->
+    application:set_env(riak_repl, object_filtering_fullsync_config, Config).
+
+
+set_status(realtime, Status) ->
+    application:set_env(riak_repl, object_filtering_realtime_status, Status);
+set_status(fullsync, Status) ->
+    application:set_env(riak_repl, object_filtering_fullsync_status, Status).
+
+set_version(Version) ->
+    application:set_env(riak_repl, object_filtering_version, Version).
+
+set_clustername(Name) ->
+    application:set_env(riak_repl, clustername, Name).
+
 
 %% Function calls for repl_console
 status() ->
     {status_single_node,
         {node(),
             {
-                ?VERSION,
-                ?RT_STATUS,
-                ?FS_STATUS,
-                erlang:phash2(?MERGED_RT_CONFIG),
-                erlang:phash2(?MERGED_FS_CONFIG),
-                erlang:phash2(?REPL_CONFIG),
-                erlang:phash2(?FS_CONFIG),
-                erlang:phash2(?RT_CONFIG)
+                get_version(),
+                get_status(realtime),
+                get_status(fullsync),
+                erlang:phash2(get_config(realtime)),
+                erlang:phash2(get_config(fullsync)),
+                erlang:phash2(get_config(loaded_repl)),
+                erlang:phash2(get_config(loaded_fullsync)),
+                erlang:phash2(get_config(loaded_realtime))
             }
         }
     }.
@@ -264,13 +272,13 @@ filter({fullsync, enabled, _Version, Config}, Object) ->
 
 %% returns a list of allowed and blocked remotes
 get_realtime_blacklist(Object) ->
-    case ?RT_STATUS of
+    case get_status(realtime) of
         enabled ->
             F = fun({Remote, Allowed, Blocked}, Obj) ->
                 Filter = filter_object_single_remote({Remote, Allowed, Blocked}, get_object_data(Obj)),
                 {Remote, Filter}
                 end,
-            AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- ?MERGED_RT_CONFIG],
+            AllFilteredResults = [F({Remote, Allowed, Blocked}, Object) || {Remote, Allowed, Blocked} <- get_config(realtime)],
             [Remote || {Remote, Filtered} <- AllFilteredResults, Filtered == true];
         _ ->
             []
@@ -278,7 +286,7 @@ get_realtime_blacklist(Object) ->
 
 %% reutrns true or false to say if you can send an object to a remote name
 filter(realtime, RemoteName, Meta) ->
-    case ?RT_STATUS of
+    case get_status(realtime) of
         enabled ->
             case orddict:find(?BT_META_BLACKLIST, Meta) of
                 {ok, Blacklist} ->
@@ -313,55 +321,32 @@ filter_object_rule_check([MultiRule| Rest], ObjectData) when is_list(MultiRule) 
         false -> filter_object_rule_check(Rest, ObjectData)
     end;
 filter_object_rule_check([Rule| Rest], ObjectData) ->
-    {R1, R2} = filter_object_check_single_rule(Rule, ObjectData),
-    case evaluate_single_rule_result(R1, R2) of
+    case filter_object_check_single_rule(Rule, ObjectData) of
         true -> true;
         false -> filter_object_rule_check(Rest, ObjectData)
     end.
 
-filter_object_check_multi_rule([], _, Results) -> evaluate_multi_rule_results(Results);
+filter_object_check_multi_rule([], _, Results) ->
+    lists:all(fun(Elem) -> Elem end, Results);
 filter_object_check_multi_rule([Rule | Rest], ObjectData, Results) ->
     R = filter_object_check_single_rule(Rule, ObjectData),
-    filter_object_check_multi_rule(Rest, ObjectData, Results++[R]).
+    filter_object_check_multi_rule(Rest, ObjectData, [R | Results]).
 
-evaluate_single_rule_result(R1, R2) ->
-    case {R1, R2} of
-        {true, X} -> X;
-        {false, X} -> not X
-    end.
-evaluate_multi_rule_results(Results) ->
-    [{A, B, C, D}] = lists:foldl(
-        fun({A1,B1}, [{A21, A22, B21, B22}]) ->
-            case {A1, B1} of
-                {true, _} -> [{(A1 or A21), (A1 and A22), (B1 and B21), (B1 and B22)}];
-                {false, _} -> [{(A1 or A21), (A1 and A22), (B1 and B21), (not B1 and B22)}]
-            end
-        end, [{false, true, true, true}], Results),
-    case {A, B, C, D} of
-        {true, true, _, _} -> C;
-        {true, false, _, _} -> D;
-        {false, true, _, _} -> D;
-        {false, false, _, _} -> not C
-    end.
-
-%% {is_not_rule, should_filter}
+filter_object_check_single_rule({lnot, Rule}, ObjectData) ->
+    not filter_object_check_single_rule(Rule, ObjectData);
 filter_object_check_single_rule(Rule, ObjectData) ->
     MatchBucket = get_object_bucket(ObjectData),
     MatchMetaDatas = get_object_metadatas(ObjectData),
     case Rule of
-        '*' ->                          {true, true};
-        {bucket, MatchBucket} ->        {true, true};
-        {bucket, all} ->                {true, true};
-        {bucket, _} ->                  {true, false};
-        {not_bucket, MatchBucket} ->    {false, true};
-        {not_bucket, all} ->            {false, true};
-        {not_bucket, _} ->              {false, false};
-        {metadata, {K, V}} ->           {true, filter_object_check_metadatas(K, V, MatchMetaDatas)};
-        {not_metadata, {K, V}} ->       {false, filter_object_check_metadatas(K, V, MatchMetaDatas)};
-        {lastmod_age_greater_than, Age} ->           {false, filter_object_lastmod_age(greater, Age, MatchMetaDatas)};
-        {lastmod_age_less_than, Age} ->           {false, filter_object_lastmod_age(less, Age, MatchMetaDatas)};
-        {lastmod_greater_than, TS} ->   {false, filter_object_lastmod(greater, TS, MatchMetaDatas)};
-        {lastmod_less_than, TS} ->   {false, filter_object_lastmod(less, TS, MatchMetaDatas)}
+        '*' ->                              true;
+        {bucket, MatchBucket} ->            true;
+        {bucket, all} ->                    true;
+        {bucket, _} ->                      false;
+        {metadata, {K, V}} ->               filter_object_check_metadatas(K, V, MatchMetaDatas);
+        {lastmod_age_greater_than, Age} ->  filter_object_lastmod_age(greater, Age, MatchMetaDatas);
+        {lastmod_age_less_than, Age} ->     filter_object_lastmod_age(less, Age, MatchMetaDatas);
+        {lastmod_greater_than, TS} ->       filter_object_lastmod(greater, TS, MatchMetaDatas);
+        {lastmod_less_than, TS} ->          filter_object_lastmod(less, TS, MatchMetaDatas)
     end.
 
 filter_object_check_metadatas(_, _, []) -> false;
@@ -402,9 +387,6 @@ filter_object_lastmod(Mode, FilterTS, MetaDatas) ->
     end.
 
 
-
-
-
 %%%===================================================================
 maybe_downgrade_config({Remote, {allow, AllowedRules}, {block, BlockedRules}}, Version) ->
     DowngradedAllowedRules = maybe_downgrade_rules(AllowedRules, Version, []),
@@ -441,8 +423,8 @@ maybe_downgrade_single_rule(Rule, Version) ->
     end.
 %% ================================================================================================================== %%
 timestamp_to_secs({M, S, _}) ->
-    {M, S, _} = os:timestamp(),
     M * 1000000 + S.
+
 
 maybe_set_lastmod_age(fullsync, Config, undefined) ->
     Config;
@@ -510,9 +492,13 @@ ring_update(NewStatus, NewConfigs) ->
 %%%===================================================================
 init([]) ->
     load_ring_configs_and_status(),
+
     Version = riak_core_capability:get({riak_repl, object_filtering_version}, 0),
-    ?VERSION(Version),
-    ?CLUSTERNAME(riak_core_connection:symbolic_clustername()),
+    set_version(Version),
+
+    ClusterName = riak_core_connection:symbolic_clustername(),
+    set_clustername(ClusterName),
+
     case Version == ?CURRENT_VERSION of
         false ->
             erlang:send_after(5000, self(), poll_core_capability);
@@ -557,7 +543,7 @@ handle_info(poll_core_capability, State) ->
         false ->
             erlang:send_after(5000, self(), poll_core_capability);
         true ->
-            ?VERSION(Version)
+            set_version(Version)
     end,
     {noreply, State};
 handle_info(_Info, State) ->
@@ -575,13 +561,13 @@ code_change(_OldVsn, State, _Extra) ->
 ring_update_update_configs({NewRTStatus, NewFSStatus}, {NewReplConfig, NewRTConfig, NewFSConfig, NewMergedRTConfig, NewMergedFSConfig}) ->
     List =
         [
-            {NewRTStatus, ?RT_STATUS, object_filtering_realtime_status},
-            {NewFSStatus, ?FS_STATUS, object_filtering_fullsync_status},
-            {NewReplConfig, ?REPL_CONFIG, object_filtering_repl_config},
-            {NewRTConfig, ?RT_CONFIG, object_filtering_realtime_config},
-            {NewFSConfig, ?FS_CONFIG, object_filtering_fullsync_config},
-            {NewMergedRTConfig, ?MERGED_RT_CONFIG, object_filtering_merged_realtime_config},
-            {NewMergedFSConfig, ?MERGED_FS_CONFIG, object_filtering_merged_fullsync_config}
+            {NewRTStatus,       get_status(realtime),           object_filtering_realtime_status},
+            {NewFSStatus,       get_status(fullsync),           object_filtering_fullsync_status},
+            {NewReplConfig,     get_config(loaded_repl),        object_filtering_repl_config},
+            {NewRTConfig,       get_config(loaded_realtime),    object_filtering_realtime_config},
+            {NewFSConfig,       get_config(loaded_fullsync),    object_filtering_fullsync_config},
+            {NewMergedRTConfig, get_config(realtime),           object_filtering_merged_realtime_config},
+            {NewMergedFSConfig, get_config(fullsync),           object_filtering_merged_fullsync_config}
         ],
     UpdateFun =
         fun(New, Old, Key) ->
@@ -593,47 +579,56 @@ ring_update_update_configs({NewRTStatus, NewFSStatus}, {NewReplConfig, NewRTConf
     [UpdateFun(A, B, C) || {A, B, C} <- List].
 
 update_ring_configs() ->
+    ReplConfig = get_config(loaded_repl),
+    RTConfig = get_config(loaded_realtime),
+    FSConfig = get_config(loaded_fullsync),
+    MergedRTConfig = get_config(realtime),
+    MergedFSConfig = get_config(fullsync),
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_configs/2,
-        {?REPL_CONFIG, ?RT_CONFIG, ?FS_CONFIG, ?MERGED_RT_CONFIG, ?MERGED_FS_CONFIG}).
+        {ReplConfig, RTConfig, FSConfig, MergedRTConfig, MergedFSConfig}).
 
 load_ring_configs_and_status() ->
     {{RT_Status, FS_Status}, {ReplConfig, RealtimeConfig, FullsyncConfig, MergedRTConfig, MergedFSConfig}} = riak_repl_ring:get_object_filtering_data(),
-    ?RT_STATUS(RT_Status),
-    ?FS_STATUS(FS_Status),
-    ?REPL_CONFIG(ReplConfig),
-    ?RT_CONFIG(RealtimeConfig),
-    ?FS_CONFIG(FullsyncConfig),
-    ?MERGED_RT_CONFIG(MergedRTConfig),
-    ?MERGED_FS_CONFIG(MergedFSConfig).
+    set_status(realtime, RT_Status),
+    set_status(fullsync, FS_Status),
+    set_config(loaded_repl, ReplConfig),
+    set_config(loaded_realtime, RealtimeConfig),
+    set_config(loaded_fullsync, FullsyncConfig),
+    set_config(realtime, MergedRTConfig),
+    set_config(fullsync, MergedFSConfig).
 
 object_filtering_disable(repl) ->
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {disabled, disabled}),
-    application:set_env(riak_repl, object_filtering_realtime_status, disabled),
-    application:set_env(riak_repl, object_filtering_fullsync_status, disabled),
+    set_status(realtime, disabled),
+    set_status(fullsync, disabled),
     ok;
 object_filtering_disable(realtime) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {disabled, ?FS_STATUS}),
-    application:set_env(riak_repl, object_filtering_realtime_status, disabled),
+    FSStatus = get_status(fullsync),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {disabled, FSStatus}),
+    set_status(realtime, disabled),
     ok;
 object_filtering_disable(fullsync) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {?RT_STATUS, disabled}),
-    application:set_env(riak_repl, object_filtering_fullsync_status, disabled),
+    RTStatus = get_status(realtime),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {RTStatus, disabled}),
+    set_status(fullsync, disabled),
     ok;
 object_filtering_disable(Mode) ->
     ?ERROR_UNKNOWN_REPL_MODE(object_filtering_disable, Mode).
 
 object_filtering_enable(repl) ->
     riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {enabled, enabled}),
-    application:set_env(riak_repl, object_filtering_realtime_status, enabled),
-    application:set_env(riak_repl, object_filtering_fullsync_status, enabled),
+    set_status(realtime, enabled),
+    set_status(fullsync, enabled),
     ok;
 object_filtering_enable(realtime) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {enabled, ?FS_STATUS}),
-    application:set_env(riak_repl, object_filtering_realtime_status, enabled),
+    FSStatus = get_status(fullsync),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {enabled, FSStatus}),
+    set_status(realtime, enabled),
     ok;
 object_filtering_enable(fullsync) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {?RT_STATUS, enabled}),
-    application:set_env(riak_repl, object_filtering_fullsync_status, enabled),
+    RTStatus = get_status(realtime),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {RTStatus, enabled}),
+    set_status(fullsync, enabled),
     ok;
 object_filtering_enable(Mode) ->
     ?ERROR_UNKNOWN_REPL_MODE(object_filtering_enabled, Mode).
@@ -666,25 +661,29 @@ object_filtering_config_file_helper(Action, Path) ->
 
 merge_and_load_configs(repl, ReplConfig) ->
     %% Change Repl, MergedRT, and MergedFS
-    MergedRT = merge_config(ReplConfig, ?RT_CONFIG),
-    MergedFS = merge_config(ReplConfig, ?FS_CONFIG),
-    ?REPL_CONFIG(ReplConfig),
-    ?MERGED_RT_CONFIG(MergedRT),
-    ?MERGED_FS_CONFIG(MergedFS),
+    RTConfig = get_config(loaded_repl),
+    FSConfig = get_config(loaded_fullsync),
+    MergedRT = merge_config(ReplConfig, RTConfig),
+    MergedFS = merge_config(ReplConfig, FSConfig),
+    set_config(loaded_repl, ReplConfig),
+    set_config(realtime, MergedRT),
+    set_config(fullsync, MergedFS),
     update_ring_configs(),
     ok;
 merge_and_load_configs(realtime, RTConfig) ->
     %% Change RT, MergedRT
-    MergedRT = merge_config(?REPL_CONFIG, RTConfig),
-    ?RT_CONFIG(RTConfig),
-    ?MERGED_RT_CONFIG(MergedRT),
+    ReplConfig = get_config(loaded_repl),
+    MergedRT = merge_config(ReplConfig, RTConfig),
+    set_config(loaded_realtime, RTConfig),
+    set_config(realtime, MergedRT),
     update_ring_configs(),
     ok;
 merge_and_load_configs(fullsync, FSConfig) ->
     %% Change FS, MergedFS
-    MergedFS = merge_config(?REPL_CONFIG, FSConfig),
-    ?FS_CONFIG(FSConfig),
-    ?MERGED_FS_CONFIG(MergedFS),
+    ReplConfig = get_config(loaded_repl),
+    MergedFS = merge_config(ReplConfig, FSConfig),
+    set_config(loaded_fullsync, FSConfig),
+    set_config(fullsync, MergedFS),
     update_ring_configs(),
     ok.
 
@@ -728,11 +727,11 @@ object_filtering_clear_config(Mode) ->
     object_filtering_clear_config_helper(Mode).
 
 object_filtering_clear_config_helper(all) ->
-    ?REPL_CONFIG([]),
-    ?RT_CONFIG([]),
-    ?FS_CONFIG([]),
-    ?MERGED_RT_CONFIG([]),
-    ?MERGED_FS_CONFIG([]),
+    set_config(loaded_repl, []),
+    set_config(loaded_realtime, []),
+    set_config(loaded_fullsync, []),
+    set_config(realtime, []),
+    set_config(fullsync, []),
     update_ring_configs(),
     ok;
 object_filtering_clear_config_helper(repl) ->
@@ -826,8 +825,10 @@ is_rule_supported(Rule) when (is_list(Rule) and (length(Rule) > 1)) -> is_multi_
 is_rule_supported(Rule) -> is_single_rule_supported(Rule).
 
 
+is_single_rule_supported({lnot, Rule}) ->
+    is_rule_supported(Rule);
 is_single_rule_supported({MatchType, MatchValue}) ->
-    lists:member(MatchType, ?SUPPORTED_MATCH_TYPES) and ?SUPPORTED_MATCH_VALUE_FORMATS(MatchType, MatchValue);
+    lists:member(MatchType, supported_match_types()) and supported_match_value_formats(MatchType, MatchValue);
 is_single_rule_supported(_) -> false.
 
 is_multi_rule_supported([]) -> true;

@@ -56,9 +56,9 @@ cleanup(StartedApps) ->
 %% Sing Rules
 %% ===================================================================
 test_object_filter_single_rules() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
     O = riak_object:new(B,K,V,M),
-    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,14)],
+    [test_object_filter_single_rules(N, O) || N <- lists:seq(15,18)],
     pass.
 
 test_object_filter_single_rules(1, Obj)->
@@ -102,7 +102,42 @@ test_object_filter_single_rules(13, Obj)->
     ?assertEqual(true, Actual);
 test_object_filter_single_rules(14, Obj)->
     Actual = filter_object_rule_test([{not_metadata, {filter, all}}], Obj),
-    ?assertEqual(false, Actual).
+    ?assertEqual(false, Actual);
+
+
+
+test_object_filter_single_rules(15, Obj)->
+    Actual = filter_object_rule_test([{lastmod_age_greater_than, -1000}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(16, Obj)->
+    Actual = filter_object_rule_test([{lastmod_age_greater_than, 1000}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(17, Obj)->
+    Actual = filter_object_rule_test([{lastmod_age_less_than, -1000}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(18, Obj)->
+    Actual = filter_object_rule_test([{lastmod_age_less_than, 1000}], Obj),
+    ?assertEqual(true, Actual);
+
+
+test_object_filter_single_rules(19, Obj)->
+    TS = timestamp_to_secs(os:timestamp()) + 1000,
+    Actual = filter_object_rule_test([{lastmod_greater_than, TS}], Obj),
+    ?assertEqual(true, Actual);
+test_object_filter_single_rules(20, Obj)->
+    TS = timestamp_to_secs(os:timestamp()) - 1000,
+    Actual = filter_object_rule_test([{lastmod_greater_than, TS}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(21, Obj)->
+    TS = timestamp_to_secs(os:timestamp()) + 1000,
+    Actual = filter_object_rule_test([{lastmod_less_than, TS}], Obj),
+    ?assertEqual(false, Actual);
+test_object_filter_single_rules(22, Obj)->
+    TS = timestamp_to_secs(os:timestamp()) - 1000,
+    Actual = filter_object_rule_test([{lastmod_less_than, TS}], Obj),
+    ?assertEqual(true, Actual).
+
+
 
 
 %% ===================================================================
@@ -368,6 +403,10 @@ test_object_filter_multi_rules_not_bucket_not_metadata(18, Obj)->
     Actual = filter_object_rule_test([[{not_bucket, all}, {not_metadata, {other, all}}]], Obj),
     ?assertEqual(true, Actual).
 
+%% ===================================================================
+%% Multi Rules: bucket and metadata and lastmod_age
+%% ===================================================================
+
 
 %% ===================================================================
 %% Enable and Disable
@@ -418,20 +457,10 @@ test_object_filter_disable_fullsync() ->
 
 
 %% ===================================================================
-%% Load Config
+%% Helper Functions
 %% ===================================================================
-
-
-
-%% ===================================================================
-%% Realtime Blacklist
-%% ===================================================================
-
-
-
-%% ===================================================================
-%% Fullsync downgrade config
-%% ===================================================================
+timestamp_to_secs({M, S, _}) ->
+  M * 1000000 + S.
 
 
 

@@ -344,7 +344,9 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
                     lager:debug("Bucket type:~p is not equal on both the source and sink; not writing object.",
                                 [BucketType]),
                     gen_server:cast(Me, {drop, BucketType}),
-                    DoneFun()
+                    Objects = riak_repl_util:from_wire(Ver, BinObjs),
+                    ObjectFilteringRules = [riak_repl2_object_filter:get_realtime_blacklist(Obj) || Obj <- Objects],
+                    DoneFun(ObjectFilteringRules)
             end;
         {DoneFun, BinObjs} ->
             %% this is for backwards compatibility with Repl version before metadata support (> 1.4)

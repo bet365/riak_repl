@@ -22,8 +22,8 @@
     get_config/3,
     get_status/1,
     get_version/0,
-    filter/2,
-    filter/3
+    fs_filter/2,
+    rt_filter/2
 ]).
 
 %% =================================================
@@ -262,11 +262,11 @@ status_all() ->
 
 
 % Returns true or false to say if we need to filter based on an object and remote name
-filter({fullsync, disabled, _Version, _Config}, _Object) ->
+fs_filter({disabled, _Version, _Config}, _Object) ->
     false;
-filter({fullsync, enabled, 0, _Config}, _Object) ->
+fs_filter({enabled, 0, _Config}, _Object) ->
     false;
-filter({fullsync, enabled, _Version, Config}, Object) ->
+fs_filter({enabled, _Version, Config}, Object) ->
     filter_object_single_remote(Config, get_object_data(Object)).
 
 
@@ -285,7 +285,7 @@ get_realtime_blacklist(Object) ->
     end.
 
 %% reutrns true or false to say if you can send an object to a remote name
-filter(realtime, RemoteName, Meta) ->
+rt_filter(RemoteName, Meta) ->
     case get_status(realtime) of
         enabled ->
             case orddict:find(?BT_META_BLACKLIST, Meta) of

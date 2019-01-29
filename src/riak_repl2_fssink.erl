@@ -170,7 +170,7 @@ handle_info(init_ack, State=#state{socket=Socket,
     {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
         maybe_get_object_filtering_configurations(TheirCaps, Cluster),
 
-    FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
+    FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%

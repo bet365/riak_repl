@@ -131,7 +131,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
 
 
-    FullsyncObjectFilter = {fullsync, ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
+    FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%

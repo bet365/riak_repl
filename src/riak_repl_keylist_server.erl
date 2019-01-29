@@ -100,7 +100,7 @@
         proto,
         bucket_filtering_config = [],
         bucket_filtering_enabled = false,
-        fullsync_object_filter = {fullsync, disabled, 0, [], "undefiend"}
+        fullsync_object_filter = {disabled, 0, []}
     }).
 
 %% -define(TRACE(Stmt),Stmt).
@@ -713,7 +713,7 @@ bloom_fold({{T, B}, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinS
                         {'EXIT', _} ->
                             NSent0 - 1;
                         RObj ->
-                            case riak_repl2_object_filter:filter(FullsyncObjectFilter, RObj) of
+                            case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
                                 true ->
                                     NSent0;
                                 false ->
@@ -740,7 +740,7 @@ bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, Fu
                                 {'EXIT', _} ->
                                     NSent0 - 1;
                                 RObj ->
-                                    case riak_repl2_object_filter:filter(FullsyncObjectFilter, RObj) of
+                                    case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
                                         true ->
                                             NSent0;
                                         false ->

@@ -370,7 +370,7 @@ filter_object_check_metadata(Key, Value, Metadata) ->
 
 filter_object_lastmod_age(Mode, Age, MetaDatas) ->
     NowSecs = timestamp_to_secs(os:timestamp()),
-    TS = NowSecs - Age,
+    TS = NowSecs + Age,
     filter_object_lastmod(Mode, TS, MetaDatas).
 
 filter_object_lastmod(Mode, FilterTS, MetaDatas) ->

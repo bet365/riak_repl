@@ -333,7 +333,7 @@ filter_object_check_multi_rule([Rule | Rest], ObjectData, Results) ->
     filter_object_check_multi_rule(Rest, ObjectData, [R | Results]).
 
 filter_object_check_single_rule({lnot, Rule}, ObjectData) ->
-    not filter_object_check_single_rule(Rule, ObjectData);
+    not filter_object_rule_check([Rule], ObjectData);
 filter_object_check_single_rule(Rule, ObjectData) ->
     MatchBucket = get_object_bucket(ObjectData),
     MatchMetaDatas = get_object_metadatas(ObjectData),

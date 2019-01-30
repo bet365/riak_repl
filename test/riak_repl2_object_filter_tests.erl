@@ -11,13 +11,9 @@ object_filter_test_() ->
                 fun(_) ->
                     [
                         {"Single Rules", fun test_object_filter_single_rules/0},
-                        {"Multi Rules (bucket and metadata)", fun test_object_filter_multi_rules_bucket_metadata/0},
-                        {"Multi Rules (bucket and not_metadata)", fun test_object_filter_multi_rules_bucket_not_metadata/0},
-                        {"Multi Rules (not bucket and metadata)", fun test_object_filter_multi_rules_not_bucket_metadata/0},
-                        {"Multi Rules (not bucket and not metadata)", fun test_object_filter_multi_rules_not_bucket_not_metadata/0},
-                        {"Multi Rules (not (bucket and metadata))", fun test_object_filter_multi_rules_not_bucket_and_metadata/0},
-
-
+                        {"Mult Rules - Pairwise", fun test_object_filter_multi_rules_pairwise/0},
+                        {"Multi Rules - Triplets", fun test_object_filter_multi_rules_triplets/0},
+                        {"Get Fullsync Config", fun test_object_filter_get_fullsync_config_3/0},
                         {"Test Enable Both", fun test_object_filter_enable_both/0},
                         {"Test Enable Realtime", fun test_object_filter_enable_realtime/0},
                         {"Test Enable Fullsync", fun test_object_filter_enable_fullsync/0},
@@ -55,13 +51,87 @@ cleanup(StartedApps) ->
     catch(meck:unload(riak_core_connection)),
     process_flag(trap_exit, false),
     riak_repl_test_util:stop_apps(StartedApps).
+
+get_configs(bucket) ->
+    [
+        {{bucket, <<"bucket">>}, true},
+        {{lnot, {bucket, <<"bucket">>}}, false},
+        {{lnot, {lnot, {bucket, <<"bucket">>}}}, true},
+
+        {{bucket, <<"anything">>}, false},
+        {{lnot, {bucket, <<"anything">>}}, true},
+        {{lnot, {lnot, {bucket, <<"anything">>}}}, false}
+    ];
+get_configs(metadata) ->
+    [
+        {{metadata, {filter, 1}}, true},
+        {{lnot, {metadata, {filter, 1}}}, false},
+        {{lnot, {lnot, {metadata, {filter, 1}}}}, true},
+
+        {{metadata, {filter, 2}}, false},
+        {{lnot, {metadata, {filter, 2}}}, true},
+        {{lnot, {lnot, {metadata, {filter, 2}}}}, false},
+
+        {{metadata, {filter}}, true},
+        {{lnot, {metadata, {filter}}}, false},
+        {{lnot, {lnot, {metadata, {filter}}}}, true},
+
+        {{metadata, {other, 1}}, false},
+        {{lnot, {metadata, {other, 1}}}, true},
+        {{lnot, {lnot, {metadata, {other, 1}}}}, false},
+
+        {{metadata, {other, 2}}, false},
+        {{lnot, {metadata, {other, 2}}}, true},
+        {{lnot, {lnot, {metadata, {other, 2}}}}, false},
+
+        {{metadata, {other}}, false},
+        {{lnot, {metadata, {other}}}, true},
+        {{lnot, {lnot, {metadata, {other}}}}, false}
+    ];
+get_configs(lastmod) ->
+    TS1 = timestamp_to_secs(os:timestamp()) + 1000,
+    TS2 = timestamp_to_secs(os:timestamp()) - 1000,
+    [
+        {{lastmod_age_greater_than, -1000}, true},
+        {{lnot, {lastmod_age_greater_than, -1000}}, false},
+        {{lnot, {lnot, {lastmod_age_greater_than, -1000}}}, true},
+
+        {{lastmod_age_greater_than, 1000}, false},
+        {{lnot, {lastmod_age_greater_than, 1000}}, true},
+        {{lnot, {lnot, {lastmod_age_greater_than, 1000}}}, false},
+
+        {{lastmod_age_less_than, -1000}, false},
+        {{lnot, {lastmod_age_less_than, -1000}}, true},
+        {{lnot, {lnot, {lastmod_age_less_than, -1000}}}, false},
+
+        {{lastmod_age_less_than, 1000}, true},
+        {{lnot, {lastmod_age_less_than, 1000}}, false},
+        {{lnot, {lnot, {lastmod_age_less_than, 1000}}}, true},
+
+        {{lastmod_greater_than, TS1}, false},
+        {{lnot, {lastmod_greater_than, TS1}}, true},
+        {{lnot, {lnot, {lastmod_greater_than, TS1}}}, false},
+
+        {{lastmod_greater_than, TS2}, true},
+        {{lnot, {lastmod_greater_than, TS2}}, false},
+        {{lnot, {lnot, {lastmod_greater_than, TS2}}}, true},
+
+        {{lastmod_less_than, TS1}, true},
+        {{lnot, {lastmod_less_than, TS1}}, false},
+        {{lnot, {lnot, {lastmod_less_than, TS1}}}, true},
+
+        {{lastmod_less_than, TS2}, false},
+        {{lnot, {lastmod_less_than, TS2}}, true},
+        {{lnot, {lnot, {lastmod_less_than, TS2}}}, false}
+    ].
+
 %% ===================================================================
 %% Sing Rules
 %% ===================================================================
 test_object_filter_single_rules() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
     O = riak_object:new(B,K,V,M),
-    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,28)],
+    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,3)],
     pass.
 
 test_object_filter_single_rules(1, Obj)->
@@ -70,334 +140,240 @@ test_object_filter_single_rules(1, Obj)->
 test_object_filter_single_rules(2, Obj)->
     Actual = filter_object_rule_test(['*'], Obj),
     ?assertEqual(true, Actual);
-test_object_filter_single_rules(3, Obj)->
-    Actual = filter_object_rule_test([{bucket, <<"bucket">>}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(4, Obj)->
-    Actual = filter_object_rule_test([{bucket, <<"any other bucket">>}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(5, Obj)->
-    Actual = filter_object_rule_test([{lnot, {bucket, <<"bucket">>}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(6, Obj)->
-    Actual = filter_object_rule_test([{lnot, {bucket, <<"any other bucket">>}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(7, Obj)->
-    Actual = filter_object_rule_test([{metadata, {filter, 1}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(8, Obj)->
-    Actual = filter_object_rule_test([{metadata, {filter, 2}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(9, Obj)->
-    Actual = filter_object_rule_test([{metadata, {filter}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(10, Obj)->
-    Actual = filter_object_rule_test([{lnot, {metadata, {filter, 1}}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(11, Obj)->
-    Actual = filter_object_rule_test([{lnot, {metadata, {filter, 2}}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(12, Obj)->
-    Actual = filter_object_rule_test([{lnot, {metadata, {filter}}}], Obj),
-    ?assertEqual(false, Actual);
-
-test_object_filter_single_rules(13, Obj)->
-    Actual = filter_object_rule_test([{lastmod_age_greater_than, -1000}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(14, Obj)->
-    Actual = filter_object_rule_test([{lastmod_age_greater_than, 1000}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(15, Obj)->
-    Actual = filter_object_rule_test([{lastmod_age_less_than, -1000}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(16, Obj)->
-    Actual = filter_object_rule_test([{lastmod_age_less_than, 1000}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(17, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) + 1000,
-    Actual = filter_object_rule_test([{lastmod_greater_than, TS}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(18, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) - 1000,
-    Actual = filter_object_rule_test([{lastmod_greater_than, TS}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(19, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) + 1000,
-    Actual = filter_object_rule_test([{lastmod_less_than, TS}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(20, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) - 1000,
-    Actual = filter_object_rule_test([{lastmod_less_than, TS}], Obj),
-    ?assertEqual(false, Actual);
-
-test_object_filter_single_rules(21, Obj)->
-    Actual = filter_object_rule_test([{lnot, {lastmod_age_greater_than, -1000}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(22, Obj)->
-    Actual = filter_object_rule_test([{lnot, {lastmod_age_greater_than, 1000}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(23, Obj)->
-    Actual = filter_object_rule_test([{lnot, {lastmod_age_less_than, -1000}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(24, Obj)->
-    Actual = filter_object_rule_test([{lnot, {lastmod_age_less_than, 1000}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(25, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) + 1000,
-    Actual = filter_object_rule_test([{lnot, {lastmod_greater_than, TS}}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_single_rules(26, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) - 1000,
-    Actual = filter_object_rule_test([{lnot, {lastmod_greater_than, TS}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(27, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) + 1000,
-    Actual = filter_object_rule_test([{lnot, {lastmod_less_than, TS}}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_single_rules(28, Obj)->
-    TS = timestamp_to_secs(os:timestamp()) - 1000,
-    Actual = filter_object_rule_test([{lnot, {lastmod_less_than, TS}}], Obj),
-    ?assertEqual(true, Actual).
+test_object_filter_single_rules(3, Obj) ->
+    Config = get_configs(bucket) ++ get_configs(metadata) ++ get_configs(lastmod),
+    TestFun =
+        fun({Rule, Outcome}) ->
+            Actual = filter_object_rule_test([Rule], Obj),
+            ?assertEqual(Outcome, Actual)
+        end,
+    [TestFun(A) || A <- Config].
 
 
 
 
 %% ===================================================================
-%% Multi Rules: bucket and metadata
+%% Multi Rules: pairwise
 %% ===================================================================
-test_object_filter_multi_rules_bucket_metadata() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
-    O = riak_object:new(B,K,V,M),
-    [test_object_filter_multi_rules_bucket_metadata(N, O) || N <- lists:seq(1,12)],
-    pass.
+test_object_filter_multi_rules_pairwise() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
+    Obj = riak_object:new(B,K,V,M),
 
-test_object_filter_multi_rules_bucket_metadata(1, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter, 1}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_metadata(2, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(3, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(4, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(5, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {filter}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_metadata(6, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {filter}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(7, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(8, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(9, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(10, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(11, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {metadata, {other, all}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_metadata(12, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {metadata, {other, all}}]], Obj),
-    ?assertEqual(false, Actual).
+    Config =
+        lists:flatten([
+            [{[Rule1, Rule2], Outcome1 and Outcome2} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata)],
+            [{{lnot, [Rule1, Rule2]}, not (Outcome1 and Outcome2)} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata)],
+            [{{lnot, {lnot, [Rule1, Rule2]}}, not (not (Outcome1 and Outcome2))} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata)],
 
+            [{[Rule1, Rule2], Outcome1 and Outcome2} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(lastmod)],
+            [{{lnot, [Rule1, Rule2]}, not (Outcome1 and Outcome2)} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(lastmod)],
+            [{{lnot, {lnot, [Rule1, Rule2]}}, not (not (Outcome1 and Outcome2))} || {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(lastmod)],
+
+            [{[Rule1, Rule2], Outcome1 and Outcome2} || {Rule1, Outcome1} <- get_configs(lastmod), {Rule2, Outcome2} <- get_configs(metadata)],
+            [{{lnot, [Rule1, Rule2]}, not (Outcome1 and Outcome2)} || {Rule1, Outcome1} <- get_configs(lastmod), {Rule2, Outcome2} <- get_configs(metadata)],
+            [{{lnot, {lnot, [Rule1, Rule2]}}, not (not (Outcome1 and Outcome2))} || {Rule1, Outcome1} <- get_configs(lastmod), {Rule2, Outcome2} <- get_configs(metadata)]
+        ]),
+
+    TestFun =
+        fun({Rule, Outcome}) ->
+            Actual = filter_object_rule_test([Rule], Obj),
+            ?assertEqual(Outcome, Actual)
+        end,
+    [TestFun(A) || A <- Config].
 
 %% ===================================================================
-%% Multi Rules: bucket and not_metadata
+%% Multi Rules: triplets
 %% ===================================================================
-test_object_filter_multi_rules_bucket_not_metadata() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
-    O = riak_object:new(B,K,V,M),
-    [test_object_filter_multi_rules_bucket_not_metadata(N, O) || N <- lists:seq(1,12)],
-    pass.
+test_object_filter_multi_rules_triplets() ->
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
+    Obj = riak_object:new(B,K,V,M),
 
-test_object_filter_multi_rules_bucket_not_metadata(1, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {filter, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(2, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {filter, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(3, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {filter, 2}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(4, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {filter, 2}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(5, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {filter}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(6, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {filter}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(7, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {other, 1}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(8, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {other, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(9, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {other, 2}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(10, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {other, 2}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(11, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"bucket">>}, {lnot, {metadata, {other}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_bucket_not_metadata(12, Obj)->
-    Actual = filter_object_rule_test([[{bucket, <<"anything">>}, {lnot, {metadata, {other}}}]], Obj),
-    ?assertEqual(false, Actual).
+    Config =
+        lists:flatten([
+            [{[Rule1, Rule2, Rule3], (Outcome1 and Outcome2 and Outcome3)} ||
+                {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata), {Rule3, Outcome3} <- get_configs(lastmod)],
 
+            [{{lnot, [Rule1, Rule2, Rule3]}, not (Outcome1 and Outcome2 and Outcome3)} ||
+                {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata), {Rule3, Outcome3} <- get_configs(lastmod)],
+
+            [{{lnot, {lnot, [Rule1, Rule2, Rule3]}}, not (not (Outcome1 and Outcome2 and Outcome3))} ||
+                {Rule1, Outcome1} <- get_configs(bucket), {Rule2, Outcome2} <- get_configs(metadata), {Rule3, Outcome3} <- get_configs(lastmod)]
+        ]),
+
+    TestFun =
+        fun({Rule, Outcome}) ->
+            Actual = filter_object_rule_test([Rule], Obj),
+            ?assertEqual(Outcome, Actual)
+        end,
+    [TestFun(A) || A <- Config].
 
 %% ===================================================================
-%% Multi Rules: not_bucket and metadata
+%% Get Fullsync Config (with altered lastmod_age_*)
 %% ===================================================================
-test_object_filter_multi_rules_not_bucket_metadata() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
-    O = riak_object:new(B,K,V,M),
-    [test_object_filter_multi_rules_not_bucket_metadata(N, O) || N <- lists:seq(1,12)],
-    pass.
+test_object_filter_get_fullsync_config_3() ->
+    TimeStamp = os:timestamp(),
+    TS1 = timestamp_to_secs(TimeStamp) + 1000,
+    TS2 = timestamp_to_secs(TimeStamp) - 1000,
+    Testset1 =
+        [
+            {bucket,<<"bucket">>},
+            {lnot,{bucket,<<"bucket">>}},
+            {lnot,{lnot,{bucket,<<"bucket">>}}},
+            {bucket,<<"anything">>},
+            {lnot,{bucket,<<"anything">>}},
+            {lnot,{lnot,{bucket,<<"anything">>}}},
+            {metadata,{filter,1}},
+            {lnot,{metadata,{filter,1}}},
+            {lnot,{lnot,{metadata,{filter,1}}}},
+            {metadata,{filter,2}},
+            {lnot,{metadata,{filter,2}}},
+            {lnot,{lnot,{metadata,{filter,2}}}},
+            {metadata,{filter}},
+            {lnot,{metadata,{filter}}},
+            {lnot,{lnot,{metadata,{filter}}}},
+            {metadata,{other,1}},
+            {lnot,{metadata,{other,1}}},
+            {lnot,{lnot,{metadata,{other,1}}}},
+            {metadata,{other,2}},
+            {lnot,{metadata,{other,2}}},
+            {lnot,{lnot,{metadata,{other,2}}}},
+            {metadata,{other}},
+            {lnot,{metadata,{other}}},
+            {lnot,{lnot,{metadata,{other}}}},
+            {lastmod_age_greater_than, -1000},
+            {lnot, {lastmod_age_greater_than, -1000}},
+            {lnot, {lnot, {lastmod_age_greater_than, -1000}}},
+            {lastmod_age_greater_than, 1000},
+            {lnot, {lastmod_age_greater_than, 1000}},
+            {lnot, {lnot, {lastmod_age_greater_than, 1000}}},
+            {lastmod_age_less_than, -1000},
+            {lnot, {lastmod_age_less_than, -1000}},
+            {lnot, {lnot, {lastmod_age_less_than, -1000}}},
+            {lastmod_age_less_than, 1000},
+            {lnot, {lastmod_age_less_than, 1000}},
+            {lnot, {lnot, {lastmod_age_less_than, 1000}}},
+            {lastmod_greater_than, TS1},
+            {lnot, {lastmod_greater_than, TS1}},
+            {lnot, {lnot, {lastmod_greater_than, TS1}}},
+            {lastmod_greater_than, TS2},
+            {lnot, {lastmod_greater_than, TS2}},
+            {lnot, {lnot, {lastmod_greater_than, TS2}}},
+            {lastmod_less_than, TS1},
+            {lnot, {lastmod_less_than, TS1}},
+            {lnot, {lnot, {lastmod_less_than, TS1}}},
+            {lastmod_less_than, TS2},
+            {lnot, {lastmod_less_than, TS2}},
+            {lnot, {lnot, {lastmod_less_than, TS2}}},
+            [{bucket,<<"bucket">>}, {lastmod_age_greater_than, -1000}],
+            [{lnot, {lastmod_age_greater_than, -1000}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_greater_than, -1000}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_age_greater_than, 1000}],
+            [{lnot, {lastmod_age_greater_than, 1000}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_greater_than, 1000}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_age_less_than, -1000}],
+            [{lnot, {lastmod_age_less_than, -1000}},{bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_less_than, -1000}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_age_less_than, 1000}],
+            [{lnot, {lastmod_age_less_than, 1000}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_less_than, 1000}}}, {bucket,<<"bucket">>}],
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_age_greater_than, -1000}]},
+            {lnot, [{lnot, {lastmod_age_greater_than, -1000}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_greater_than, -1000}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_age_greater_than, 1000}]},
+            {lnot, [{lnot, {lastmod_age_greater_than, 1000}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_greater_than, 1000}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_age_less_than, -1000}]},
+            {lnot, [{lnot, {lastmod_age_less_than, -1000}},{bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_less_than, -1000}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_age_less_than, 1000}]},
+            {lnot, [{lnot, {lastmod_age_less_than, 1000}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_age_less_than, 1000}}}, {bucket,<<"bucket">>}]}
+        ],
+    Allowed = Testset1,
+    Blocked = Testset1,
+    Config = [{"test_cluster", {allow, Allowed}, {block, Blocked}}],
+    application:set_env(riak_repl, object_filtering_merged_fullsync_config, Config),
 
-test_object_filter_multi_rules_not_bucket_metadata(1, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {filter, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(2, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {filter, 1}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(3, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {filter, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(4, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {filter, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(5, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {filter}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(6, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {filter}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(7, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {other, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(8, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {other, 1}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(9, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {other, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(10, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {other, 2}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(11, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {metadata, {other}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_metadata(12, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {metadata, {other}}]], Obj),
-    ?assertEqual(false, Actual).
-
-
-
-
-%% ===================================================================
-%% Multi Rules: not bucket and not metadata
-%% ===================================================================
-test_object_filter_multi_rules_not_bucket_not_metadata() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
-    O = riak_object:new(B,K,V,M),
-    [test_object_filter_multi_rules_not_bucket_not_metadata(N, O) || N <- lists:seq(1,12)],
-    pass.
-
-test_object_filter_multi_rules_not_bucket_not_metadata(1, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {filter, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(2, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {filter, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(3, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {filter, 2}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(4, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {filter, 2}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(5, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {filter}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(6, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {filter}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(7, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {other, 1}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(8, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {other, 1}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(9, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {other, 2}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(10, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {other, 2}}}]], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(11, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"bucket">>}}, {lnot, {metadata, {other}}}]], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_not_metadata(12, Obj)->
-    Actual = filter_object_rule_test([[{lnot, {bucket, <<"anything">>}}, {lnot, {metadata, {other}}}]], Obj),
-    ?assertEqual(true, Actual).
-
-
-
-%% ===================================================================
-%% Multi Rules: not (bucket and metadata)
-%% ===================================================================
-test_object_filter_multi_rules_not_bucket_and_metadata() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}]),
-    O = riak_object:new(B,K,V,M),
-    [test_object_filter_multi_rules_not_bucket_and_metadata(N, O) || N <- lists:seq(1,12)],
-    pass.
-
-test_object_filter_multi_rules_not_bucket_and_metadata(1, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {filter, 1}}]}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(2, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {filter, 1}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(3, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {filter, 2}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(4, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {filter, 2}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(5, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {filter}}]}], Obj),
-    ?assertEqual(false, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(6, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {filter}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(7, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {other, 1}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(8, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {other, 1}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(9, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {other, 2}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(10, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {other, 2}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(11, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"bucket">>}, {metadata, {other}}]}], Obj),
-    ?assertEqual(true, Actual);
-test_object_filter_multi_rules_not_bucket_and_metadata(12, Obj)->
-    Actual = filter_object_rule_test([{lnot, [{bucket, <<"anything">>}, {metadata, {other}}]}], Obj),
-    ?assertEqual(true, Actual).
+    Expected =
+        lists:sort([
+            {bucket,<<"bucket">>},
+            {lnot,{bucket,<<"bucket">>}},
+            {lnot,{lnot,{bucket,<<"bucket">>}}},
+            {bucket,<<"anything">>},
+            {lnot,{bucket,<<"anything">>}},
+            {lnot,{lnot,{bucket,<<"anything">>}}},
+            {metadata,{filter,1}},
+            {lnot,{metadata,{filter,1}}},
+            {lnot,{lnot,{metadata,{filter,1}}}},
+            {metadata,{filter,2}},
+            {lnot,{metadata,{filter,2}}},
+            {lnot,{lnot,{metadata,{filter,2}}}},
+            {metadata,{filter}},
+            {lnot,{metadata,{filter}}},
+            {lnot,{lnot,{metadata,{filter}}}},
+            {metadata,{other,1}},
+            {lnot,{metadata,{other,1}}},
+            {lnot,{lnot,{metadata,{other,1}}}},
+            {metadata,{other,2}},
+            {lnot,{metadata,{other,2}}},
+            {lnot,{lnot,{metadata,{other,2}}}},
+            {metadata,{other}},
+            {lnot,{metadata,{other}}},
+            {lnot,{lnot,{metadata,{other}}}},
+            {lastmod_greater_than, TS1},
+            {lnot, {lastmod_greater_than, TS1}},
+            {lnot, {lnot, {lastmod_greater_than, TS1}}},
+            {lastmod_greater_than, TS2},
+            {lnot, {lastmod_greater_than, TS2}},
+            {lnot, {lnot, {lastmod_greater_than, TS2}}},
+            {lastmod_less_than, TS1},
+            {lnot, {lastmod_less_than, TS1}},
+            {lnot, {lnot, {lastmod_less_than, TS1}}},
+            {lastmod_less_than, TS2},
+            {lnot, {lastmod_less_than, TS2}},
+            {lnot, {lnot, {lastmod_less_than, TS2}}},
+            {lastmod_greater_than, TS1},
+            {lnot, {lastmod_greater_than, TS1}},
+            {lnot, {lnot, {lastmod_greater_than, TS1}}},
+            {lastmod_greater_than, TS2},
+            {lnot, {lastmod_greater_than, TS2}},
+            {lnot, {lnot, {lastmod_greater_than, TS2}}},
+            {lastmod_less_than, TS1},
+            {lnot, {lastmod_less_than, TS1}},
+            {lnot, {lnot, {lastmod_less_than, TS1}}},
+            {lastmod_less_than, TS2},
+            {lnot, {lastmod_less_than, TS2}},
+            {lnot, {lnot, {lastmod_less_than, TS2}}},
+            [{bucket,<<"bucket">>}, {lastmod_greater_than, TS1}],
+            [{lnot, {lastmod_greater_than, TS1}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_greater_than, TS1}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_greater_than, TS2}],
+            [{lnot, {lastmod_greater_than, TS2}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_greater_than, TS2}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_less_than, TS1}],
+            [{lnot, {lastmod_less_than, TS1}},{bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_less_than, TS1}}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lastmod_less_than, TS2}],
+            [{lnot, {lastmod_less_than, TS2}}, {bucket,<<"bucket">>}],
+            [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_less_than, TS2}}}, {bucket,<<"bucket">>}],
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_greater_than, TS1}]},
+            {lnot, [{lnot, {lastmod_greater_than, TS1}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_greater_than, TS1}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_greater_than, TS2}]},
+            {lnot, [{lnot, {lastmod_greater_than, TS2}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_greater_than, TS2}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_less_than, TS1}]},
+            {lnot, [{lnot, {lastmod_less_than, TS1}},{bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_less_than, TS1}}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lastmod_less_than, TS2}]},
+            {lnot, [{lnot, {lastmod_less_than, TS2}}, {bucket,<<"bucket">>}]},
+            {lnot, [{bucket,<<"bucket">>}, {lnot, {lnot, {lastmod_less_than, TS2}}}, {bucket,<<"bucket">>}]}
+        ]),
+    {_, {allow, Allowed2}, {block, Blocked2}} = riak_repl2_object_filter:get_config(fullsync, "test_cluster", TimeStamp),
+    Actual1 = lists:sort(Allowed2),
+    Actual2 = lists:sort(Blocked2),
+    ?assertEqual(Actual1, Expected),
+    ?assertEqual(Actual2, Expected).
 
 
 %% ===================================================================
@@ -453,7 +429,3 @@ test_object_filter_disable_fullsync() ->
 %% ===================================================================
 timestamp_to_secs({M, S, _}) ->
   M * 1000000 + S.
-
-
-
-

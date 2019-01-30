@@ -429,10 +429,11 @@ maybe_set_lastmod_age(_, Config, _) ->
 
 set_lastmod_age({RemoteName, {allow, Allowed}, {block, Blocked}}, TimeStamp) ->
     Now = timestamp_to_secs(TimeStamp),
-    UpdatedAllowed = lists:reverse(allow, set_lastmod_age_helper(Allowed, Now, [])),
-    UpdatedBlocked = lists:reverse(block, set_lastmod_age_helper(Blocked, Now, [])),
+    UpdatedAllowed = lists:reverse(set_lastmod_age_helper(Allowed, Now, [])),
+    UpdatedBlocked = lists:reverse(set_lastmod_age_helper(Blocked, Now, [])),
     {RemoteName, {allow, UpdatedAllowed}, {block, UpdatedBlocked}}.
 
+set_lastmod_age_helper([], _, OutRules) -> OutRules;
 set_lastmod_age_helper([Rule | Rules], Now, OutRules) when is_list(Rule) ->
     OutRules1 = set_lastmod_age_multi(Rule, Now, OutRules),
     set_lastmod_age_helper(Rules, Now, OutRules1);
@@ -445,8 +446,8 @@ set_lastmod_age_multi(RuleList, Now, OutRules) ->
     [Multi | OutRules].
 
 set_lastmod_age_single({lnot, Rule}, Now, OutRules) ->
-  UpdatedRule = set_lastmod_age_helper([Rule], Now, []),
-  [{lnot, UpdatedRule} | OutRules];
+    [UpdatedRule] = set_lastmod_age_helper([Rule], Now, []),
+    [{lnot, UpdatedRule} | OutRules];
 set_lastmod_age_single({lastmod_age_greater_than, Age}, Now, OutRules) ->
     TS = Now - Age,
     [{lastmod_greater_than, TS} | OutRules];

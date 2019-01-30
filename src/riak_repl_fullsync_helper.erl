@@ -248,7 +248,9 @@ handle_cast(kl_sort, State) ->
     %% this process is about to die, so this is OK
     lager:info("Sorting keylist ~p", [Filename]),
     erlang:process_flag(min_heap_size, 1000000),
-    {ElapsedUsec, ok} = timer:tc(file_sorter, sort, [Filename]),
+    Args = app_helper:get_env(riak_repl, fullsync_helper_sorter_args, []),
+    {ElapsedUsec, ok} = timer:tc(file_sorter, sort, 
+                                 [[Filename], Filename, Args]),
     lager:info("Sorted ~s of ~p keys in ~.2f seconds",
                           [Filename, State#state.kl_total, ElapsedUsec / 1000000]),
     gen_fsm:send_event(State#state.owner_fsm, {State#state.ref, keylist_built,

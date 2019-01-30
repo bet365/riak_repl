@@ -444,6 +444,9 @@ set_lastmod_age_multi(RuleList, Now, OutRules) ->
     Multi = lists:reverse(lists:foldl(fun(Rule, Acc) -> set_lastmod_age_single(Rule, Now, Acc) end, [], RuleList)),
     [Multi | OutRules].
 
+set_lastmod_age_single({lnot, Rule}, Now, OutRules) ->
+  UpdatedRule = set_lastmod_age_helper([Rule], Now, []),
+  [{lnot, UpdatedRule} | OutRules];
 set_lastmod_age_single({lastmod_age_greater_than, Age}, Now, OutRules) ->
     TS = Now - Age,
     [{lastmod_greater_than, TS} | OutRules];

@@ -401,22 +401,23 @@ missing_key(PBKey, DiffState) ->
 %% See http://www.javalimit.com/2010/05/passing-funs-to-other-erlang-nodes.html
 keylist_fold({B,Key}=K, V, {MPid, Count, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}) ->
     try
-        case should_we_filter(FilterEnabled, B, FilteredBucketsList) of
-            true ->
-                ok;
-            false ->
-                RObj = riak_object:from_binary(B,Key,V),
-                case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
-                    true ->
-                        ok;
-                    false ->
-                        H = hash_object(RObj),
-                        Bin = term_to_binary({pack_key(K), H}),
-                        %% write key/value hash to file
-                        riak_core_gen_server:cast(MPid, {keylist, Bin})
-                end
-        end,
-        check_keylist_ack(Count, MPid, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter)
+        F = case should_we_filter(FilterEnabled, B, FilteredBucketsList) of
+                true ->
+                    true;
+                false ->
+                    RObj = riak_object:from_binary(B,Key,V),
+                    case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
+                        true ->
+                            true;
+                        false ->
+                            H = hash_object(RObj),
+                            Bin = term_to_binary({pack_key(K), H}),
+                            %% write key/value hash to file
+                            riak_core_gen_server:cast(MPid, {keylist, Bin}),
+                            false
+                    end
+            end,
+        check_keylist_ack({Count, MPid, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}, F)
     catch _:_ ->
             {MPid, Count, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
     end;
@@ -443,12 +444,17 @@ keylist_fold({B,Key}=K, V, {MPid, Count}) ->
 should_we_filter(Enabled, B, BucketsList) ->
     Enabled andalso lists:member(B, BucketsList).
 
-check_keylist_ack(Count, MPid, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter) ->
+check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}, Filtered) ->
+    Total2 = case Filtered of
+                 true -> Total1;
+                 false -> Total1 +1
+             end,
+
     case Count of
         100 ->
             %% send keylist_ack to "self" every 100 key/value hashes
             ok = riak_core_gen_server:call(MPid, keylist_ack, infinity),
-            {MPid, 0, Total+1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter};
+            {MPid, 0, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter};
         _ ->
-            {MPid, Count+1, Total+1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
+            {MPid, Count+1, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
     end.

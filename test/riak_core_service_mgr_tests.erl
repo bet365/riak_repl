@@ -53,7 +53,7 @@ service_test_() ->
                StartedApps = riak_repl_test_util:maybe_start_lager(),
                riak_core_ring_events:start_link(),
                riak_core_ring_manager:start_link(test),
-               ok = application:start(ranch),
+               application:start(ranch),
                {ok, _Pid} = riak_core_service_mgr:start_link(?TEST_ADDR),
                StartedApps
        end,

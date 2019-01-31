@@ -997,7 +997,7 @@ start_link_setup(ClusterAddr) ->
 
     {ok, Leader} = riak_repl2_leader:start_link(),
 
-    ok = application:start(ranch),
+    application:start(ranch),
     %% we also need to start the other connection servers
     {ok, Pid1} = riak_core_service_mgr:start_link(ClusterAddr),
     {ok, Pid2} = riak_core_connection_mgr:start_link(),

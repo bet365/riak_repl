@@ -86,7 +86,7 @@ connections_test_() ->
       {setup,
        fun() ->
                Apps = riak_repl_test_util:maybe_start_lager(),
-               ok = application:start(ranch),
+               application:start(ranch),
                riak_core_ring_events:start_link(),
                riak_core_ring_manager:start_link(test),
                {ok, _} = riak_core_service_mgr:start_link(?REMOTE_CLUSTER_ADDR),
@@ -223,7 +223,7 @@ connection_helper_logic_test_() ->
       {setup,
         fun() ->
           Apps = riak_repl_test_util:maybe_start_lager(),
-          ok = application:start(ranch),
+          application:start(ranch),
           riak_core_ring_events:start_link(),
           riak_core_ring_manager:start_link(test),
           {ok, _} = riak_core_connection_mgr:start_link(),

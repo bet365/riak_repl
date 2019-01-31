@@ -449,10 +449,10 @@ set_lastmod_age_single({lnot, Rule}, Now, OutRules) ->
     [UpdatedRule] = set_lastmod_age_helper([Rule], Now, []),
     [{lnot, UpdatedRule} | OutRules];
 set_lastmod_age_single({lastmod_age_greater_than, Age}, Now, OutRules) ->
-    TS = Now - Age,
+    TS = Now + Age,
     [{lastmod_greater_than, TS} | OutRules];
 set_lastmod_age_single({lastmod_age_less_than, Age}, Now, OutRules) ->
-    TS = Now - Age,
+    TS = Now + Age,
     [{lastmod_less_than, TS} | OutRules];
 set_lastmod_age_single(Rule, _, OutRules) ->
     [Rule | OutRules].

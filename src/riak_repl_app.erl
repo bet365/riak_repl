@@ -157,12 +157,7 @@ stop(_State) ->
 
 ensure_dirs() ->
     {ok, DataRoot} = application:get_env(riak_repl, data_root),
-    KeylistDataRoot =
-        case app_helper:get_env(riak_repl, keylist_data_root, DataRoot) of
-            false -> DataRoot;
-            KDir -> KDir
-        end,
-
+    KeylistDataRoot = app_helper:get_env(riak_repl, keylist_data_root, DataRoot),
     LogDir = filename:join(DataRoot, "logs"),
     case filelib:ensure_dir(filename:join(LogDir, "empty")) of
         ok ->

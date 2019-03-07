@@ -177,21 +177,19 @@ ensure_dirs() ->
     case filelib:ensure_dir(filename:join([WorkDir, "empty"])) of
         ok ->
             application:set_env(riak_repl, work_dir, WorkDir),
-            ok;
+            case filelib:ensure_dir(filename:join([KeylistWorkDir, "empty"])) of
+                ok ->
+                    application:set_env(riak_repl, keylist_work_dir, KeylistWorkDir),
+                    ok;
+                {error, R2} ->
+                    M2 = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [KeylistWorkDir,R2]),
+                    riak:stop(lists:flatten(M2)),
+                    {error, R2}
+            end; 
         {error, R1} ->
             M1 = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [WorkDir,R1]),
             riak:stop(lists:flatten(M1)),
             {error, R1}
-    end,
-
-    case filelib:ensure_dir(filename:join([KeylistWorkDir, "empty"])) of
-        ok ->
-            application:set_env(riak_repl, keylist_work_dir, KeylistWorkDir),
-            ok;
-        {error, R2} ->
-            M2 = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [KeylistWorkDir,R2]),
-            riak:stop(lists:flatten(M2)),
-            {error, R2}
     end.
 
 

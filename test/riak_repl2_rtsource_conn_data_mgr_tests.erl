@@ -20,6 +20,11 @@ data_manager_test_() ->
           meck:expect(riak_core_capability, get, 1, fun(_) -> v1 end),
           meck:expect(riak_core_capability, get, 2, fun(_, _) -> v1 end),
 
+          catch(meck:unload(riak_repl2_leader)),
+          meck:new(riak_repl2_leader, [passthrough]),
+          meck:expect(riak_repl2_leader, leader_node, 0, fun() -> node() end),
+          meck:expect(riak_repl2_leader, re_notify, 0, fun() -> ok end),
+
           riak_core_node_watcher_events_start(),
 
           %% ring_trans
@@ -54,7 +59,7 @@ data_manager_test_() ->
             {"Initialization",
               fun() ->
                 riak_repl2_rtsource_conn_data_mgr:node_watcher_update([riak_kv]),
-                timer:sleep(2500),
+                ct:pal("~p", [sys:get_state(whereis(riak_repl2_rtsource_conn_data_mgr))]),
                 [{realtime_connections, RTC}] = ets:lookup(mock_ring_test, realtime_connections),
                 [{active_nodes, AN}] = ets:lookup(mock_ring_test, active_nodes),
                 ?assertMatch(RTC, dict:new()),

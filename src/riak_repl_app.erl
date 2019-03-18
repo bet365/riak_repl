@@ -152,6 +152,7 @@ stop(_State) ->
 
 ensure_dirs() ->
     {ok, DataRoot} = application:get_env(riak_repl, data_root),
+    KeylistDataRoot = app_helper:get_env(riak_repl, keylist_data_root, DataRoot),
     LogDir = filename:join(DataRoot, "logs"),
     case filelib:ensure_dir(filename:join(LogDir, "empty")) of
         ok ->
@@ -163,19 +164,33 @@ ensure_dirs() ->
     end,
     {ok, Incarnation} = application:get_env(riak_repl, incarnation),
     WorkRoot = filename:join([DataRoot, "work"]),
-    _ = prune_old_workdirs(WorkRoot),
+    KeylistWorkRoot = filename:join([KeylistDataRoot, "work"]),
+    _ = prune_old_workdirs([WorkRoot, KeylistWorkRoot]),
     WorkDir = filename:join([WorkRoot, integer_to_list(Incarnation)]),
+    KeylistWorkDir = filename:join([KeylistWorkRoot, integer_to_list(Incarnation)]),
+
     case filelib:ensure_dir(filename:join([WorkDir, "empty"])) of
         ok ->
             application:set_env(riak_repl, work_dir, WorkDir),
-            ok;
-        {error, R} ->
-            M = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [WorkDir,R]),
-            riak:stop(lists:flatten(M)),
-            {error, R}
+            case filelib:ensure_dir(filename:join([KeylistWorkDir, "empty"])) of
+                ok ->
+                    application:set_env(riak_repl, keylist_work_dir, KeylistWorkDir),
+                    ok;
+                {error, R2} ->
+                    M2 = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [KeylistWorkDir,R2]),
+                    riak:stop(lists:flatten(M2)),
+                    {error, R2}
+            end;
+        {error, R1} ->
+            M1 = io_lib:format("riak_repl couldn't create work dir ~p: ~p~n", [WorkDir,R1]),
+            riak:stop(lists:flatten(M1)),
+            {error, R1}
     end.
 
-prune_old_workdirs(WorkRoot) ->
+
+prune_old_workdirs([]) ->
+    ok;
+prune_old_workdirs([WorkRoot| Rest]) ->
     case file:list_dir(WorkRoot) of
         {ok, SubDirs} ->
             DirPaths = [filename:join(WorkRoot, D) || D <- SubDirs],
@@ -184,7 +199,8 @@ prune_old_workdirs(WorkRoot) ->
             ok;
         _ ->
             ignore
-    end.
+    end,
+    prune_old_workdirs(Rest).
 
 %% Get the list of nodes of our ring
 %% This list includes all up-nodes, that host the riak_kv service

@@ -18,7 +18,7 @@ common_init(Transport, Socket) ->
      {my_pi, PI}].
 
 work_dir(Transport, Socket, SiteName) ->
-    {ok, WorkRoot} = application:get_env(riak_repl, keylist_work_dir),
+    {ok, WorkRoot} = application:get_env(riak_repl, work_dir),
     SiteDir = SiteName ++ "-" ++ riak_repl_util:format_socketaddrs(Socket, Transport),
     WorkDir = filename:join(WorkRoot, SiteDir),
     ok = filelib:ensure_dir(filename:join(WorkDir, "empty")),

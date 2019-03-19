@@ -659,7 +659,7 @@ object_filtering_config_file_helper(Action, Path) ->
 
 merge_and_load_configs(repl, ReplConfig) ->
     %% Change Repl, MergedRT, and MergedFS
-    RTConfig = get_config(loaded_repl),
+    RTConfig = get_config(loaded_realtime),
     FSConfig = get_config(loaded_fullsync),
     MergedRT = merge_config(ReplConfig, RTConfig),
     MergedFS = merge_config(ReplConfig, FSConfig),

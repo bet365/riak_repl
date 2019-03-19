@@ -23,7 +23,7 @@ data_manager_test_() ->
           catch(meck:unload(riak_repl2_leader)),
           meck:new(riak_repl2_leader, [passthrough]),
           meck:expect(riak_repl2_leader, leader_node, 0, fun() -> node() end),
-
+          meck:expect(riak_repl2_leader, re_notify, 0, fun() -> ok end),
 
           riak_core_node_watcher_events_start(),
 

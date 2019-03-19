@@ -157,6 +157,7 @@ stop(_State) ->
 
 ensure_dirs() ->
     {ok, DataRoot} = application:get_env(riak_repl, data_root),
+    KeylistDataRoot = app_helper:get_env(riak_repl, keylist_data_root, DataRoot),
     LogDir = filename:join(DataRoot, "logs"),
     case filelib:ensure_dir(filename:join(LogDir, "empty")) of
         ok ->
@@ -167,9 +168,9 @@ ensure_dirs() ->
             riak:stop(lists:flatten(Msg))
     end,
     {ok, Incarnation} = application:get_env(riak_repl, incarnation),
-    WorkRoot = filename:join([DataRoot, "work"]),
-    _ = prune_old_workdirs(WorkRoot),
-    WorkDir = filename:join([WorkRoot, integer_to_list(Incarnation)]),
+    KeylistWorkRoot = filename:join([KeylistDataRoot, "work"]),
+    _ = prune_old_workdirs(KeylistWorkRoot),
+    WorkDir = filename:join([KeylistWorkRoot, integer_to_list(Incarnation)]),
     case filelib:ensure_dir(filename:join([WorkDir, "empty"])) of
         ok ->
             application:set_env(riak_repl, work_dir, WorkDir),

@@ -59,6 +59,7 @@ data_manager_test_() ->
             {"Initialization",
               fun() ->
                 riak_repl2_rtsource_conn_data_mgr:node_watcher_update([riak_kv]),
+                timer:sleep(2500),
                 [{realtime_connections, RTC}] = ets:lookup(mock_ring_test, realtime_connections),
                 [{active_nodes, AN}] = ets:lookup(mock_ring_test, active_nodes),
                 ?assertMatch(RTC, dict:new()),

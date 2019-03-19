@@ -621,7 +621,12 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
 %% ========================================================================================================= %%
     BFBlacklistedRemotes = config_for_bucket(BucketName, FilteredBucketConfig),
     BFFilteredConsumers = filter_consumers(FEnabled, AllConsumers, BFBlacklistedRemotes),
-    QEntry2 = set_local_forwards_meta(BFFilteredConsumers, QEntry),
+
+%% ========================================================================================================= %%
+%% Object Filtering
+%% ========================================================================================================= %%
+    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, riak_repl2_object_filter:rt_filter(CName, Meta)],
+    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 %% ========================================================================================================= %%
 
     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2, FEnabled, BFBlacklistedRemotes) || C <- Cs],
@@ -632,14 +637,11 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
     %% We do not want to add an object that all consumers will filter or skip to the queue
     AllSkippedOrFiltered = lists:all(fun
         (skipped) -> true;
-        (filtered) -> true;
-        (no_fun) -> false;
-        (delivered) -> false;
         (_) -> false
     end, DeliverResults),
 
     State2 = if
-        AllSkippedOrFiltered andalso length(BFFilteredConsumers) > 0 ->
+        AllSkippedOrFiltered andalso length(OFFilteredConsumerNames) > 0 ->
             State;
         true ->
             ets:insert(QTab, QEntry2),
@@ -679,10 +681,19 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
                     C2 = C#c{skips = C#c.skips + 1, cseq = CSeq2},
                     maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets);
                 [QEntry] ->
+                    {_, _, _, Meta} = QEntry,
+%% ========================================================================================================= %%
+%% Bucket Filtering (legacy)
+%% ========================================================================================================= %%
                     BucketName = bucket_name_from_meta(QEntry),
                     BlacklistedRemotes = config_for_bucket(BucketName, FilteredBuckets),
                     FilteredCsNames = filter_consumers(FilteringEnabled, CsNames, BlacklistedRemotes),
-                    QEntry2 = set_local_forwards_meta(FilteredCsNames, QEntry),
+
+%% ========================================================================================================= %%
+%% Object Filtering
+%% ========================================================================================================= %%
+                    OFFilteredConsumerNames = [CName || CName <- FilteredCsNames, riak_repl2_object_filter:rt_filter(CName, Meta)],
+                    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
                     case BlacklistedRemotes of
                         Config when Config /= [] ->

@@ -692,7 +692,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-                    OFFilteredConsumerNames = [CName || CName <- FilteredCsNames, riak_repl2_object_filter:rt_filter(CName, Meta)],
+                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, riak_repl2_object_filter:rt_filter(ConsumerName, Meta)],
                     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
                     case BlacklistedRemotes of

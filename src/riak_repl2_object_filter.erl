@@ -23,29 +23,25 @@
     filter_object_rule_test/2
 ]).
 
-
-
-%%%===================================================================
-%%% API
-%%%===================================================================
-
 %% returns true/false for a rule and an object
 filter_object_rule_test(Rule, Object) ->
     filter_object_rule_check(Rule, get_object_data(Object)).
 
 
-
+%%%===================================================================
+%%% API
+%%%===================================================================
 %% returns the entire config for all clusters
 get_config(fullsync) ->
-    app_helper:get_env(riak_repl, object_filtering_merged_fullsync_config, []);
+    app_helper:get_env(riak_repl, ?MERGED_FS_CONFIG, []);
 get_config(realtime) ->
-    app_helper:get_env(riak_repl, object_filtering_merged_realtime_config, []);
+    app_helper:get_env(riak_repl, ?MERGED_RT_CONFIG, []);
 get_config(loaded_repl) ->
-    app_helper:get_env(riak_repl, object_filtering_repl_config, []);
+    app_helper:get_env(riak_repl, ?REPL_CONFIG, []);
 get_config(loaded_realtime) ->
-    app_helper:get_env(riak_repl, object_filtering_realtime_config, []);
+    app_helper:get_env(riak_repl, ?RT_CONFIG, []);
 get_config(loaded_fullsync) ->
-    app_helper:get_env(riak_repl, object_filtering_fullsync_config, []);
+    app_helper:get_env(riak_repl, ?FS_CONFIG, []);
 get_config(_) ->
     [].
 
@@ -79,14 +75,14 @@ get_maybe_downgraded_config(Config, Version) ->
 
 %% returns the status of our local cluster for object filtering
 get_status(realtime) ->
-    app_helper:get_env(riak_repl, object_filtering_realtime_status, disabled);
+    app_helper:get_env(riak_repl, ?RT_STATUS, disabled);
 get_status(fullsync) ->
-    app_helper:get_env(riak_repl, object_filtering_fullsync_status, disabled).
+    app_helper:get_env(riak_repl, ?FS_STATUS, disabled).
 
 
 %% returns the version of our local cluster for object filtering
 get_version() ->
-    app_helper:get_env(riak_repl, object_filtering_version, 0).
+    app_helper:get_env(riak_repl, ?VERSION, 0).
 
 
 

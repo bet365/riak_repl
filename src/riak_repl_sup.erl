@@ -18,8 +18,8 @@ start_link() ->
 %% @doc supervisor callback.
 init([]) ->
     Processes = [
-                 {riak_repl2_object_filter, {riak_repl2_object_filter, start_link, []},
-                  permanent, 5000, worker, [riak_repl2_object_filter]},
+                 {riak_repl2_object_filter_console, {riak_repl2_object_filter_console, start_link, []},
+                  permanent, 5000, worker, [riak_repl2_object_filter_console]},
 
                  {riak_repl_client_sup, {riak_repl_client_sup, start_link, []},
                   permanent, infinity, supervisor, [riak_repl_client_sup]},

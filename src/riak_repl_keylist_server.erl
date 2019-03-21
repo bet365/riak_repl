@@ -713,7 +713,7 @@ bloom_fold({{T, B}, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinS
                         {'EXIT', _} ->
                             NSent0 - 1;
                         RObj ->
-                            case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
+                            case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
                                 true ->
                                     NSent0;
                                 false ->
@@ -740,7 +740,7 @@ bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, Fu
                                 {'EXIT', _} ->
                                     NSent0 - 1;
                                 RObj ->
-                                    case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
+                                    case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
                                         true ->
                                             NSent0;
                                         false ->

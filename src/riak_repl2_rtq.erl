@@ -625,7 +625,7 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, riak_repl2_object_filter:rt_filter(CName, Meta)],
+    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, riak_repl2_object_filter:realtime_filter(CName, Meta)],
     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 %% ========================================================================================================= %%
 
@@ -692,7 +692,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, riak_repl2_object_filter:rt_filter(ConsumerName, Meta)],
+                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
                     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
                     case BlacklistedRemotes of
@@ -754,7 +754,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
     end.
 
 filter({Enabled, Name, BlacklistRemotes}, {ConsumerName, Meta}) ->
-    case riak_repl2_object_filter:rt_filter(ConsumerName, Meta) of
+    case riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) of
         true ->
             filtered;
         false ->
@@ -772,7 +772,7 @@ bucket_filter_if_enabled(_, _, _) ->
 
 deliver_if_can_route({FilteringEnabled, BlacklistedRemotes}, Consumer, QEntry) ->
     {Seq, _NumItem, _Bin, Meta} = QEntry,
-    case riak_repl2_object_filter:rt_filter(Consumer#c.name, Meta) of
+    case riak_repl2_object_filter:realtime_filter(Consumer#c.name, Meta) of
         true ->
             {filtered, Consumer#c{cseq = Seq, aseq = Seq, filtered = Consumer#c.filtered + 1, delivered = true, skips=0}};
         false ->

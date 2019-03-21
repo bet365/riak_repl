@@ -208,7 +208,7 @@ rt_update_events(Ring) ->
             _ -> {[],[],[],[],[]}
         end,
 
-    riak_repl2_object_filter:ring_update(NewObjectFilteringStatuses, NewObjectFilteringConfigs),
+    riak_repl2_object_filter_console:ring_update(NewObjectFilteringStatuses, NewObjectFilteringConfigs),
 %% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%

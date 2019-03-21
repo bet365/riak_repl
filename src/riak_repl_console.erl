@@ -1158,44 +1158,44 @@ enable_flag_to_list(_) -> "false".
 %% Object Filtering (API for riak-repl calls)
 %% ========================================================================================================= %%
 object_filtering_enable([]) ->
-    Response = riak_repl2_object_filter:enable(),
+    Response = riak_repl2_object_filter_console:enable(),
     decode_response(Response);
 object_filtering_enable([Mode]) ->
-    Response = riak_repl2_object_filter:enable(Mode),
+    Response = riak_repl2_object_filter_console:enable(Mode),
     decode_response(Response).
 
 object_filtering_disable([]) ->
-    Response = riak_repl2_object_filter:disable(),
+    Response = riak_repl2_object_filter_console:disable(),
     decode_response(Response);
 object_filtering_disable([Mode]) ->
-    Response = riak_repl2_object_filter:disable(Mode),
+    Response = riak_repl2_object_filter_console:disable(Mode),
     decode_response(Response).
 
 object_filtering_clear_config([Mode]) ->
-    Response = riak_repl2_object_filter:clear_config(Mode),
+    Response = riak_repl2_object_filter_console:clear_config(Mode),
     decode_response(Response).
 
 object_filtering_load_config([Mode, ConfigPath]) ->
-    Response = riak_repl2_object_filter:load_config(Mode, ConfigPath),
+    Response = riak_repl2_object_filter_console:load_config(Mode, ConfigPath),
     decode_response(Response).
 
 object_filtering_check_config([ConfigPath]) ->
-    Response = riak_repl2_object_filter:check_config(ConfigPath),
+    Response = riak_repl2_object_filter_console:check_config(ConfigPath),
     decode_response(Response).
 
 object_filtering_status([]) ->
-    Response = riak_repl2_object_filter:status(),
+    Response = riak_repl2_object_filter_console:status(),
     decode_response(Response).
 
 object_filtering_status_all([]) ->
-    Response = riak_repl2_object_filter:status_all(),
+    Response = riak_repl2_object_filter_console:status_all(),
     decode_response(Response).
 
 object_filtering_print_config([Mode]) ->
-    Response = riak_repl2_object_filter:get_config_external(Mode),
+    Response = riak_repl2_object_filter_console:get_config(Mode),
     decode_response(Response);
 object_filtering_print_config([Mode, Remote]) ->
-    Response = riak_repl2_object_filter:get_config_external(Mode, Remote),
+    Response = riak_repl2_object_filter_console:get_config(Mode, Remote),
     decode_response(Response).
 
 

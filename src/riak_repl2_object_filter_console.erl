@@ -18,6 +18,7 @@
 %% repl_console function calls
 -export([
     status/0,
+    get_status/0,
     status_all/0,
     get_config/1,
     get_config/2,
@@ -47,17 +48,33 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 check_config(ConfigFilePath) ->
-    gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT).
+    R = gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT),
+    print_response(R).
 load_config(ReplMode, ConfigFilePath) ->
-    gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT).
+    R = gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT),
+    print_response(R).
 enable()->
-    gen_server:call(?SERVER, enable, ?TIMEOUT).
+    R = gen_server:call(?SERVER, enable, ?TIMEOUT),
+    print_response(R).
 enable(Mode)->
-    gen_server:call(?SERVER, {enable, Mode}, ?TIMEOUT).
+    R = gen_server:call(?SERVER, {enable, Mode}, ?TIMEOUT),
+    print_response(R).
 disable()->
-    gen_server:call(?SERVER, disable, ?TIMEOUT).
+    Fun = fun() -> gen_server:call(?SERVER, disable, ?TIMEOUT) end,
+    run_and_respond(Fun).
 disable(Mode)->
-    gen_server:call(?SERVER, {disable, Mode}, ?TIMEOUT).
+    Fun = fun() -> gen_server:call(?SERVER, {disable, Mode}, ?TIMEOUT) end,
+    run_and_respond(Fun).
+
+run_and_respond(Fun) ->
+    R =
+        try
+            Fun()
+        catch Type:Error ->
+            {error, {Type, Error}}
+        end,
+    print_response(R).
+
 
 clear_config(Mode) ->
     gen_server:cast(?SERVER, {clear_config, Mode}).
@@ -68,20 +85,24 @@ ring_update(NewStatus, NewConfigs) ->
 get_config(Mode) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
-    case lists:member(ConvertedMode, List) of
-        true -> {config, riak_repl2_object_filter:get_config(ConvertedMode)};
-        false -> return_error_unknown_repl_mode(get_config_external, Mode)
-    end.
+    R =
+        case lists:member(ConvertedMode, List) of
+            true -> {config, riak_repl2_object_filter:get_config(ConvertedMode)};
+            false -> return_error_unknown_repl_mode(get_config_external, Mode)
+        end,
+    print_response(R).
 get_config(Mode, Remote) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
-    case lists:member(ConvertedMode, List) of
-        true -> {config, riak_repl2_object_filter:get_config(ConvertedMode, Remote)};
-        false -> return_error_unknown_repl_mode(get_config_external, Mode)
-    end.
+    R =
+        case lists:member(ConvertedMode, List) of
+            true -> {config, riak_repl2_object_filter:get_config(ConvertedMode, Remote)};
+            false -> return_error_unknown_repl_mode(get_config_external, Mode)
+        end,
+    print_response(R).
 
 
-status() ->
+get_status() ->
     {status_single_node,
         {node(),
             {
@@ -96,11 +117,14 @@ status() ->
             }
         }
     }.
+status() ->
+    S = get_status(),
+    print_response(S).
 
 status_all() ->
-    {StatusAllNodes, _} = riak_core_util:rpc_every_member(riak_repl2_object_filter, status, [], ?TIMEOUT),
+    {StatusAllNodes, _} = riak_core_util:rpc_every_member(riak_repl2_object_filter_console, get_status, [], ?TIMEOUT),
     Result = [R ||{status_single_node, R} <- StatusAllNodes],
-    {status_all_nodes, lists:sort(Result)}.
+    print_response({status_all_nodes, lists:sort(Result)}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -108,7 +132,7 @@ status_all() ->
 init([]) ->
     load_ring_configs_and_status(),
 
-    Version = riak_core_capability:get({riak_repl, ?VERSION}, 0),
+    Version = riak_core_capability:get({riak_repl, ?OF_VERSION}, 0),
     set_version(Version),
 
     ClusterName = riak_core_connection:symbolic_clustername(),
@@ -123,22 +147,23 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(Request, _From, State) ->
-    Response = case Request of
-                   enable ->
-                       object_filtering_enable(repl);
-                   {enable, Mode} ->
-                       object_filtering_enable(list_to_atom(Mode));
-                   disable ->
-                       object_filtering_disable(repl);
-                   {disable, Mode} ->
-                       object_filtering_disable(list_to_atom(Mode));
-                   {check_config, Path} ->
-                       object_filtering_check_config_file(Path);
-                   {load_config, Mode, Path} ->
-                       object_filtering_load_config_file(list_to_atom(Mode), Path);
-                   _ ->
-                       error
-               end,
+    Response =
+        case Request of
+            enable ->
+                object_filtering_enable(repl);
+            {enable, Mode} ->
+                object_filtering_enable(list_to_atom(Mode));
+            disable ->
+                object_filtering_disable(repl);
+            {disable, Mode} ->
+                object_filtering_disable(list_to_atom(Mode));
+            {check_config, Path} ->
+                object_filtering_check_config_file(Path);
+            {load_config, Mode, Path} ->
+                object_filtering_load_config_file(list_to_atom(Mode), Path);
+            R ->
+                {error, no_request, R}
+        end,
     {reply, Response, State}.
 
 handle_cast(Request, State) ->
@@ -147,13 +172,13 @@ handle_cast(Request, State) ->
             object_filtering_clear_config(list_to_atom(Mode));
         {ring_update, Statuses, Configs} ->
             ring_update_update_configs(Statuses, Configs);
-        _ ->
-            ok
+        R ->
+            print_response({error, no_request, R})
     end,
     {noreply, State}.
 
 handle_info(poll_core_capability, State) ->
-    Version = riak_core_capability:get({riak_repl, ?VERSION}, 0),
+    Version = riak_core_capability:get({riak_repl, ?OF_VERSION}, 0),
     case Version == ?CURRENT_VERSION of
         false ->
             erlang:send_after(5000, self(), poll_core_capability);
@@ -320,7 +345,7 @@ supported_match_types(_) ->
     [].
 %% ====================================================================================================================
 supported_match_value_formats(MatchType, MatchValue) ->
-    V = app_helper:get_env(riak_repl, ?VERSION, 0),
+    V = app_helper:get_env(riak_repl, ?OF_VERSION, 0),
     supported_match_value_formats(V, MatchType, MatchValue).
 %% Typed bucket
 supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
@@ -539,7 +564,7 @@ set_status(fullsync, Status) ->
     application:set_env(riak_repl, ?FS_STATUS, Status).
 %% ====================================================================================================================
 set_version(Version) ->
-    application:set_env(riak_repl, ?VERSION, Version).
+    application:set_env(riak_repl, ?OF_VERSION, Version).
 %% ====================================================================================================================
 set_clustername(Name) ->
     application:set_env(riak_repl, clustername, Name).
@@ -560,3 +585,52 @@ return_error_invalid_rule(RemoteName, RuleType, Rule) ->
 return_error_unknown_repl_mode(RelatedFun, Mode)->
     {error, unknown_repl_mode, RelatedFun, Mode}.
 %% ====================================================================================================================
+
+print_response(ok) ->
+    io:format("ok ~n");
+print_response({status_single_node, Status}) ->
+    print_status(Status);
+print_response({status_all_nodes, AllStatus}) ->
+    lists:foreach(fun(Status) -> print_status(Status) end, AllStatus);
+print_response({config, Config}) ->
+    io:format("~p ~n", [Config]);
+
+
+%% Errors
+print_response({error,{rule_format, Version, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
+        [Version, Rule]);
+print_response({error,{duplicate_remote_entries, Version}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Duplicate remote entries found in config. ~n",
+        [Version]);
+print_response({error,{invalid_remote_name, Version, RemoteName}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid remote name found, ~p ~n",
+        [Version, RemoteName]);
+print_response({error,{invalid_rule_type_allowed, Version, RemoteName, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in allowed rules). ~n
+                Remote name: ~p ~n
+                Rule: ~p ~n",
+        [Version, RemoteName, Rule]);
+print_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) ->
+    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in blocked rules). ~n
+                Remote name: ~p ~n
+                Rule: ~p ~n",
+        [Version, RemoteName, Rule]);
+print_response({error, {no_rules, Version}}) ->
+    io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
+print_response({error, unknown_repl_mode, object_filtering_clear_config, Mode}) ->
+    io:format("Error object_filtering_clear_config: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync] ~n", [Mode]);
+print_response({error, unknown_repl_mode, get_config_external, Mode}) ->
+    io:format("Error get_config_external: unknown_repl_mode ~p, supported modes: [realtime, fullsync, loaded_repl, loaded_realtime, loaded_fullsync]~n", [Mode]);
+print_response({error, unknown_repl_mode, RelatedFun, Mode}) ->
+    io:format("Error ~p: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [RelatedFun, Mode]);
+print_response({error, no_request, Request}) ->
+    io:format("Error: request ~p does not exist~n", [Request]);
+print_response({error, Error}) ->
+    io:format("File error: ~p ~n", [Error]).
+
+
+
+print_status({Node, {Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash, _ReplConfigHash, _FSConfigHash, _RTConfigHash}}) ->
+    io:format("Node: ~p\t Version: ~p\t Realtime Status: ~p \t Fullsync Status: ~p \t Realtime Config Hash: ~p \t Fullsync Config Hash: ~p~n",
+        [Node, Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash]).

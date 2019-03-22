@@ -12,4 +12,4 @@
 
 -define(RT_STATUS, object_filtering_realtime_status).
 -define(FS_STATUS, object_filtering_fullsync_status).
--define(VERSION, object_filtering_version).
+-define(OF_VERSION, object_filtering_version).

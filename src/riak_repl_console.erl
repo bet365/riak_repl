@@ -1158,96 +1158,31 @@ enable_flag_to_list(_) -> "false".
 %% Object Filtering (API for riak-repl calls)
 %% ========================================================================================================= %%
 object_filtering_enable([]) ->
-    Response = riak_repl2_object_filter_console:enable(),
-    decode_response(Response);
+    riak_repl2_object_filter_console:enable();
 object_filtering_enable([Mode]) ->
-    Response = riak_repl2_object_filter_console:enable(Mode),
-    decode_response(Response).
+    riak_repl2_object_filter_console:enable(Mode).
 
 object_filtering_disable([]) ->
-    Response = riak_repl2_object_filter_console:disable(),
-    decode_response(Response);
+    riak_repl2_object_filter_console:disable();
 object_filtering_disable([Mode]) ->
-    Response = riak_repl2_object_filter_console:disable(Mode),
-    decode_response(Response).
+    riak_repl2_object_filter_console:disable(Mode).
 
 object_filtering_clear_config([Mode]) ->
-    Response = riak_repl2_object_filter_console:clear_config(Mode),
-    decode_response(Response).
+    riak_repl2_object_filter_console:clear_config(Mode).
 
 object_filtering_load_config([Mode, ConfigPath]) ->
-    Response = riak_repl2_object_filter_console:load_config(Mode, ConfigPath),
-    decode_response(Response).
+    riak_repl2_object_filter_console:load_config(Mode, ConfigPath).
 
 object_filtering_check_config([ConfigPath]) ->
-    Response = riak_repl2_object_filter_console:check_config(ConfigPath),
-    decode_response(Response).
+    riak_repl2_object_filter_console:check_config(ConfigPath).
 
 object_filtering_status([]) ->
-    Response = riak_repl2_object_filter_console:status(),
-    decode_response(Response).
+    riak_repl2_object_filter_console:status().
 
 object_filtering_status_all([]) ->
-    Response = riak_repl2_object_filter_console:status_all(),
-    decode_response(Response).
+    riak_repl2_object_filter_console:status_all().
 
 object_filtering_print_config([Mode]) ->
-    Response = riak_repl2_object_filter_console:get_config(Mode),
-    decode_response(Response);
+    riak_repl2_object_filter_console:get_config(Mode);
 object_filtering_print_config([Mode, Remote]) ->
-    Response = riak_repl2_object_filter_console:get_config(Mode, Remote),
-    decode_response(Response).
-
-
-%% Normal Responses
-decode_response(ok) ->
-    io:format("ok ~n");
-decode_response({status_single_node, Status}) ->
-    print_status(Status);
-decode_response({status_all_nodes, AllStatus}) ->
-    [print_status(Status) || Status <- AllStatus];
-decode_response({config, Config}) ->
-    io:format("~p ~n", [Config]);
-
-
-%% Errors
-decode_response({error,{rule_format, Version, Rule}}) ->
-    io:format("[Object Filtering Version: ~p] Error: rule format not supported. ~p ~n",
-        [Version, Rule]);
-decode_response({error,{duplicate_remote_entries, Version}}) ->
-    io:format("[Object Filtering Version: ~p] Error: Duplicate remote entries found in config. ~n",
-        [Version]);
-decode_response({error,{invalid_remote_name, Version, RemoteName}}) ->
-    io:format("[Object Filtering Version: ~p] Error: Invalid remote name found, ~p ~n",
-        [Version, RemoteName]);
-decode_response({error,{invalid_rule_type_allowed, Version, RemoteName, Rule}}) ->
-    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in allowed rules). ~n
-                Remote name: ~p ~n
-                Rule: ~p ~n",
-        [Version, RemoteName, Rule]);
-decode_response({error,{invalid_rule_type_blocked, Version, RemoteName, Rule}}) ->
-    io:format("[Object Filtering Version: ~p] Error: Invalid rule found (in blocked rules). ~n
-                Remote name: ~p ~n
-                Rule: ~p ~n",
-        [Version, RemoteName, Rule]);
-decode_response({error, {no_rules, Version}}) ->
-    io:format("[Object Filtering Version: ~p], Error: No rules are present in the file ~n", [Version]);
-decode_response({error, unknown_repl_mode, object_filtering_clear_config, Mode}) ->
-    io:format("Error object_filtering_clear_config: unknown_repl_mode ~p, supported modes: [all, repl, realtime, fullsync] ~n", [Mode]);
-decode_response({error, unknown_repl_mode, get_config_external, Mode}) ->
-    io:format("Error get_config_external: unknown_repl_mode ~p, supported modes: [realtime, fullsync, loaded_repl, loaded_realtime, loaded_fullsync]~n", [Mode]);
-decode_response({error, unknown_repl_mode, RelatedFun, Mode}) ->
-    io:format("Error ~p: unknown_repl_mode ~p, supported modes: [repl, realtime, fullsync] ~n", [RelatedFun, Mode]);
-decode_response({error, Error}) ->
-    io:format("File error: ~p ~n", [Error]).
-
-
-
-print_status({Node, {Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash, _ReplConfigHash, _FSConfigHash, _RTConfigHash}}) ->
-    io:format("Node: ~p\t Version: ~p\t Realtime Status: ~p \t Fullsync Status: ~p \t Realtime Config Hash: ~p \t Fullsync Config Hash: ~p~n",
-        [Node, Version, RTStatus, FSStatus, MergedRTConfigHash, MergedFSConfigHash]).
-
-%%print_config([]) -> ok;
-%%print_config([Rule | Rest]) ->
-%%    io:format("~p. ~n", [Rule]),
-%%    print_config(Rest).
+    riak_repl2_object_filter_console:get_config(Mode, Remote).

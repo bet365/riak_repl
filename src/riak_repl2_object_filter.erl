@@ -82,7 +82,7 @@ get_status(fullsync) ->
 
 %% returns the version of our local cluster for object filtering
 get_version() ->
-    app_helper:get_env(riak_repl, ?VERSION, 0).
+    app_helper:get_env(riak_repl, ?OF_VERSION, 0).
 
 
 

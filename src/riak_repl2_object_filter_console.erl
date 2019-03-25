@@ -48,28 +48,20 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 check_config(ConfigFilePath) ->
-    R = gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT),
-    print_response(R).
+    safe_call(fun() -> gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT) end).
 load_config(ReplMode, ConfigFilePath) ->
-    R = gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT),
-    print_response(R).
+    safe_call(fun() -> gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT) end).
 enable()->
-    R = gen_server:call(?SERVER, enable, ?TIMEOUT),
-    print_response(R).
+    safe_call(fun() -> gen_server:call(?SERVER, enable, ?TIMEOUT) end).
 enable(Mode)->
-    R = gen_server:call(?SERVER, {enable, Mode}, ?TIMEOUT),
-    print_response(R).
+    safe_call(fun() -> gen_server:call(?SERVER, {enable, Mode}, ?TIMEOUT) end).
 disable()->
-    Fun = fun() -> gen_server:call(?SERVER, disable, ?TIMEOUT) end,
-    run_and_respond(Fun).
+    safe_call(fun() -> gen_server:call(?SERVER, disable, ?TIMEOUT) end).
 disable(Mode)->
-    Fun = fun() -> gen_server:call(?SERVER, {disable, Mode}, ?TIMEOUT) end,
-    run_and_respond(Fun).
+    safe_call(fun() -> gen_server:call(?SERVER, {disable, Mode}, ?TIMEOUT) end).
 
-run_and_respond(Fun) ->
-    R =
-        try
-            Fun()
+safe_call(Fun) ->
+    R = try Fun()
         catch Type:Error ->
             {error, {Type, Error}}
         end,

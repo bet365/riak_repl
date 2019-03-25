@@ -193,23 +193,6 @@ rt_update_events(Ring) ->
     end,
     application:set_env(riak_repl, realtime_cascades, RTCascades),
 %% ========================================================================================================= %%
-%% Object Filtering
-%% ========================================================================================================= %%
-    NewObjectFilteringStatuses = case dict:find(object_filtering_statuses, RC) of
-                                   {ok, S} ->
-                                       S;
-                                   _ ->
-                                       {disabled, disabled}
-                               end,
-
-    NewObjectFilteringConfigs =
-        case dict:find(object_filtering_configs, RC) of
-            {ok, C} -> C;
-            _ -> {[],[],[],[],[]}
-        end,
-
-    riak_repl2_object_filter_console:ring_update(NewObjectFilteringStatuses, NewObjectFilteringConfigs),
-%% ========================================================================================================= %%
 %% Bucket Filtering (legacy)
 %% ========================================================================================================= %%
     BucketFilteringEnabled = case dict:find(bucket_filtering_enabled, RC) of

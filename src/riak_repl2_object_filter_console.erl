@@ -12,7 +12,9 @@
     clear_config/1,
     check_config/1,
     load_config/2,
-    ring_update/2
+    update/2,
+    force_update/1,
+    force_update/0
 ]).
 
 %% repl_console function calls
@@ -37,7 +39,23 @@
 
 -define(SERVER, ?MODULE).
 -define(CURRENT_VERSION, 1.0).
--record(state, {}).
+-record(config, {
+    loaded_repl_config = riak_repl2_object_filter:get_config(loaded_repl),
+    loaded_realtime_config = riak_repl2_object_filter:get_config(loaded_realtime),
+    loaded_fullsync_config = riak_repl2_object_filter:get_config(loaded_fullsync),
+    realtime_config = riak_repl2_object_filter:get_config(realtime),
+    fullsync_config = riak_repl2_object_filter:get_config(fullsync),
+    realtime_status = riak_repl2_object_filter:get_status(realtime),
+    fullsync_status = riak_repl2_object_filter:get_status(fullsync),
+    version = riak_repl2_object_filter:get_version()
+}).
+-record(state, {
+    config = #config{},
+    config_hash = -1,
+    update_hash = -1,
+    update_list = [],
+    update_ref
+}).
 
 
 
@@ -51,6 +69,8 @@ check_config(ConfigFilePath) ->
     safe_call(fun() -> gen_server:call(?SERVER, {check_config, ConfigFilePath}, ?TIMEOUT) end).
 load_config(ReplMode, ConfigFilePath) ->
     safe_call(fun() -> gen_server:call(?SERVER, {load_config, ReplMode, ConfigFilePath}, ?TIMEOUT) end).
+clear_config(Mode) ->
+    safe_call(fun() -> gen_server:call(?SERVER, {clear_config, Mode}, ?TIMEOUT) end).
 enable()->
     safe_call(fun() -> gen_server:call(?SERVER, enable, ?TIMEOUT) end).
 enable(Mode)->
@@ -68,10 +88,24 @@ safe_call(Fun) ->
     print_response(R).
 
 
-clear_config(Mode) ->
-    gen_server:cast(?SERVER, {clear_config, Mode}).
-ring_update(NewStatus, NewConfigs) ->
-    gen_server:cast(?SERVER, {ring_update, NewStatus, NewConfigs}).
+
+
+
+update(Node, Hash) when Node =:= node() ->
+    gen_server:cast(?SERVER, {update, Hash});
+update(Node, Hash) ->
+    gen_server:cast({?SERVER, Node}, {update, Hash}).
+
+force_update() ->
+    force_update(node()).
+force_update(Node) when Node =:= node() ->
+    gen_server:cast(?SERVER, force_update);
+force_update(Node) ->
+    gen_server:cast({?SERVER, Node}, force_update).
+
+
+
+
 
 % returns config to repl_console or errors out
 get_config(Mode) ->
@@ -139,35 +173,37 @@ init([]) ->
     {ok, #state{}}.
 
 handle_call(Request, _From, State) ->
-    Response =
+    {Response, NewState} =
         case Request of
             enable ->
-                object_filtering_enable(repl);
+                object_filtering_enable(repl, State);
             {enable, Mode} ->
-                object_filtering_enable(list_to_atom(Mode));
+                object_filtering_enable(list_to_atom(Mode), State);
             disable ->
-                object_filtering_disable(repl);
+                object_filtering_disable(repl, State);
             {disable, Mode} ->
-                object_filtering_disable(list_to_atom(Mode));
+                object_filtering_disable(list_to_atom(Mode), State);
             {check_config, Path} ->
-                object_filtering_check_config_file(Path);
+                object_filtering_check_config_file(Path, State);
             {load_config, Mode, Path} ->
-                object_filtering_load_config_file(list_to_atom(Mode), Path);
+                object_filtering_load_config_file(list_to_atom(Mode), Path, State);
+            {clear_config, Mode} ->
+                object_filtering_clear_config(list_to_atom(Mode), State);
             R ->
-                {error, no_request, R}
+                {{error, no_request, R}, State}
         end,
-    {reply, Response, State}.
+    {reply, Response, NewState}.
 
 handle_cast(Request, State) ->
-    case Request of
-        {clear_config, Mode} ->
-            object_filtering_clear_config(list_to_atom(Mode));
-        {ring_update, Statuses, Configs} ->
-            ring_update_update_configs(Statuses, Configs);
-        R ->
-            print_response({error, no_request, R})
+    NewState = case Request of
+                {update, Hash} ->
+                    update_config(Hash, State);
+                force_update ->
+                    ok;
+                _ ->
+                    State
     end,
-    {noreply, State}.
+    {noreply, NewState}.
 
 handle_info(poll_core_capability, State) ->
     Version = riak_core_capability:get({riak_repl, ?OF_VERSION}, 0),
@@ -232,93 +268,114 @@ load_ring_configs_and_status() ->
     set_config(realtime, MergedRTConfig),
     set_config(fullsync, MergedFSConfig).
 
+
+load_config() ->
+    RTStatus = riak_core_metadata:get({riak_repl, object_filter}, realtime_status),
+    FSStatus = riak_core_metadata:get({riak_repl, object_filter}, fullsync_status),
+
 %%%===================================================================
 %%% Disable
 %%%===================================================================
-object_filtering_disable(repl) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {disabled, disabled}),
+object_filtering_disable(repl, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, disabled),
+    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, disabled),
     set_status(realtime, disabled),
     set_status(fullsync, disabled),
-    ok;
-object_filtering_disable(realtime) ->
-    FSStatus = riak_repl2_object_filter:get_status(fullsync),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {disabled, FSStatus}),
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_disable(realtime, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, disabled),
     set_status(realtime, disabled),
-    ok;
-object_filtering_disable(fullsync) ->
-    RTStatus = riak_repl2_object_filter:get_status(realtime),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {RTStatus, disabled}),
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_disable(fullsync, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, disabled),
     set_status(fullsync, disabled),
-    ok;
-object_filtering_disable(Mode) ->
-    return_error_unknown_repl_mode(object_filtering_disable, Mode).
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_disable(Mode, State) ->
+    {return_error_unknown_repl_mode(object_filtering_disable, Mode), State}.
 
 %%%===================================================================
 %%% Enable
 %%%===================================================================
-object_filtering_enable(repl) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {enabled, enabled}),
+object_filtering_enable(repl, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, enabled),
+    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, enabled),
     set_status(realtime, enabled),
     set_status(fullsync, enabled),
-    ok;
-object_filtering_enable(realtime) ->
-    FSStatus = riak_repl2_object_filter:get_status(fullsync),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {enabled, FSStatus}),
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_enable(realtime, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, enabled),
     set_status(realtime, enabled),
-    ok;
-object_filtering_enable(fullsync) ->
-    RTStatus = riak_repl2_object_filter:get_status(realtime),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_status/2, {RTStatus, enabled}),
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_enable(fullsync, State) ->
+    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, enabled),
     set_status(fullsync, enabled),
-    ok;
-object_filtering_enable(Mode) ->
-    return_error_unknown_repl_mode(object_filtering_enabled, Mode).
+    NewState = update_all_nodes(State),
+    {ok, NewState};
+object_filtering_enable(Mode, State) ->
+    {return_error_unknown_repl_mode(object_filtering_enabled, Mode), State}.
 
 %%%===================================================================
 %%% Check Config
 %%%===================================================================
-object_filtering_check_config_file(Path) ->
-    case file:consult(Path) of
-        {ok, FilteringConfig} ->
-            case check_filtering_rules(FilteringConfig) of
-                ok ->
-                    ok;
-                Error2 ->
-                    Error2
-            end;
-        Error1 ->
-            Error1
-    end.
+object_filtering_check_config_file(Path, State) ->
+    Response = case file:consult(Path) of
+                   {ok, FilteringConfig} ->
+                        case check_filtering_rules(FilteringConfig) of
+                            ok ->
+                                ok;
+                            Error2 ->
+                                Error2
+                        end;
+                    Error1 ->
+                        Error1
+                end,
+    {Response, State}.
 
 %%%===================================================================
 %%% Load Config
 %%%===================================================================
-object_filtering_load_config_file(Mode, Path) ->
+object_filtering_load_config_file(Mode, Path, State) ->
     Modes = [repl, fullsync, realtime],
     case lists:member(Mode, Modes) of
         true ->
-            object_filtering_load_config_file_helper(Mode, Path);
+            object_filtering_load_config_file_helper(Mode, Path, State);
         false ->
-            return_error_unknown_repl_mode(object_filtering_config_file, Mode)
+            {return_error_unknown_repl_mode(object_filtering_config_file, Mode), State}
     end.
 
 
-object_filtering_load_config_file_helper(Mode, Path) ->
+object_filtering_load_config_file_helper(Mode, Path, State) ->
     case file:consult(Path) of
         {ok, FilteringConfig} ->
             case check_filtering_rules(FilteringConfig) of
                 ok ->
-                    merge_and_load_configs(Mode, FilteringConfig);
+                    NewState = merge_and_load_configs(Mode, FilteringConfig, State),
+                    {ok, NewState};
                 Error2 ->
-                    Error2
+                    {Error2, State}
             end;
         Error1 ->
-            Error1
+            {Error1, State}
     end.
 
 %%%===================================================================
 %%% Helper Functions
 %%%===================================================================
+
+update_all_nodes(State = #state{config_hash = CH}) ->
+    Hash = erlang:phash2(#config{}),
+    case CH == Hash of
+        true ->
+            State;
+        false ->
+            [?MODULE:update(Node, Hash) || Node <- nodes()],
+            State#state{config_hash = Hash, update_hash = -1}
+    end.
 
 supported_match_types() ->
     V = riak_repl2_object_filter:get_version(),
@@ -456,7 +513,7 @@ is_multi_rule_supported([]) -> true;
 is_multi_rule_supported([Rule|Rest]) ->
     is_single_rule_supported(Rule) and is_multi_rule_supported(Rest).
 %% ====================================================================================================================
-merge_and_load_configs(repl, ReplConfig) ->
+merge_and_load_configs(repl, ReplConfig, State) ->
     %% Change Repl, MergedRT, and MergedFS
     RTConfig = riak_repl2_object_filter:get_config(loaded_realtime),
     FSConfig = riak_repl2_object_filter:get_config(loaded_fullsync),
@@ -465,24 +522,21 @@ merge_and_load_configs(repl, ReplConfig) ->
     set_config(loaded_repl, ReplConfig),
     set_config(realtime, MergedRT),
     set_config(fullsync, MergedFS),
-    update_ring_configs(),
-    ok;
-merge_and_load_configs(realtime, RTConfig) ->
+    update_all_nodes(State);
+merge_and_load_configs(realtime, RTConfig, State) ->
     %% Change RT, MergedRT
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedRT = merge_config(ReplConfig, RTConfig),
     set_config(loaded_realtime, RTConfig),
     set_config(realtime, MergedRT),
-    update_ring_configs(),
-    ok;
-merge_and_load_configs(fullsync, FSConfig) ->
+    update_all_nodes(State);
+merge_and_load_configs(fullsync, FSConfig, State) ->
     %% Change FS, MergedFS
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedFS = merge_config(ReplConfig, FSConfig),
     set_config(loaded_fullsync, FSConfig),
     set_config(fullsync, MergedFS),
-    update_ring_configs(),
-    ok.
+    update_all_nodes(State).
 
 merge_config(Config1, Config2) ->
     merge_config_helper(Config1, Config2, []).
@@ -519,25 +573,24 @@ join_configs(Config1, [Elem|Rest]) ->
         true -> join_configs(Config1, Rest)
     end.
 %% ====================================================================================================================
-object_filtering_clear_config(Mode) ->
-    object_filtering_clear_config_helper(Mode).
+object_filtering_clear_config(Mode, State) ->
+    object_filtering_clear_config_helper(Mode, State).
 
-object_filtering_clear_config_helper(all) ->
+object_filtering_clear_config_helper(all, State) ->
     set_config(loaded_repl, []),
     set_config(loaded_realtime, []),
     set_config(loaded_fullsync, []),
     set_config(realtime, []),
     set_config(fullsync, []),
-    update_ring_configs(),
-    ok;
-object_filtering_clear_config_helper(repl) ->
-    merge_and_load_configs(repl, []);
-object_filtering_clear_config_helper(realtime) ->
-    merge_and_load_configs(realtime, []);
-object_filtering_clear_config_helper(fullsync) ->
-    merge_and_load_configs(fullsync, []);
-object_filtering_clear_config_helper(Mode) ->
-    return_error_unknown_repl_mode(object_filtering_clear_config, Mode).
+    update_all_nodes(State);
+object_filtering_clear_config_helper(repl, State) ->
+    merge_and_load_configs(repl, [], State);
+object_filtering_clear_config_helper(realtime, State) ->
+    merge_and_load_configs(realtime, [], State);
+object_filtering_clear_config_helper(fullsync, State) ->
+    merge_and_load_configs(fullsync, [], State);
+object_filtering_clear_config_helper(Mode, State) ->
+    {return_error_unknown_repl_mode(object_filtering_clear_config, Mode), State}.
 %% ====================================================================================================================
 set_config(fullsync, Config) ->
     application:set_env(riak_repl, ?MERGED_FS_CONFIG, Config);

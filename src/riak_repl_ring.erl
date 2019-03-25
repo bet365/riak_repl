@@ -579,47 +579,6 @@ get_active_nodes() ->
         RingError ->
             RingError
     end.
-%% ========================================================================================================= %%
-%% Object Filtering
-%% ========================================================================================================= %%
-overwrite_object_filtering_status(Ring, ObjectFilteringStatus) ->
-    RC = get_repl_config(ensure_config(Ring)),
-    RC2 = dict:store(object_filtering_statuses, ObjectFilteringStatus, RC),
-    case RC == RC2 of
-        true ->
-            %% nothing changed
-            {ignore, {not_changed, clustername}};
-        false ->
-            {new_ring, riak_core_ring:update_meta(
-                ?MODULE,
-                RC2,
-                Ring)}
-    end.
-
-overwrite_object_filtering_configs(Ring, ObjectFilteringConfigs) ->
-    RC = get_repl_config(ensure_config(Ring)),
-    RC2 = dict:store(object_filtering_configs, ObjectFilteringConfigs, RC),
-    case RC == RC2 of
-        true ->
-            %% nothing changed
-            {ignore, {not_changed, clustername}};
-        false ->
-            {new_ring, riak_core_ring:update_meta(
-                ?MODULE,
-                RC2,
-                Ring)}
-    end.
-
-get_object_filtering_data() ->
-    case riak_core_ring_manager:get_my_ring() of
-        {ok, Ring} ->
-            RC = get_repl_config(ensure_config(Ring)),
-            Status = get_value(object_filtering_statuses, RC, {disabled, disabled}),
-            Config = get_value(object_filtering_configs, RC, {[], [], [], [], []}),
-            {Status, Config};
-        _RingError ->
-            {{disabled, disabled}, {[], [], [], [], []}}
-    end.
 
 %% ===================================== %%
 %% Helper Functions

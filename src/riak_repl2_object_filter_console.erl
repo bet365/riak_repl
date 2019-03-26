@@ -12,7 +12,7 @@
     clear_config/1,
     check_config/1,
     load_config/2,
-    update/2,
+    update/3,
     force_update/1,
     force_update/0
 ]).
@@ -38,8 +38,9 @@
 
 
 -define(SERVER, ?MODULE).
--define(CURRENT_VERSION, 1.0).
--record(config, {
+
+
+-record(active_config, {
     loaded_repl_config = riak_repl2_object_filter:get_config(loaded_repl),
     loaded_realtime_config = riak_repl2_object_filter:get_config(loaded_realtime),
     loaded_fullsync_config = riak_repl2_object_filter:get_config(loaded_fullsync),
@@ -49,13 +50,28 @@
     fullsync_status = riak_repl2_object_filter:get_status(fullsync),
     version = riak_repl2_object_filter:get_version()
 }).
+
+-record(update_config, {
+    loaded_repl_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_repl),
+    loaded_realtime_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_realtime),
+    loaded_fullsync_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_fullsync),
+    realtime_config = riak_core_metadata:get(?OBF_CONFIG_KEY, realtime),
+    fullsync_config = riak_core_metadata:get(?OBF_CONFIG_KEY, fullsync),
+    realtime_status = riak_core_metadata:get(?OBF_STATUS_KEY, realtime),
+    fullsync_status = riak_core_metadata:get(?OBF_STATUS_KEY, fullsync)
+}).
+
 -record(state, {
-    config = #config{},
+    config = #active_config{},
     config_hash = -1,
+
+    update_config = #update_config{},
     update_hash = -1,
     update_list = [],
     update_ref
 }).
+
+-define(CURRENT_VERSION, 1.0).
 
 
 
@@ -91,10 +107,10 @@ safe_call(Fun) ->
 
 
 
-update(Node, Hash) when Node =:= node() ->
-    gen_server:cast(?SERVER, {update, Hash});
-update(Node, Hash) ->
-    gen_server:cast({?SERVER, Node}, {update, Hash}).
+update(Node, OldHash, NewHash) when Node =:= node() ->
+    gen_server:cast(?SERVER, {update, OldHash, NewHash});
+update(Node, OldHash, NewHash) ->
+    gen_server:cast({?SERVER, Node}, {update, OldHash, NewHash}).
 
 force_update() ->
     force_update(node()).
@@ -156,9 +172,9 @@ status_all() ->
 %%% gen_server callbacks
 %%%===================================================================
 init([]) ->
-    load_ring_configs_and_status(),
+    load_config(),
 
-    Version = riak_core_capability:get({riak_repl, ?OF_VERSION}, 0),
+    Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
     set_version(Version),
 
     ClusterName = riak_core_connection:symbolic_clustername(),
@@ -195,18 +211,23 @@ handle_call(Request, _From, State) ->
     {reply, Response, NewState}.
 
 handle_cast(Request, State) ->
-    NewState = case Request of
-                {update, Hash} ->
-                    update_config(Hash, State);
-                force_update ->
-                    ok;
-                _ ->
-                    State
-    end,
-    {noreply, NewState}.
+    case Request of
+        {update, OldHash, NewHash} ->
+            Ref = erlang:send_after(0, self(), config_update),
+            case State#state.update_hash of
+                undefined ->
+                    {noreply, State#state{update_ref = Ref, update_hash = Hash}};
+                OldRef ->
+                    {noreply, State#state{update_ref = undefined, update_hash = Hash}}
+            end;
+        force_update ->
+            {noreply, State};
+        _ ->
+            {noreply, State}
+    end.
 
 handle_info(poll_core_capability, State) ->
-    Version = riak_core_capability:get({riak_repl, ?OF_VERSION}, 0),
+    Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
     case Version == ?CURRENT_VERSION of
         false ->
             erlang:send_after(5000, self(), poll_core_capability);
@@ -214,6 +235,10 @@ handle_info(poll_core_capability, State) ->
             set_version(Version)
     end,
     {noreply, State};
+
+handle_info(config_update, State = #state{update_ref = undefined}) ->
+    {noreply, State};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -226,71 +251,48 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 %%%===================================================================
-%%% Ring Update
+%%% Update
 %%%===================================================================
 
-ring_update_update_configs({NewRTStatus, NewFSStatus}, {NewReplConfig, NewRTConfig, NewFSConfig, NewMergedRTConfig, NewMergedFSConfig}) ->
-    List =
-        [
-            {NewRTStatus,       riak_repl2_object_filter:get_status(realtime),           ?RT_STATUS},
-            {NewFSStatus,       riak_repl2_object_filter:get_status(fullsync),           ?FS_STATUS},
-            {NewReplConfig,     riak_repl2_object_filter:get_config(loaded_repl),        ?REPL_CONFIG},
-            {NewRTConfig,       riak_repl2_object_filter:get_config(loaded_realtime),    ?RT_CONFIG},
-            {NewFSConfig,       riak_repl2_object_filter:get_config(loaded_fullsync),    ?FS_CONFIG},
-            {NewMergedRTConfig, riak_repl2_object_filter:get_config(realtime),           ?MERGED_RT_CONFIG},
-            {NewMergedFSConfig, riak_repl2_object_filter:get_config(fullsync),           ?MERGED_FS_CONFIG}
-        ],
-    UpdateFun =
-        fun(New, Old, Key) ->
-            case New == Old of
-                true -> ok;
-                false -> application:set_env(riak_repl, Key, New)
-            end
-        end,
-    [UpdateFun(A, B, C) || {A, B, C} <- List].
+update_config(OldHash, NewHash, State) ->
+    State.
 
-update_ring_configs() ->
-    ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
-    RTConfig = riak_repl2_object_filter:get_config(loaded_realtime),
-    FSConfig = riak_repl2_object_filter:get_config(loaded_fullsync),
-    MergedRTConfig = riak_repl2_object_filter:get_config(realtime),
-    MergedFSConfig = riak_repl2_object_filter:get_config(fullsync),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:overwrite_object_filtering_configs/2,
-        {ReplConfig, RTConfig, FSConfig, MergedRTConfig, MergedFSConfig}).
-
-load_ring_configs_and_status() ->
-    {{RT_Status, FS_Status}, {ReplConfig, RealtimeConfig, FullsyncConfig, MergedRTConfig, MergedFSConfig}} = riak_repl_ring:get_object_filtering_data(),
-    set_status(realtime, RT_Status),
-    set_status(fullsync, FS_Status),
-    set_config(loaded_repl, ReplConfig),
-    set_config(loaded_realtime, RealtimeConfig),
-    set_config(loaded_fullsync, FullsyncConfig),
-    set_config(realtime, MergedRTConfig),
-    set_config(fullsync, MergedFSConfig).
+update_all_nodes(State = #state{config_hash = OldHash}) ->
+    NewHash = erlang:phash2(#active_config{}),
+    case OldHash == NewHash of
+        true ->
+            State;
+        false ->
+            [?MODULE:update(Node, OldHash, NewHash) || Node <- nodes()],
+            State#state{config_hash = NewHash, update_hash = NewHash}
+    end.
 
 
 load_config() ->
-    RTStatus = riak_core_metadata:get({riak_repl, object_filter}, realtime_status),
-    FSStatus = riak_core_metadata:get({riak_repl, object_filter}, fullsync_status),
+    Config = #update_config{},
+    set_status(realtime, Config#update_config.realtime_status),
+    set_status(fullsync, Config#update_config.fullsync_status),
+    set_config(loaded_repl, Config#update_config.loaded_repl_config),
+    set_config(loaded_realtime, Config#update_config.loaded_realtime_config),
+    set_config(loaded_fullsync, Config#update_config.loaded_fullsync_config),
+    set_config(realtime, Config#update_config.realtime_config),
+    set_config(fullsync, Config#update_config.fullsync_config).
+
 
 %%%===================================================================
 %%% Disable
 %%%===================================================================
 object_filtering_disable(repl, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, disabled),
-    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, disabled),
-    set_status(realtime, disabled),
-    set_status(fullsync, disabled),
+    save_status(realtime, disabled),
+    save_status(fullsync, disabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_disable(realtime, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, disabled),
-    set_status(realtime, disabled),
+    save_status(realtime, disabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_disable(fullsync, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, disabled),
-    set_status(fullsync, disabled),
+    save_status(fullsync, disabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_disable(Mode, State) ->
@@ -300,20 +302,17 @@ object_filtering_disable(Mode, State) ->
 %%% Enable
 %%%===================================================================
 object_filtering_enable(repl, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, enabled),
-    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, enabled),
-    set_status(realtime, enabled),
-    set_status(fullsync, enabled),
+    save_status(realtime, enabled),
+    save_status(fullsync, enabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_enable(realtime, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, realtime_status, enabled),
-    set_status(realtime, enabled),
+    save_status(realtime, enabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_enable(fullsync, State) ->
-    riak_core_metadata:put({riak_repl, object_filter}, fullsync_status, enabled),
-    set_status(fullsync, enabled),
+    riak_core_metadata:put(?OBF_STATUS_KEY, fullsync, enabled),
+    save_status(fullsync, enabled),
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_enable(Mode, State) ->
@@ -367,16 +366,6 @@ object_filtering_load_config_file_helper(Mode, Path, State) ->
 %%% Helper Functions
 %%%===================================================================
 
-update_all_nodes(State = #state{config_hash = CH}) ->
-    Hash = erlang:phash2(#config{}),
-    case CH == Hash of
-        true ->
-            State;
-        false ->
-            [?MODULE:update(Node, Hash) || Node <- nodes()],
-            State#state{config_hash = Hash, update_hash = -1}
-    end.
-
 supported_match_types() ->
     V = riak_repl2_object_filter:get_version(),
     supported_match_types(V).
@@ -394,7 +383,7 @@ supported_match_types(_) ->
     [].
 %% ====================================================================================================================
 supported_match_value_formats(MatchType, MatchValue) ->
-    V = app_helper:get_env(riak_repl, ?OF_VERSION, 0),
+    V = riak_repl2_object_filter:get_version(),
     supported_match_value_formats(V, MatchType, MatchValue).
 %% Typed bucket
 supported_match_value_formats(1.0, bucket, {MatchValue1, MatchValue2}) ->
@@ -519,23 +508,23 @@ merge_and_load_configs(repl, ReplConfig, State) ->
     FSConfig = riak_repl2_object_filter:get_config(loaded_fullsync),
     MergedRT = merge_config(ReplConfig, RTConfig),
     MergedFS = merge_config(ReplConfig, FSConfig),
-    set_config(loaded_repl, ReplConfig),
-    set_config(realtime, MergedRT),
-    set_config(fullsync, MergedFS),
+    save_config(loaded_repl, ReplConfig),
+    save_config(realtime, MergedRT),
+    save_config(fullsync, MergedFS),
     update_all_nodes(State);
 merge_and_load_configs(realtime, RTConfig, State) ->
     %% Change RT, MergedRT
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedRT = merge_config(ReplConfig, RTConfig),
-    set_config(loaded_realtime, RTConfig),
-    set_config(realtime, MergedRT),
+    save_config(loaded_realtime, RTConfig),
+    save_config(realtime, MergedRT),
     update_all_nodes(State);
 merge_and_load_configs(fullsync, FSConfig, State) ->
     %% Change FS, MergedFS
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedFS = merge_config(ReplConfig, FSConfig),
-    set_config(loaded_fullsync, FSConfig),
-    set_config(fullsync, MergedFS),
+    save_config(loaded_fullsync, FSConfig),
+    save_config(fullsync, MergedFS),
     update_all_nodes(State).
 
 merge_config(Config1, Config2) ->
@@ -577,11 +566,11 @@ object_filtering_clear_config(Mode, State) ->
     object_filtering_clear_config_helper(Mode, State).
 
 object_filtering_clear_config_helper(all, State) ->
-    set_config(loaded_repl, []),
-    set_config(loaded_realtime, []),
-    set_config(loaded_fullsync, []),
-    set_config(realtime, []),
-    set_config(fullsync, []),
+    save_config(loaded_repl, []),
+    save_config(loaded_realtime, []),
+    save_config(loaded_fullsync, []),
+    save_config(realtime, []),
+    save_config(fullsync, []),
     update_all_nodes(State);
 object_filtering_clear_config_helper(repl, State) ->
     merge_and_load_configs(repl, [], State);
@@ -592,25 +581,20 @@ object_filtering_clear_config_helper(fullsync, State) ->
 object_filtering_clear_config_helper(Mode, State) ->
     {return_error_unknown_repl_mode(object_filtering_clear_config, Mode), State}.
 %% ====================================================================================================================
-set_config(fullsync, Config) ->
-    application:set_env(riak_repl, ?MERGED_FS_CONFIG, Config);
-set_config(realtime, Config) ->
-    application:set_env(riak_repl, ?MERGED_RT_CONFIG, Config);
-set_config(loaded_repl, Config) ->
-    application:set_env(riak_repl, ?REPL_CONFIG, Config);
-set_config(loaded_realtime, Config) ->
-    application:set_env(riak_repl, ?RT_CONFIG, Config);
-set_config(loaded_fullsync, Config) ->
-    application:set_env(riak_repl, ?FS_CONFIG, Config).
+save_config(Key, Config) ->
+    riak_core_metadata:put(?OBF_CONFIG_KEY, Key, Config),
+    set_config(Key, Config).
+save_status(Key, Status) ->
+    riak_core_metadata:put(?OBF_STATUS_KEY, Key, Status),
+    set_status(Key, Status).
+
 %% ====================================================================================================================
-set_status(realtime, Status) ->
-    application:set_env(riak_repl, ?RT_STATUS, Status);
-set_status(fullsync, Status) ->
-    application:set_env(riak_repl, ?FS_STATUS, Status).
-%% ====================================================================================================================
+set_config(Key, Config) ->
+    application:set_env(?OBF_CONFIG_KEY, Key, Config).
+set_status(Key, Status) ->
+    application:set_env(?OBF_STATUS_KEY, Key, Status).
 set_version(Version) ->
-    application:set_env(riak_repl, ?OF_VERSION, Version).
-%% ====================================================================================================================
+    application:set_env(?OBF_VERSION_KEY, active, Version).
 set_clustername(Name) ->
     application:set_env(riak_repl, clustername, Name).
 %% ====================================================================================================================

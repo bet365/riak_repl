@@ -67,7 +67,7 @@ start(_Type, _StartArgs) ->
         legacy
         ),
     riak_core_capability:register(
-        {riak_repl, object_filtering_version},
+        {riak_repl2_object_filter, version},
         [1.0, 0],
         0
     ),

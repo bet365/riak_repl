@@ -32,37 +32,19 @@ filter_object_rule_test(Rule, Object) ->
 %%% API
 %%%===================================================================
 %% returns the entire config for all clusters
-get_config(fullsync) ->
-    app_helper:get_env(riak_repl, ?MERGED_FS_CONFIG, []);
-get_config(realtime) ->
-    app_helper:get_env(riak_repl, ?MERGED_RT_CONFIG, []);
-get_config(loaded_repl) ->
-    app_helper:get_env(riak_repl, ?REPL_CONFIG, []);
-get_config(loaded_realtime) ->
-    app_helper:get_env(riak_repl, ?RT_CONFIG, []);
-get_config(loaded_fullsync) ->
-    app_helper:get_env(riak_repl, ?FS_CONFIG, []);
-get_config(_) ->
-    [].
+get_config(Key) ->
+    app_helper:get_env(?OBF_CONFIG_KEY, Key, []).
 
 
 %% returns config only for the remote that is named in the argument
 get_config(ReplMode, RemoteName) ->
     get_config(ReplMode, RemoteName, undefined).
 get_config(ReplMode, RemoteName, TimeStamp) ->
-    Config = case ReplMode of
-                 fullsync -> get_config(fullsync);
-                 realtime -> get_config(realtime);
-                 loaded_repl -> get_config(loaded_repl);
-                 loaded_realtime -> get_config(loaded_realtime);
-                 loaded_fullsync -> get_config(loaded_fullsync)
-             end,
-
+    Config = get_config(ReplMode),
     ResConfig = case lists:keyfind(RemoteName, 1, Config) of
                     false -> ?DEFAULT_CONFIG(RemoteName);
                     Rconfig -> Rconfig
                 end,
-
     maybe_set_lastmod_age(ReplMode, ResConfig, TimeStamp).
 
 
@@ -74,15 +56,13 @@ get_maybe_downgraded_config(Config, Version) ->
 
 
 %% returns the status of our local cluster for object filtering
-get_status(realtime) ->
-    app_helper:get_env(riak_repl, ?RT_STATUS, disabled);
-get_status(fullsync) ->
-    app_helper:get_env(riak_repl, ?FS_STATUS, disabled).
+get_status(Key) ->
+    app_helper:get_env(?OBF_STATUS_KEY, Key, disabled).
 
 
 %% returns the version of our local cluster for object filtering
 get_version() ->
-    app_helper:get_env(riak_repl, ?OF_VERSION, 0).
+    app_helper:get_env(?OBF_VERSION_KEY, active, 0).
 
 
 

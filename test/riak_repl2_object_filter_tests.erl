@@ -1,6 +1,7 @@
 -module(riak_repl2_object_filter_tests).
 -import(riak_repl2_object_filter, [filter_object_rule_test/2]).
 -include_lib("eunit/include/eunit.hrl").
+-include("riak_repl2_object_filter.hrl").
 
 object_filter_test_() ->
     {spawn,
@@ -37,18 +38,25 @@ setup() ->
     meck:new(riak_core_connection, [passthrough]),
     meck:expect(riak_core_connection, symbolic_clustername, 0, fun() -> "cluster-1" end),
 
-    catch(meck:unload(riak_core_ring_manager)),
-    meck:new(riak_core_ring_manager, [passthrough]),
-    meck:expect(riak_core_ring_manager, ring_trans, 2, fun(_, _) -> ok end),
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun
+            ({riak_repl2_object_filter, config}, _) -> [];
+            ({riak_repl2_object_filter, status}, _) -> disabled
+
+        end),
+    meck:expect(riak_core_metadata, put, 3, fun(_,_,_) -> ok end),
 
     App1 = riak_repl_test_util:start_test_ring(),
     App2 = riak_repl_test_util:start_lager(),
-    App3 = riak_repl2_object_filter:start_link(),
+    App3 = riak_repl2_object_filter_console:start_link(),
     [App1, App2, App3].
 cleanup(StartedApps) ->
     process_flag(trap_exit, true),
     catch(meck:unload(riak_core_capability)),
     catch(meck:unload(riak_core_connection)),
+    catch(meck:unload(riak_core_metadata)),
     process_flag(trap_exit, false),
     riak_repl_test_util:stop_apps(StartedApps).
 
@@ -292,7 +300,7 @@ test_object_filter_get_fullsync_config_3() ->
     Allowed = Testset1,
     Blocked = Testset1,
     Config = [{"test_cluster", {allow, Allowed}, {block, Blocked}}],
-    application:set_env(riak_repl, object_filtering_merged_fullsync_config, Config),
+    application:set_env(?OBF_CONFIG_KEY, fullsync, Config),
 
     Expected =
         lists:sort([
@@ -380,47 +388,47 @@ test_object_filter_get_fullsync_config_3() ->
 %% Enable and Disable
 %% ===================================================================
 test_object_filter_enable_both() ->
-    riak_repl2_object_filter:enable(),
+    riak_repl2_object_filter_console:enable(),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
-    riak_repl2_object_filter:disable(),
+    riak_repl2_object_filter_console:disable(),
     pass.
 
 test_object_filter_enable_realtime() ->
-    riak_repl2_object_filter:enable("realtime"),
+    riak_repl2_object_filter_console:enable("realtime"),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
-    riak_repl2_object_filter:disable("realtime"),
+    riak_repl2_object_filter_console:disable("realtime"),
     pass.
 
 test_object_filter_enable_fullsync() ->
-    riak_repl2_object_filter:enable("fullsync"),
+    riak_repl2_object_filter_console:enable("fullsync"),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
-    riak_repl2_object_filter:disable("realtime"),
+    riak_repl2_object_filter_console:disable("realtime"),
     pass.
 
 test_object_filter_disable_both() ->
-    riak_repl2_object_filter:enable(),
-    riak_repl2_object_filter:disable(),
+    riak_repl2_object_filter_console:enable(),
+    riak_repl2_object_filter_console:disable(),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
     pass.
 
 test_object_filter_disable_realtime() ->
-    riak_repl2_object_filter:enable(),
-    riak_repl2_object_filter:disable("realtime"),
+    riak_repl2_object_filter_console:enable(),
+    riak_repl2_object_filter_console:disable("realtime"),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
-    riak_repl2_object_filter:disable(),
+    riak_repl2_object_filter_console:disable(),
     pass.
 
 test_object_filter_disable_fullsync() ->
-    riak_repl2_object_filter:enable(),
-    riak_repl2_object_filter:disable("fullsync"),
+    riak_repl2_object_filter_console:enable(),
+    riak_repl2_object_filter_console:disable("fullsync"),
     ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
     ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
-    riak_repl2_object_filter:disable(),
+    riak_repl2_object_filter_console:disable(),
     pass.
 
 

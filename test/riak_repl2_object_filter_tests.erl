@@ -48,10 +48,9 @@ setup() ->
         end),
     meck:expect(riak_core_metadata, put, 3, fun(_,_,_) -> ok end),
 
-    App1 = riak_repl_test_util:start_test_ring(),
-    App2 = riak_repl_test_util:start_lager(),
-    App3 = riak_repl2_object_filter_console:start_link(),
-    [App1, App2, App3].
+    App1 = riak_repl_test_util:start_lager(),
+    App2 = riak_repl2_object_filter_console:start_link(),
+    [App1, App2].
 cleanup(StartedApps) ->
     process_flag(trap_exit, true),
     catch(meck:unload(riak_core_capability)),

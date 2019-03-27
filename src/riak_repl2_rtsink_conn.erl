@@ -517,6 +517,11 @@ setup() ->
             dict:new()
         end
     ),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, 4,
+        fun(_, _, _, _) ->
+            ok
+        end
+    ),
 
     catch(meck:unload(riak_core_cluster_mgr)),
     meck:new(riak_core_cluster_mgr, [passthrough]),
@@ -524,6 +529,28 @@ setup() ->
     meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_) -> {ok,[]} end ),
     meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, split) -> {ok, {[],[]}} end ),
     meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, _) -> {ok,[]} end ),
+
+    catch(meck:unload(riak_core_capability)),
+    meck:new(riak_core_capability, [passthrough]),
+    meck:expect(riak_core_capability, get, 2, fun(_, _) -> v1 end),
+
+    catch(meck:unload(riak_repl_util)),
+    meck:new(riak_repl_util, [passthrough]),
+    meck:expect(riak_repl_util, generate_socket_tag, fun(Prefix, _Transport, _Socket) ->
+        random:seed(now()),
+        Portnum = random:uniform(?PORT_RANGE),
+        lists:flatten(io_lib:format("~s_~p -> ~p:~p",[
+            Prefix,
+            Portnum,
+            ?LOOPBACK_TEST_PEER,
+            ?SINK_PORT]))
+                                                     end),
+
+    catch(meck:unload(riak_core_tcp_mon)),
+    meck:new(riak_core_tcp_mon, [passthrough]),
+    meck:expect(riak_core_tcp_mon, monitor, 3, fun(Socket, _Tag, Transport) ->
+        {reply, ok,  #state{transport=Transport, socket=Socket}}
+                                               end),
 
     folsom:start(),
 
@@ -577,24 +604,6 @@ cache_peername_test_case() ->
         TellMe ! {sink_started, Pid}
     end),
 
-    catch(meck:unload(riak_repl_util)),
-    meck:new(riak_repl_util, [passthrough]),
-    meck:expect(riak_repl_util, generate_socket_tag, fun(Prefix, _Transport, _Socket) ->
-         random:seed(now()),
-         Portnum = random:uniform(?PORT_RANGE),
-         lists:flatten(io_lib:format("~s_~p -> ~p:~p",[
-                Prefix,
-                Portnum,
-                ?LOOPBACK_TEST_PEER,
-                ?SINK_PORT]))
-         end),
-
-    catch(meck:unload(riak_core_tcp_mon)),
-    meck:new(riak_core_tcp_mon, [passthrough]),
-    meck:expect(riak_core_tcp_mon, monitor, fun(Socket, _Tag, Transport) ->
-                {reply, ok,  #state{transport=Transport, socket=Socket}}
-                end),
-
     {ok, _SinkPid} = start_sink(),
     {ok, {_Source, _Sink}} = start_source(?VER1).
 
@@ -643,7 +652,8 @@ start_sink() ->
 unload_mecks() ->
     riak_repl_test_util:maybe_unload_mecks([
         stateful, riak_core_ring_manager, riak_core_ring,
-        riak_repl2_rtsink_helper, gen_tcp, fake_source, riak_repl2_rtq]).
+        riak_repl2_rtsink_helper, gen_tcp, fake_source, riak_repl2_rtq,
+        riak_core_capability, riak_repl2_rtsource_conn_data_mgr]).
 
 
 -endif.

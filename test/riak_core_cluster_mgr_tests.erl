@@ -992,9 +992,6 @@ start_link_setup(ClusterAddr) ->
         [node()]
     end),
 
-    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
-    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
-
     {ok, Leader} = riak_repl2_leader:start_link(),
 
     application:start(ranch),
@@ -1035,7 +1032,7 @@ cleanup({Apps, Pids}) ->
     catch exit(riak_core_cluster_conn_sup),
     catch exit(riak_repl2_leader_gs),
     riak_core_cluster_mgr:stop(),
-    application:stop(ranch),
+    catch application:stop(ranch),
     riak_core_ring_manager:stop(),
     catch exit(riak_core_ring_events, kill),
     [catch exit(Pid, kill) || Pid <- Pids],

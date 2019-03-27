@@ -56,11 +56,7 @@
          overwrite_realtime_connection_data/2,
          get_active_nodes/0,
          overwrite_active_nodes/2,
-         overwrite_active_nodes_and_realtime_connection_data/2,
-
-         overwrite_object_filtering_status/2,
-         overwrite_object_filtering_configs/2,
-         get_object_filtering_data/0
+         overwrite_active_nodes_and_realtime_connection_data/2
          ]).
 
 -ifdef(TEST).

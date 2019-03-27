@@ -12,9 +12,7 @@
     clear_config/1,
     check_config/1,
     load_config/2,
-    update/3,
-    force_update/1,
-    force_update/0
+    update/2
 ]).
 
 %% repl_console function calls
@@ -39,39 +37,14 @@
 
 -define(SERVER, ?MODULE).
 
-
--record(active_config, {
-    loaded_repl_config = riak_repl2_object_filter:get_config(loaded_repl),
-    loaded_realtime_config = riak_repl2_object_filter:get_config(loaded_realtime),
-    loaded_fullsync_config = riak_repl2_object_filter:get_config(loaded_fullsync),
-    realtime_config = riak_repl2_object_filter:get_config(realtime),
-    fullsync_config = riak_repl2_object_filter:get_config(fullsync),
-    realtime_status = riak_repl2_object_filter:get_status(realtime),
-    fullsync_status = riak_repl2_object_filter:get_status(fullsync),
-    version = riak_repl2_object_filter:get_version()
-}).
-
--record(update_config, {
-    loaded_repl_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_repl),
-    loaded_realtime_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_realtime),
-    loaded_fullsync_config = riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_fullsync),
-    realtime_config = riak_core_metadata:get(?OBF_CONFIG_KEY, realtime),
-    fullsync_config = riak_core_metadata:get(?OBF_CONFIG_KEY, fullsync),
-    realtime_status = riak_core_metadata:get(?OBF_STATUS_KEY, realtime),
-    fullsync_status = riak_core_metadata:get(?OBF_STATUS_KEY, fullsync)
-}).
-
 -record(state, {
-    config = #active_config{},
-    config_hash = -1,
-
-    update_config = #update_config{},
-    update_hash = -1,
+    config = [],
     update_list = [],
     update_ref
 }).
 
 -define(CURRENT_VERSION, 1.0).
+-define(RETRY_UPDATE, 6).
 
 
 
@@ -107,17 +80,10 @@ safe_call(Fun) ->
 
 
 
-update(Node, OldHash, NewHash) when Node =:= node() ->
-    gen_server:cast(?SERVER, {update, OldHash, NewHash});
-update(Node, OldHash, NewHash) ->
-    gen_server:cast({?SERVER, Node}, {update, OldHash, NewHash}).
-
-force_update() ->
-    force_update(node()).
-force_update(Node) when Node =:= node() ->
-    gen_server:cast(?SERVER, force_update);
-force_update(Node) ->
-    gen_server:cast({?SERVER, Node}, force_update).
+update(Node, List) when Node =:= node() ->
+    gen_server:cast(?SERVER, {update, List});
+update(Node, List) ->
+    gen_server:cast({?SERVER, Node}, {update, List}).
 
 
 
@@ -210,21 +176,12 @@ handle_call(Request, _From, State) ->
         end,
     {reply, Response, NewState}.
 
-handle_cast(Request, State) ->
-    case Request of
-        {update, OldHash, NewHash} ->
-            Ref = erlang:send_after(0, self(), config_update),
-            case State#state.update_hash of
-                undefined ->
-                    {noreply, State#state{update_ref = Ref, update_hash = Hash}};
-                OldRef ->
-                    {noreply, State#state{update_ref = undefined, update_hash = Hash}}
-            end;
-        force_update ->
-            {noreply, State};
-        _ ->
-            {noreply, State}
-    end.
+handle_cast({update, List}, State = #state{update_ref = undefined, update_list = L}) ->
+    Ref = erlang:send_after(100, self(), update_config),
+    {noreply, State#state{update_list = L ++ List, update_ref = Ref}};
+
+handle_cast({update, List}, State = #state{update_list = U}) ->
+    {noreply, State#state{update_list = U ++ List}}.
 
 handle_info(poll_core_capability, State) ->
     Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
@@ -236,8 +193,15 @@ handle_info(poll_core_capability, State) ->
     end,
     {noreply, State};
 
-handle_info(config_update, State = #state{update_ref = undefined}) ->
-    {noreply, State};
+handle_info(update_config, State = #state{update_list = L1}) ->
+    RetryList = preform_updates(L1),
+    case RetryList of
+        [] ->
+            {noreply, State#state{config = active_config(), update_ref = undefined}};
+        L2 ->
+            Ref = erlang:send_after(500, self(), update_config),
+            {noreply, State#state{config = active_config(), update_ref = Ref, update_list = L2}}
+    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -254,30 +218,90 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Update
 %%%===================================================================
 
-update_config(OldHash, NewHash, State) ->
-    State.
+preform_updates(L) ->
+    Updated = [update_config(Update) || Update <- L],
+    lists:foldl(fun
+                    (ok, Acc) -> Acc;
+                    ({Key, 0}, Acc) -> lager:warning("failed to update key: ~p", [Key]), Acc;
+                    ({Key, Counter}, Acc) -> [{Key, Counter}] ++ Acc
+                end,
+        [], Updated).
 
-update_all_nodes(State = #state{config_hash = OldHash}) ->
-    NewHash = erlang:phash2(#active_config{}),
-    case OldHash == NewHash of
+update_config({{Key, config}, N}) ->
+    New = riak_core_metadata:get(?OBF_CONFIG_KEY, Key),
+    Old = riak_repl2_object_filter:get_config(Key),
+    case New == Old of
         true ->
-            State;
+            {{Key, config}, N-1};
         false ->
-            [?MODULE:update(Node, OldHash, NewHash) || Node <- nodes()],
-            State#state{config_hash = NewHash, update_hash = NewHash}
+            set_config(Key, New),
+            ok
+    end;
+update_config({{Key, status}, N}) ->
+    New = riak_core_metadata:get(?OBF_STATUS_KEY, Key),
+    Old = riak_repl2_object_filter:get_status(Key),
+    case New == Old of
+        true ->
+            {{Key, status}, N-1};
+        false ->
+            set_status(Key, New),
+            ok
     end.
 
 
-load_config() ->
-    Config = #update_config{},
-    set_status(realtime, Config#update_config.realtime_status),
-    set_status(fullsync, Config#update_config.fullsync_status),
-    set_config(loaded_repl, Config#update_config.loaded_repl_config),
-    set_config(loaded_realtime, Config#update_config.loaded_realtime_config),
-    set_config(loaded_fullsync, Config#update_config.loaded_fullsync_config),
-    set_config(realtime, Config#update_config.realtime_config),
-    set_config(fullsync, Config#update_config.fullsync_config).
 
+update_all_nodes(State = #state{config = Config}) ->
+    NewConfig = active_config(),
+    case orddict:fetch_keys(NewConfig -- Config) of
+        [] ->
+            State;
+        Changes ->
+            List = [{Key, ?RETRY_UPDATE} || Key <- Changes],
+            [?MODULE:update(Node, List) || Node <- nodes()],
+            State#state{config = NewConfig}
+    end.
+
+active_config() ->
+    orddict:from_list(
+        [
+            {{loaded_repl, config}, riak_repl2_object_filter:get_config(loaded_repl)},
+            {{loaded_realtime, config} ,riak_repl2_object_filter:get_config(loaded_realtime)},
+            {{loaded_fullsync, config}, riak_repl2_object_filter:get_config(loaded_fullsync)},
+            {{realtime, config}, riak_repl2_object_filter:get_config(realtime)},
+            {{fullsync, config}, riak_repl2_object_filter:get_config(fullsync)},
+            {{realtime, status}, riak_repl2_object_filter:get_status(realtime)},
+            {{fullsync, status}, riak_repl2_object_filter:get_status(fullsync)}
+    ]).
+
+saved_config() ->
+    orddict:from_list(
+        [
+            {{loaded_repl, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_repl)},
+            {{loaded_realtime, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_realtime)},
+            {{loaded_fullsync, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_fullsync)},
+            {{realtime, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, realtime)},
+            {{fullsync, config},  riak_core_metadata:get(?OBF_CONFIG_KEY, fullsync)},
+            {{realtime, status},  riak_core_metadata:get(?OBF_STATUS_KEY, realtime)},
+            {{fullsync, status}, riak_core_metadata:get(?OBF_STATUS_KEY, fullsync)}
+    ]).
+
+load_config() ->
+    Config = saved_config(),
+    set_status(realtime, safe_orddict_find({realtime, status}, Config, disabled)),
+    set_status(fullsync, safe_orddict_find({fullsync, status}, Config, disabled)),
+    set_config(loaded_repl, safe_orddict_find({loaded_repl, config}, Config, [])),
+    set_config(loaded_realtime, safe_orddict_find({loaded_realtime, config}, Config, [])),
+    set_config(loaded_fullsync, safe_orddict_find({loaded_fullsync, config}, Config, [])),
+    set_config(realtime, safe_orddict_find({realtime, config}, Config, [])),
+    set_config(fullsync, safe_orddict_find({fullsync, config}, Config, [])).
+
+safe_orddict_find(Key, Orddict, Default) ->
+    case orddict:find(Key, Orddict) of
+        {ok, V} ->
+            V;
+        error ->
+            Default
+    end.
 
 %%%===================================================================
 %%% Disable
@@ -311,7 +335,6 @@ object_filtering_enable(realtime, State) ->
     NewState = update_all_nodes(State),
     {ok, NewState};
 object_filtering_enable(fullsync, State) ->
-    riak_core_metadata:put(?OBF_STATUS_KEY, fullsync, enabled),
     save_status(fullsync, enabled),
     NewState = update_all_nodes(State),
     {ok, NewState};

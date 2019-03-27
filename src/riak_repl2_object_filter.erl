@@ -32,6 +32,8 @@ filter_object_rule_test(Rule, Object) ->
 %%% API
 %%%===================================================================
 %% returns the entire config for all clusters
+get_config(all) ->
+    app_helper:get_env(?OBF_CONFIG_KEY);
 get_config(Key) ->
     app_helper:get_env(?OBF_CONFIG_KEY, Key, []).
 

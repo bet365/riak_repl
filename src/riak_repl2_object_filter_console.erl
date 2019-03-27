@@ -90,6 +90,9 @@ update(Node, List) ->
 
 
 % returns config to repl_console or errors out
+get_config("all") ->
+    R = {all_config, riak_repl2_object_filter:get_config(all)},
+    print_response(R);
 get_config(Mode) ->
     ConvertedMode = list_to_atom(Mode),
     List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
@@ -152,7 +155,7 @@ init([]) ->
         true ->
             ok
     end,
-    {ok, #state{}}.
+    {ok, #state{config = active_config()}}.
 
 handle_call(Request, _From, State) ->
     {Response, NewState} =
@@ -276,13 +279,13 @@ active_config() ->
 saved_config() ->
     orddict:from_list(
         [
-            {{loaded_repl, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_repl)},
-            {{loaded_realtime, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_realtime)},
-            {{loaded_fullsync, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, loaded_fullsync)},
-            {{realtime, config}, riak_core_metadata:get(?OBF_CONFIG_KEY, realtime)},
-            {{fullsync, config},  riak_core_metadata:get(?OBF_CONFIG_KEY, fullsync)},
-            {{realtime, status},  riak_core_metadata:get(?OBF_STATUS_KEY, realtime)},
-            {{fullsync, status}, riak_core_metadata:get(?OBF_STATUS_KEY, fullsync)}
+            {{loaded_repl, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_repl, [])},
+            {{loaded_realtime, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_realtime, [])},
+            {{loaded_fullsync, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_fullsync, [])},
+            {{realtime, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, realtime, [])},
+            {{fullsync, config},  safe_core_metadata_get(?OBF_CONFIG_KEY, fullsync, [])},
+            {{realtime, status},  safe_core_metadata_get(?OBF_STATUS_KEY, realtime, disabled)},
+            {{fullsync, status}, safe_core_metadata_get(?OBF_STATUS_KEY, fullsync, disabled)}
     ]).
 
 load_config() ->
@@ -301,6 +304,14 @@ safe_orddict_find(Key, Orddict, Default) ->
             V;
         error ->
             Default
+    end.
+
+safe_core_metadata_get(B, K, Default) ->
+    case riak_core_metadata:get(B, K) of
+        undefined ->
+            Default;
+        Value ->
+            Value
     end.
 
 %%%===================================================================
@@ -594,13 +605,17 @@ object_filtering_clear_config_helper(all, State) ->
     save_config(loaded_fullsync, []),
     save_config(realtime, []),
     save_config(fullsync, []),
-    update_all_nodes(State);
+    NewState = update_all_nodes(State),
+    {ok, NewState};
 object_filtering_clear_config_helper(repl, State) ->
-    merge_and_load_configs(repl, [], State);
+    NewState = merge_and_load_configs(repl, [], State),
+    {ok, NewState};
 object_filtering_clear_config_helper(realtime, State) ->
-    merge_and_load_configs(realtime, [], State);
+    NewState = merge_and_load_configs(realtime, [], State),
+    {ok, NewState};
 object_filtering_clear_config_helper(fullsync, State) ->
-    merge_and_load_configs(fullsync, [], State);
+    NewState = merge_and_load_configs(fullsync, [], State),
+    {ok, NewState};
 object_filtering_clear_config_helper(Mode, State) ->
     {return_error_unknown_repl_mode(object_filtering_clear_config, Mode), State}.
 %% ====================================================================================================================
@@ -646,6 +661,14 @@ print_response({status_all_nodes, AllStatus}) ->
     lists:foreach(fun(Status) -> print_status(Status) end, AllStatus);
 print_response({config, Config}) ->
     io:format("~p ~n", [Config]);
+print_response({all_config, AllConfig}) ->
+    OD = orddict:from_list(AllConfig),
+    io:format("~n", []),
+    io:format("Realtime: ~n ~p ~n~n", [orddict:fetch(realtime, OD)]),
+    io:format("Fullsync: ~n ~p ~n~n", [orddict:fetch(fullsync, OD)]),
+    io:format("Loaded Repl: ~n ~p ~n~n", [orddict:fetch(loaded_repl, OD)]),
+    io:format("Loaded Realtime: ~n ~p ~n~n", [orddict:fetch(loaded_realtime, OD)]),
+    io:format("Loaded Fullsync: ~n ~p ~n~n", [orddict:fetch(loaded_fullsync, OD)]);
 
 
 %% Errors
@@ -679,7 +702,7 @@ print_response({error, unknown_repl_mode, RelatedFun, Mode}) ->
 print_response({error, no_request, Request}) ->
     io:format("Error: request ~p does not exist~n", [Request]);
 print_response({error, Error}) ->
-    io:format("File error: ~p ~n", [Error]).
+    io:format("Generic error: ~p ~n", [Error]).
 
 
 

@@ -20,7 +20,8 @@ object_filter_test_() ->
                         {"Test Enable Fullsync", fun test_object_filter_enable_fullsync/0},
                         {"Test Disable Both", fun test_object_filter_disable_both/0},
                         {"Test Disable Realtime", fun test_object_filter_disable_realtime/0},
-                        {"Test Disable Fullsync", fun test_object_filter_disable_fullsync/0}
+                        {"Test Disable Fullsync", fun test_object_filter_disable_fullsync/0},
+                        {"Test Set Repl Config", fun test_object_filter_set_repl_config/0}
 
                     ]
                 end
@@ -434,7 +435,35 @@ test_object_filter_disable_fullsync() ->
 %% ===================================================================
 %% Set And Get Configs
 %% ===================================================================
+test_object_filter_set_repl_config() ->
+    [test_object_filter_set_repl_config(N) || N <- lists:seq(1, 1)],
+    pass.
 
+test_object_filter_set_repl_config(1) ->
+    Config = [{"remote_name", {allow, ['*']}, {block, []}}],
+    write_terms("/tmp/repl.config", Config),
+    riak_repl2_object_filter_console:load_config("repl", "/tmp/repl.config"),
+
+    LRepl1 = sort_config(riak_repl2_object_filter:get_config(loaded_repl)),
+    LRT1 = sort_config(riak_repl2_object_filter:get_config(loaded_realtime)),
+    LFS1 = sort_config(riak_repl2_object_filter:get_config(loaded_fullsync)),
+    RT1 = sort_config(riak_repl2_object_filter:get_config(realtime)),
+    FS1 = sort_config(riak_repl2_object_filter:get_config(fullsync)),
+
+    LRepl2 = sort_config(Config),
+    LRT2 = [],
+    LFS2 = [],
+    RT2 = sort_config(Config),
+    FS2 = sort_config(Config),
+
+    ?assertEqual(LRepl1, LRepl2),
+    ?assertEqual(LRT1, LRT2),
+    ?assertEqual(LFS1, LFS2),
+    ?assertEqual(RT1, RT2),
+    ?assertEqual(FS1, FS2),
+
+    cleanup(),
+    pass.
 
 
 %% ===================================================================
@@ -442,3 +471,25 @@ test_object_filter_disable_fullsync() ->
 %% ===================================================================
 timestamp_to_secs({M, S, _}) ->
   M * 1000000 + S.
+
+write_terms(Filename, List) ->
+    Format = fun(Term) -> io_lib:format("~tp.~n", [Term]) end,
+    Text = lists:map(Format, List),
+    file:write_file(Filename, Text).
+
+cleanup() ->
+    riak_repl2_object_filter_console:clear_config("all"),
+    riak_repl2_object_filter_console:disable(),
+    delete_files().
+
+delete_files() ->
+    file:delete("/tmp/repl.config"),
+    file:delete("/tmp/rt.config"),
+    file:delete("/tmp/fs.config").
+
+sort_config(Config) ->
+    lists:foldl(
+        fun({RemoteName, {allow, L1}, {block, L2}}, Acc) ->
+            Acc ++ [{RemoteName, {allow, lists:sort(L1)}, {block, lists:sort(L2)}}]
+        end,
+        [], lists:sort(Config)).

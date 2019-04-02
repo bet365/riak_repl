@@ -21,7 +21,10 @@ object_filter_test_() ->
                         {"Test Disable Both", fun test_object_filter_disable_both/0},
                         {"Test Disable Realtime", fun test_object_filter_disable_realtime/0},
                         {"Test Disable Fullsync", fun test_object_filter_disable_fullsync/0},
-                        {"Test Set Repl Config", fun test_object_filter_set_repl_config/0}
+                        {"Test Set Repl Config", fun test_object_filter_set_repl_config/0},
+                        {"Test Set Realtime Config", fun test_object_filter_set_realtime_config/0},
+                        {"Test Set Fullsync Config", fun test_object_filter_set_fullsync_config/0},
+                        {"Test Set Realtime Fullsync Config", fun test_object_filter_set_realtime_fullsync_config/0}
 
                     ]
                 end
@@ -59,79 +62,6 @@ cleanup(StartedApps) ->
     catch(meck:unload(riak_core_metadata)),
     process_flag(trap_exit, false),
     riak_repl_test_util:stop_apps(StartedApps).
-
-get_configs(bucket) ->
-    [
-        {{bucket, <<"bucket">>}, true},
-        {{lnot, {bucket, <<"bucket">>}}, false},
-        {{lnot, {lnot, {bucket, <<"bucket">>}}}, true},
-
-        {{bucket, <<"anything">>}, false},
-        {{lnot, {bucket, <<"anything">>}}, true},
-        {{lnot, {lnot, {bucket, <<"anything">>}}}, false}
-    ];
-get_configs(metadata) ->
-    [
-        {{metadata, {filter, 1}}, true},
-        {{lnot, {metadata, {filter, 1}}}, false},
-        {{lnot, {lnot, {metadata, {filter, 1}}}}, true},
-
-        {{metadata, {filter, 2}}, false},
-        {{lnot, {metadata, {filter, 2}}}, true},
-        {{lnot, {lnot, {metadata, {filter, 2}}}}, false},
-
-        {{metadata, {filter}}, true},
-        {{lnot, {metadata, {filter}}}, false},
-        {{lnot, {lnot, {metadata, {filter}}}}, true},
-
-        {{metadata, {other, 1}}, false},
-        {{lnot, {metadata, {other, 1}}}, true},
-        {{lnot, {lnot, {metadata, {other, 1}}}}, false},
-
-        {{metadata, {other, 2}}, false},
-        {{lnot, {metadata, {other, 2}}}, true},
-        {{lnot, {lnot, {metadata, {other, 2}}}}, false},
-
-        {{metadata, {other}}, false},
-        {{lnot, {metadata, {other}}}, true},
-        {{lnot, {lnot, {metadata, {other}}}}, false}
-    ];
-get_configs(lastmod) ->
-    TS1 = timestamp_to_secs(os:timestamp()) + 1000,
-    TS2 = timestamp_to_secs(os:timestamp()) - 1000,
-    [
-        {{lastmod_age_greater_than, -1000}, true},
-        {{lnot, {lastmod_age_greater_than, -1000}}, false},
-        {{lnot, {lnot, {lastmod_age_greater_than, -1000}}}, true},
-
-        {{lastmod_age_greater_than, 1000}, false},
-        {{lnot, {lastmod_age_greater_than, 1000}}, true},
-        {{lnot, {lnot, {lastmod_age_greater_than, 1000}}}, false},
-
-        {{lastmod_age_less_than, -1000}, false},
-        {{lnot, {lastmod_age_less_than, -1000}}, true},
-        {{lnot, {lnot, {lastmod_age_less_than, -1000}}}, false},
-
-        {{lastmod_age_less_than, 1000}, true},
-        {{lnot, {lastmod_age_less_than, 1000}}, false},
-        {{lnot, {lnot, {lastmod_age_less_than, 1000}}}, true},
-
-        {{lastmod_greater_than, TS1}, false},
-        {{lnot, {lastmod_greater_than, TS1}}, true},
-        {{lnot, {lnot, {lastmod_greater_than, TS1}}}, false},
-
-        {{lastmod_greater_than, TS2}, true},
-        {{lnot, {lastmod_greater_than, TS2}}, false},
-        {{lnot, {lnot, {lastmod_greater_than, TS2}}}, true},
-
-        {{lastmod_less_than, TS1}, true},
-        {{lnot, {lastmod_less_than, TS1}}, false},
-        {{lnot, {lnot, {lastmod_less_than, TS1}}}, true},
-
-        {{lastmod_less_than, TS2}, false},
-        {{lnot, {lastmod_less_than, TS2}}, true},
-        {{lnot, {lnot, {lastmod_less_than, TS2}}}, false}
-    ].
 
 %% ===================================================================
 %% Sing Rules
@@ -436,34 +366,44 @@ test_object_filter_disable_fullsync() ->
 %% Set And Get Configs
 %% ===================================================================
 test_object_filter_set_repl_config() ->
-    [test_object_filter_set_repl_config(N) || N <- lists:seq(1, 1)],
+    [test_object_filter_load_config(X, repl) || X <- get_loading_configs(repl)],
     pass.
 
-test_object_filter_set_repl_config(1) ->
-    Config = [{"remote_name", {allow, ['*']}, {block, []}}],
+test_object_filter_set_realtime_config() ->
+    [test_object_filter_load_config(X, realtime) || X <- get_loading_configs(realtime)],
+    pass.
+
+test_object_filter_set_fullsync_config() ->
+    [test_object_filter_load_config(X, fullsync) || X <- get_loading_configs(fullsync)],
+    pass.
+
+test_object_filter_set_realtime_fullsync_config() ->
+    [test_object_filter_load_config(X, {realtime, fullsync}) || X <- get_loading_configs({realtime, fullsync})],
+    pass.
+
+test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, repl) ->
     write_terms("/tmp/repl.config", Config),
     riak_repl2_object_filter_console:load_config("repl", "/tmp/repl.config"),
+    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup();
+test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, realtime) ->
+    write_terms("/tmp/realtime.config", Config),
+    riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
+    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup();
+test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, fullsync) ->
+    write_terms("/tmp/fullsync.config", Config),
+    riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
+    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup();
+test_object_filter_load_config({RTConfig, FSConfig, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, {realtime, fullsync}) ->
+    write_terms("/tmp/realtime.config", RTConfig),
+    write_terms("/tmp/fullsync.config", FSConfig),
+    riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
+    riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
+    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup().
 
-    LRepl1 = sort_config(riak_repl2_object_filter:get_config(loaded_repl)),
-    LRT1 = sort_config(riak_repl2_object_filter:get_config(loaded_realtime)),
-    LFS1 = sort_config(riak_repl2_object_filter:get_config(loaded_fullsync)),
-    RT1 = sort_config(riak_repl2_object_filter:get_config(realtime)),
-    FS1 = sort_config(riak_repl2_object_filter:get_config(fullsync)),
-
-    LRepl2 = sort_config(Config),
-    LRT2 = [],
-    LFS2 = [],
-    RT2 = sort_config(Config),
-    FS2 = sort_config(Config),
-
-    ?assertEqual(LRepl1, LRepl2),
-    ?assertEqual(LRT1, LRT2),
-    ?assertEqual(LFS1, LFS2),
-    ?assertEqual(RT1, RT2),
-    ?assertEqual(FS1, FS2),
-
-    cleanup(),
-    pass.
 
 
 %% ===================================================================
@@ -484,8 +424,8 @@ cleanup() ->
 
 delete_files() ->
     file:delete("/tmp/repl.config"),
-    file:delete("/tmp/rt.config"),
-    file:delete("/tmp/fs.config").
+    file:delete("/tmp/realtime.config"),
+    file:delete("/tmp/fullsync.config").
 
 sort_config(Config) ->
     lists:foldl(
@@ -493,3 +433,201 @@ sort_config(Config) ->
             Acc ++ [{RemoteName, {allow, lists:sort(L1)}, {block, lists:sort(L2)}}]
         end,
         [], lists:sort(Config)).
+
+
+check_configs(LRepl2, LRT2, LFS2, RT2, FS2) ->
+    LRepl1 = sort_config(riak_repl2_object_filter:get_config(loaded_repl)),
+    LRT1 = sort_config(riak_repl2_object_filter:get_config(loaded_realtime)),
+    LFS1 = sort_config(riak_repl2_object_filter:get_config(loaded_fullsync)),
+    RT1 = sort_config(riak_repl2_object_filter:get_config(realtime)),
+    FS1 = sort_config(riak_repl2_object_filter:get_config(fullsync)),
+    ?assertEqual(LRepl1, sort_config(LRepl2)),
+    ?assertEqual(LRT1, sort_config(LRT2)),
+    ?assertEqual(LFS1, sort_config(LFS2)),
+    ?assertEqual(RT1, sort_config(RT2)),
+    ?assertEqual(FS1, sort_config(FS2)).
+
+get_configs(bucket) ->
+    [
+        {{bucket, <<"bucket">>}, true},
+        {{lnot, {bucket, <<"bucket">>}}, false},
+        {{lnot, {lnot, {bucket, <<"bucket">>}}}, true},
+
+        {{bucket, <<"anything">>}, false},
+        {{lnot, {bucket, <<"anything">>}}, true},
+        {{lnot, {lnot, {bucket, <<"anything">>}}}, false}
+    ];
+get_configs(metadata) ->
+    [
+        {{metadata, {filter, 1}}, true},
+        {{lnot, {metadata, {filter, 1}}}, false},
+        {{lnot, {lnot, {metadata, {filter, 1}}}}, true},
+
+        {{metadata, {filter, 2}}, false},
+        {{lnot, {metadata, {filter, 2}}}, true},
+        {{lnot, {lnot, {metadata, {filter, 2}}}}, false},
+
+        {{metadata, {filter}}, true},
+        {{lnot, {metadata, {filter}}}, false},
+        {{lnot, {lnot, {metadata, {filter}}}}, true},
+
+        {{metadata, {other, 1}}, false},
+        {{lnot, {metadata, {other, 1}}}, true},
+        {{lnot, {lnot, {metadata, {other, 1}}}}, false},
+
+        {{metadata, {other, 2}}, false},
+        {{lnot, {metadata, {other, 2}}}, true},
+        {{lnot, {lnot, {metadata, {other, 2}}}}, false},
+
+        {{metadata, {other}}, false},
+        {{lnot, {metadata, {other}}}, true},
+        {{lnot, {lnot, {metadata, {other}}}}, false}
+    ];
+get_configs(lastmod) ->
+    TS1 = timestamp_to_secs(os:timestamp()) + 1000,
+    TS2 = timestamp_to_secs(os:timestamp()) - 1000,
+    [
+        {{lastmod_age_greater_than, -1000}, true},
+        {{lnot, {lastmod_age_greater_than, -1000}}, false},
+        {{lnot, {lnot, {lastmod_age_greater_than, -1000}}}, true},
+
+        {{lastmod_age_greater_than, 1000}, false},
+        {{lnot, {lastmod_age_greater_than, 1000}}, true},
+        {{lnot, {lnot, {lastmod_age_greater_than, 1000}}}, false},
+
+        {{lastmod_age_less_than, -1000}, false},
+        {{lnot, {lastmod_age_less_than, -1000}}, true},
+        {{lnot, {lnot, {lastmod_age_less_than, -1000}}}, false},
+
+        {{lastmod_age_less_than, 1000}, true},
+        {{lnot, {lastmod_age_less_than, 1000}}, false},
+        {{lnot, {lnot, {lastmod_age_less_than, 1000}}}, true},
+
+        {{lastmod_greater_than, TS1}, false},
+        {{lnot, {lastmod_greater_than, TS1}}, true},
+        {{lnot, {lnot, {lastmod_greater_than, TS1}}}, false},
+
+        {{lastmod_greater_than, TS2}, true},
+        {{lnot, {lastmod_greater_than, TS2}}, false},
+        {{lnot, {lnot, {lastmod_greater_than, TS2}}}, true},
+
+        {{lastmod_less_than, TS1}, true},
+        {{lnot, {lastmod_less_than, TS1}}, false},
+        {{lnot, {lnot, {lastmod_less_than, TS1}}}, true},
+
+        {{lastmod_less_than, TS2}, false},
+        {{lnot, {lastmod_less_than, TS2}}, true},
+        {{lnot, {lnot, {lastmod_less_than, TS2}}}, false}
+    ].
+
+
+get_loading_rules(true) ->
+    A =
+        [
+            [{bucket, <<"bucket-1">>}],
+            [{bucket, {<<"type-1">>, <<"bucket-1">>}}],
+            [{metadata, {key, "value"}}],
+            [{metadata, {key}}],
+            [{lastmod_age_greater_than, 1000}],
+            [{lastmod_age_greater_than, -1000}],
+            [{lastmod_age_less_than, 1000}],
+            [{lastmod_age_less_than, -1000}],
+            [{lastmod_greater_than, 10}],
+            [{lastmod_greater_than, -10}],
+            [{lastmod_less_than, 10}],
+            [{lastmod_less_than, -10}]
+        ],
+    B = [ [{lnot, X}]  || [X] <- A],
+
+    A ++ B ++ [['*']];
+get_loading_rules(false) ->
+    [
+        ['*', {bucket, <<"bucket-1">>}],
+        [{bucket, <<"bucket-1">>, '*'}],
+        [{lnot, '*'}],
+        [{lnot, ['*']}],
+
+
+        [{bucke, <<"bucket-1">>}],
+        [{bucke, {<<"type-1">>, <<"bucket-1">>}}],
+        [{metadat, {key, "value"}}],
+        [{metadat, {key}}],
+        [{lastmod_age_greater_tha, 1000}],
+        [{lastmod_age_greater_tha, -1000}],
+        [{lastmod_age_less_tha, 1000}],
+        [{lastmod_age_less_tha, -1000}],
+        [{lastmod_greater_tha, 10}],
+        [{lastmod_greater_tha, -10}],
+        [{lastmod_less_tha, 10}],
+        [{lastmod_less_tha, -10}]
+    ].
+
+get_loading_configs(repl) ->
+    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
+    [build_loading_configs_response_1(repl, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
+get_loading_configs(realtime) ->
+    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
+    [build_loading_configs_response_1(realtime, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
+get_loading_configs(fullsync) ->
+    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
+    [build_loading_configs_response_1(fullsync, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
+
+get_loading_configs({realtime, fullsync}) ->
+    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
+    [build_loading_configs_response_2({realtime, fullsync}, AllowBlocked, Rules1, Loaded1, Rules2, Loaded2) || AllowBlocked <- [allow, block], {Rules1, Loaded1} <- R, {Rules2, Loaded2} <- R].
+
+
+build_loading_configs_response_1(_, AllowBlocked, Rules, false) ->
+    Config = build_config(AllowBlocked, Rules),
+    {Config, [],[],[],[],[]};
+build_loading_configs_response_1(repl, AllowBlocked, Rules, true) ->
+    Config = build_config(AllowBlocked, Rules),
+    LoadedRepl = Config,
+    LoadedRT = [],
+    LoadedFS = [],
+    RT = Config,
+    FS = Config,
+    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS};
+build_loading_configs_response_1(realtime, AllowBlocked, Rules, true) ->
+    Config = build_config(AllowBlocked, Rules),
+    LoadedRepl = [],
+    LoadedRT = Config,
+    LoadedFS = [],
+    RT = Config,
+    FS = [],
+    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS};
+build_loading_configs_response_1(fullsync, AllowBlocked, Rules, true) ->
+    Config = build_config(AllowBlocked, Rules),
+    LoadedRepl = [],
+    LoadedRT = [],
+    LoadedFS = Config,
+    RT = [],
+    FS = Config,
+    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS}.
+
+build_loading_configs_response_2({realtime, fullsync}, AllowBlocked, Rules1, Loaded1, Rules2, Loaded2) ->
+    RTConfig = build_config(AllowBlocked, Rules1),
+    FSConfig = build_config(AllowBlocked, Rules2),
+    LoadedRepl = [],
+    LoadedRT = case Loaded1 of
+                   true ->
+                       RTConfig;
+                   false ->
+                       []
+               end,
+    LoadedFS = case Loaded2 of
+                   true ->
+                       FSConfig;
+                   false ->
+                       []
+               end,
+    RT = LoadedRT,
+    FS = LoadedFS,
+    {RTConfig, FSConfig, LoadedRepl, LoadedRT, LoadedFS, RT, FS}.
+
+
+
+build_config(allow, Rules) ->
+    [{"test-cluster", {allow, Rules}, {block, []}}];
+build_config(block, Rules) ->
+    [{"test-cluster", {allow, []}, {block, Rules}}].

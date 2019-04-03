@@ -69,21 +69,20 @@ cleanup(StartedApps) ->
 test_object_filter_single_rules() ->
     B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
     O = riak_object:new(B,K,V,M),
-    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,3)],
-    pass.
+    [test_object_filter_single_rules(N, O) || N <- lists:seq(1,3)].
 
 test_object_filter_single_rules(1, Obj)->
     Actual = filter_object_rule_test([], Obj),
-    ?assertEqual(false, Actual);
+    {timeout, 15, ?_assertEqual(false, Actual)};
 test_object_filter_single_rules(2, Obj)->
     Actual = filter_object_rule_test(['*'], Obj),
-    ?assertEqual(true, Actual);
+    {timeout, 15, ?_assertEqual(true, Actual)};
 test_object_filter_single_rules(3, Obj) ->
     Config = get_configs(bucket) ++ get_configs(metadata) ++ get_configs(lastmod),
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            ?assertEqual(Outcome, Actual)
+            {timeout, 15, ?_assertEqual(Outcome, Actual)}
         end,
     [TestFun(A) || A <- Config].
 
@@ -115,7 +114,7 @@ test_object_filter_multi_rules_pairwise() ->
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            ?assertEqual(Outcome, Actual)
+            {timeout, 15, ?_assertEqual(Outcome, Actual)}
         end,
     [TestFun(A) || A <- Config].
 
@@ -141,7 +140,7 @@ test_object_filter_multi_rules_triplets() ->
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            ?assertEqual(Outcome, Actual)
+            {timeout, 15, ?_assertEqual(Outcome, Actual)}
         end,
     [TestFun(A) || A <- Config].
 
@@ -310,8 +309,9 @@ test_object_filter_get_fullsync_config_3() ->
     {_, {allow, Allowed2}, {block, Blocked2}} = riak_repl2_object_filter:get_config(fullsync, "test_cluster", TimeStamp),
     Actual1 = lists:sort(Allowed2),
     Actual2 = lists:sort(Blocked2),
-    ?assertEqual(Actual1, Expected),
-    ?assertEqual(Actual2, Expected).
+    A = Actual1 == Expected,
+    B = Actual2 == Expected,
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 
 %% ===================================================================
@@ -319,90 +319,90 @@ test_object_filter_get_fullsync_config_3() ->
 %% ===================================================================
 test_object_filter_enable_both() ->
     riak_repl2_object_filter_console:enable(),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    A = enabled == riak_repl2_object_filter:get_status(realtime),
+    B = enabled == riak_repl2_object_filter:get_status(fullsync),
     riak_repl2_object_filter_console:disable(),
-    pass.
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 test_object_filter_enable_realtime() ->
     riak_repl2_object_filter_console:enable("realtime"),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
+    A = enabled == riak_repl2_object_filter:get_status(realtime),
+    B = disabled == riak_repl2_object_filter:get_status(fullsync),
     riak_repl2_object_filter_console:disable("realtime"),
-    pass.
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 test_object_filter_enable_fullsync() ->
     riak_repl2_object_filter_console:enable("fullsync"),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    A = disabled == riak_repl2_object_filter:get_status(realtime),
+    B = enabled == riak_repl2_object_filter:get_status(fullsync),
     riak_repl2_object_filter_console:disable("realtime"),
-    pass.
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 test_object_filter_disable_both() ->
     riak_repl2_object_filter_console:enable(),
     riak_repl2_object_filter_console:disable(),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
-    pass.
+    A = disabled == riak_repl2_object_filter:get_status(realtime),
+    B = disabled == riak_repl2_object_filter:get_status(fullsync),
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 test_object_filter_disable_realtime() ->
     riak_repl2_object_filter_console:enable(),
     riak_repl2_object_filter_console:disable("realtime"),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(fullsync)),
+    A = disabled == riak_repl2_object_filter:get_status(realtime),
+    B = enabled == riak_repl2_object_filter:get_status(fullsync),
     riak_repl2_object_filter_console:disable(),
-    pass.
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 test_object_filter_disable_fullsync() ->
     riak_repl2_object_filter_console:enable(),
     riak_repl2_object_filter_console:disable("fullsync"),
-    ?assertEqual(enabled, riak_repl2_object_filter:get_status(realtime)),
-    ?assertEqual(disabled, riak_repl2_object_filter:get_status(fullsync)),
+    A = enabled == riak_repl2_object_filter:get_status(realtime),
+    B = disabled == riak_repl2_object_filter:get_status(fullsync),
     riak_repl2_object_filter_console:disable(),
-    pass.
+    {timeout, 15, ?_assertEqual(true, A and B)}.
 
 
 %% ===================================================================
 %% Set And Get Configs
 %% ===================================================================
 test_object_filter_set_repl_config() ->
-    [test_object_filter_load_config(X, repl) || X <- get_loading_configs(repl)],
-    pass.
+    [{timeout, 15, ?_assertEqual(true, test_object_filter_load_config(X, repl))} || X <- get_loading_configs(repl)].
 
 test_object_filter_set_realtime_config() ->
-    [test_object_filter_load_config(X, realtime) || X <- get_loading_configs(realtime)],
-    pass.
+    [{timeout, 15, ?_assertEqual(true, test_object_filter_load_config(X, realtime))} || X <- get_loading_configs(realtime)].
 
 test_object_filter_set_fullsync_config() ->
-    [test_object_filter_load_config(X, fullsync) || X <- get_loading_configs(fullsync)],
-    pass.
+    [{timeout, 15, ?_assertEqual(true, test_object_filter_load_config(X, fullsync))} || X <- get_loading_configs(fullsync)].
 
 test_object_filter_set_realtime_fullsync_config() ->
-    [test_object_filter_load_config(X, {realtime, fullsync}) || X <- get_loading_configs({realtime, fullsync})],
-    pass.
+    [{timeout, 15, ?_assertEqual(true, test_object_filter_load_config(X, {realtime, fullsync}))} || X <- get_loading_configs({realtime, fullsync})].
 
 test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, repl) ->
     write_terms("/tmp/repl.config", Config),
     riak_repl2_object_filter_console:load_config("repl", "/tmp/repl.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
-    cleanup();
+    Res = check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup(),
+    Res;
 test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, realtime) ->
     write_terms("/tmp/realtime.config", Config),
     riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
-    cleanup();
+    Res = check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup(),
+    Res;
 test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, fullsync) ->
     write_terms("/tmp/fullsync.config", Config),
     riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
-    cleanup();
+    Res = check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup(),
+    Res;
 test_object_filter_load_config({RTConfig, FSConfig, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, {realtime, fullsync}) ->
     write_terms("/tmp/realtime.config", RTConfig),
     write_terms("/tmp/fullsync.config", FSConfig),
     riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
     riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
-    cleanup().
+    Res = check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync),
+    cleanup(),
+    Res.
 
 
 
@@ -441,11 +441,14 @@ check_configs(LRepl2, LRT2, LFS2, RT2, FS2) ->
     LFS1 = sort_config(riak_repl2_object_filter:get_config(loaded_fullsync)),
     RT1 = sort_config(riak_repl2_object_filter:get_config(realtime)),
     FS1 = sort_config(riak_repl2_object_filter:get_config(fullsync)),
-    ?assertEqual(LRepl1, sort_config(LRepl2)),
-    ?assertEqual(LRT1, sort_config(LRT2)),
-    ?assertEqual(LFS1, sort_config(LFS2)),
-    ?assertEqual(RT1, sort_config(RT2)),
-    ?assertEqual(FS1, sort_config(FS2)).
+
+    A = LRepl1 == sort_config(LRepl2),
+    B = LRT1 == sort_config(LRT2),
+    C = LFS1 == sort_config(LFS2),
+    D = RT1 == sort_config(RT2),
+    E = FS1 == sort_config(FS2),
+
+    A and B and C and D and E.
 
 get_configs(bucket) ->
     [

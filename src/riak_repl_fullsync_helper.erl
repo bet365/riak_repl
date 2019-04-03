@@ -406,7 +406,7 @@ keylist_fold({B,Key}=K, V, {MPid, Count, Total, FilterEnabled, FilteredBucketsLi
                     true;
                 false ->
                     RObj = riak_object:from_binary(B,Key,V),
-                    case riak_repl2_object_filter:fs_filter(FullsyncObjectFilter, RObj) of
+                    case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
                         true ->
                             true;
                         false ->

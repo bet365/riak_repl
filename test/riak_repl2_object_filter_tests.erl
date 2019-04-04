@@ -63,16 +63,16 @@ test_object_filter_single_rules() ->
 
 test_object_filter_single_rules(1, Obj)->
     Actual = filter_object_rule_test([], Obj),
-    {timeout, 15, ?_assertEqual(false, Actual)};
+    ?assertEqual(false, Actual);
 test_object_filter_single_rules(2, Obj)->
     Actual = filter_object_rule_test(['*'], Obj),
-    {timeout, 15, ?_assertEqual(true, Actual)};
+    ?assertEqual(true, Actual);
 test_object_filter_single_rules(3, Obj) ->
     Config = get_configs(bucket) ++ get_configs(metadata) ++ get_configs(lastmod),
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            {timeout, 15, ?_assertEqual(Outcome, Actual)}
+            ?assertEqual(Outcome, Actual)
         end,
     [TestFun(A) || A <- Config].
 
@@ -104,7 +104,7 @@ test_object_filter_multi_rules_pairwise() ->
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            {timeout, 15, ?_assertEqual(Outcome, Actual)}
+            ?assertEqual(Outcome, Actual)
         end,
     [TestFun(A) || A <- Config].
 
@@ -130,7 +130,7 @@ test_object_filter_multi_rules_triplets() ->
     TestFun =
         fun({Rule, Outcome}) ->
             Actual = filter_object_rule_test([Rule], Obj),
-            {timeout, 15, ?_assertEqual(Outcome, Actual)}
+            ?assertEqual(Outcome, Actual)
         end,
     [TestFun(A) || A <- Config].
 
@@ -301,7 +301,7 @@ test_object_filter_get_fullsync_config_3() ->
     Actual2 = lists:sort(Blocked2),
     A = Actual1 == Expected,
     B = Actual2 == Expected,
-    {timeout, 15, ?_assertEqual(true, A and B)}.
+    ?assertEqual(true, A and B).
 
 
 

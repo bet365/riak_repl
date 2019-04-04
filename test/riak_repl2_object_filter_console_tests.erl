@@ -12,10 +12,14 @@ object_filter_console_test_() ->
         {"Test Disable Both", ?setup(fun test_object_filter_disable_both/0)},
         {"Test Disable Realtime", ?setup(fun test_object_filter_disable_realtime/0)},
         {"Test Disable Fullsync", ?setup(fun test_object_filter_disable_fullsync/0)},
+
         {"Test Set Repl Config", ?setup(fun test_object_filter_set_repl_config/0)},
         {"Test Set Realtime Config", ?setup(fun test_object_filter_set_realtime_config/0)},
         {"Test Set Fullsync Config", ?setup(fun test_object_filter_set_fullsync_config/0)},
-        {"Test Set Realtime Fullsync Config", ?setup(fun test_object_filter_set_realtime_fullsync_config/0)}
+        {"Test Set Realtime Fullsync Config", ?setup(fun test_object_filter_set_realtime_fullsync_config/0)},
+        {"Test Set Repl Realtime Config", ?setup(fun test_object_filter_set_repl_realtime_config/0)},
+        {"Test Set Repl Fullsync Config", ?setup(fun test_object_filter_set_repl_fullsync_config/0)}
+%%        {"Test Set Repl Realtime Fullsync Config", ?setup(fun test_object_filter_set_repl_realtime_fullsync_config/0)}
     ].
 
 start() ->
@@ -109,53 +113,50 @@ test_object_filter_disable_fullsync() ->
 
 %% ===================================================================
 %% Set And Get Configs
-%% ===================================================================
+%%%% ===================================================================
 test_object_filter_set_repl_config() ->
-    Fun = fun(X, Type) -> ?assertEqual(true, test_object_filter_load_config(X, Type)), cleanup() end,
-    [Fun(X, repl) || X <- get_loading_configs(repl)].
+    [run_test(X) || X <- get_loading_configs([repl])].
 
 test_object_filter_set_realtime_config() ->
-    Fun = fun(X, Type) -> ?assertEqual(true, test_object_filter_load_config(X, Type)), cleanup() end,
-    [Fun(X, realtime) || X <- get_loading_configs(realtime)].
+    [run_test(X) || X <- get_loading_configs([realtime])].
 
 test_object_filter_set_fullsync_config() ->
-    Fun = fun(X, Type) -> ?assertEqual(true, test_object_filter_load_config(X, Type)), cleanup() end,
-    [Fun(X, fullsync) || X <- get_loading_configs(fullsync)].
+    [run_test(X) || X <- get_loading_configs([fullsync])].
 
 test_object_filter_set_realtime_fullsync_config() ->
-    Fun = fun(X, Type) -> ?assertEqual(true, test_object_filter_load_config(X, Type)), cleanup() end,
-    [Fun(X, {realtime, fullsync}) || X <- get_loading_configs({realtime, fullsync})].
+    [run_test(X) || X <- get_loading_configs([realtime, fullsync])].
 
-%%test_object_filter_set_repl_realtime_config() ->
-%%    [{timeout, 15, ?_assertEqual(true, test_object_filter_load_config(X, {repl, realtime}))} || X <- get_loading_configs({repl, realtime})].
+test_object_filter_set_repl_realtime_config() ->
+    [run_test(X) || X <- get_loading_configs([repl, realtime])].
+
+test_object_filter_set_repl_fullsync_config() ->
+    [run_test(X) || X <- get_loading_configs([repl, fullsync])].
+
+%%test_object_filter_set_repl_realtime_fullsync_config() ->
+%%    [run_test(X) || X <- get_loading_configs([repl, realtime, fullsync])].
+
+run_test(X) ->
+    ?assertEqual(true, test_object_filter_load_config(X)),
+    cleanup().
+
 
 %% =====================================================================================================================
-
-test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, repl) ->
-    write_terms("/tmp/repl.config", Config),
+test_object_filter_load_config(OD) ->
+    SetReplConfig = orddict:fetch(set_repl_config, OD),
+    SetRealtimeConfig = orddict:fetch(set_realtime_config, OD),
+    SetFullsyncConfig = orddict:fetch(set_fullsync_config, OD),
+    LoadedRepl = orddict:fetch(loaded_repl, OD),
+    LoadedRT = orddict:fetch(loaded_realtime, OD),
+    LoadedFS = orddict:fetch(loaded_fullsync, OD),
+    RT = orddict:fetch(realtime, OD),
+    FS = orddict:fetch(fullsync, OD),
+    write_terms("/tmp/repl.config", SetReplConfig),
+    write_terms("/tmp/realtime.config", SetRealtimeConfig),
+    write_terms("/tmp/fullsync.config", SetFullsyncConfig),
     riak_repl2_object_filter_console:load_config("repl", "/tmp/repl.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync);
-test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, realtime) ->
-    write_terms("/tmp/realtime.config", Config),
-    riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync);
-test_object_filter_load_config({Config, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, fullsync) ->
-    write_terms("/tmp/fullsync.config", Config),
-    riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
-     check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync);
-test_object_filter_load_config({RTConfig, FSConfig, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, {realtime, fullsync}) ->
-    write_terms("/tmp/realtime.config", RTConfig),
-    write_terms("/tmp/fullsync.config", FSConfig),
     riak_repl2_object_filter_console:load_config("realtime", "/tmp/realtime.config"),
     riak_repl2_object_filter_console:load_config("fullsync", "/tmp/fullsync.config"),
-    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync).
-
-%%test_object_filter_load_config({RTConfig, FSConfig, LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync}, {realtime, fullsync}) ->
-%%    write_terms("/tmp/repl.config", RTConfig),
-%%    write_terms("/tmp/realtime.config", FSConfig),
-%%    riak_repl2_object_filter_console:load_config("realtime", "/tmp/repl.config"),
-%%    riak_repl2_object_filter_console:load_config("fullsync", "/tmp/realtime.config"),
-%%    check_configs(LoadedRepl, LoadedRealtime, LoadedFullsync, Realtime, Fullsync).
+    check_configs(LoadedRepl, LoadedRT, LoadedFS, RT, FS).
 
 
 %% ===================================================================
@@ -187,104 +188,88 @@ check_configs(LRepl2, LRT2, LFS2, RT2, FS2) ->
     D = RT1 == sort_config(RT2),
     E = FS1 == sort_config(FS2),
 
+%%    ct:pal(
+%%        "loaded repl actual: ~p~n" ++
+%%        "loaded repl expected: ~p~n~n" ++
+%%        "loaded realtime actual: ~p~n" ++
+%%        "loaded realtime expected: ~p~n~n" ++
+%%        "loaded fullsync actual: ~p~n" ++
+%%        "loaded fullsync expected: ~p~n~n" ++
+%%        "realtime actual: ~p~n" ++
+%%        "realtime expected: ~p~n~n" ++
+%%        "fullsync actual: ~p~n" ++
+%%        "fullsync expected: ~p~n~n",
+%%    [LRepl1, LRepl2, LRT1, LRT2, LFS1, LFS2, RT1, RT2, FS1, FS2]),
+
     A and B and C and D and E.
 
 
 
 
-get_loading_configs(repl) ->
-    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
-    [build_loading_configs_response_1(repl, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
-get_loading_configs(realtime) ->
-    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
-    [build_loading_configs_response_1(realtime, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
-get_loading_configs(fullsync) ->
-    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
-    [build_loading_configs_response_1(fullsync, AllowBlocked, Rules, Loaded) || AllowBlocked <- [allow, block], {Rules, Loaded} <- R];
-
-get_loading_configs({realtime, fullsync}) ->
-    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
-    [build_loading_configs_response_2({realtime, fullsync}, AllowBlocked, Rules1, Loaded1, Rules2, Loaded2) || AllowBlocked <- [allow, block], {Rules1, Loaded1} <- R, {Rules2, Loaded2} <- R].
-
-%%get_loading_configs({repl, realtime}) ->
-%%    R = [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)],
-%%    [build_loading_configs_response_2({repl, realtime}, AllowBlocked, Rules1, Loaded1, Rules2, Loaded2) || AllowBlocked <- [allow, block], {Rules1, Loaded1} <- R, {Rules2, Loaded2} <- R].
+get_loading_configs(List) ->
+    ReplG = make_generator(repl, List),
+    RTG = make_generator(realtime, List),
+    FSG = make_generator(fullsync, List),
+    [build_loading_configs_response(Repl, RT, FS, AllowBlocked) ||
+        AllowBlocked <- [allow, block], Repl <- ReplG, RT <- RTG, FS <- FSG].
 
 
-build_loading_configs_response_1(_, AllowBlocked, Rules, false) ->
-    Config = build_config(AllowBlocked, Rules),
-    {Config, [],[],[],[],[]};
-build_loading_configs_response_1(repl, AllowBlocked, Rules, true) ->
-    Config = build_config(AllowBlocked, Rules),
-    LoadedRepl = Config,
-    LoadedRT = [],
-    LoadedFS = [],
-    RT = Config,
-    FS = Config,
-    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS};
-build_loading_configs_response_1(realtime, AllowBlocked, Rules, true) ->
-    Config = build_config(AllowBlocked, Rules),
-    LoadedRepl = [],
-    LoadedRT = Config,
-    LoadedFS = [],
-    RT = Config,
-    FS = [],
-    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS};
-build_loading_configs_response_1(fullsync, AllowBlocked, Rules, true) ->
-    Config = build_config(AllowBlocked, Rules),
-    LoadedRepl = [],
-    LoadedRT = [],
-    LoadedFS = Config,
-    RT = [],
-    FS = Config,
-    {Config, LoadedRepl, LoadedRT, LoadedFS, RT, FS}.
+make_generator(Mode, List)->
+    case lists:member(Mode, List) of
+        true -> [{Rules, true} || Rules <- get_loading_rules(true)] ++ [{Rules, false} || Rules <- get_loading_rules(false)];
+        _ -> [{[], true}]
+    end.
 
-build_loading_configs_response_2({realtime, fullsync}, AllowBlocked, Rules1, Loaded1, Rules2, Loaded2) ->
-    RTConfig = build_config(AllowBlocked, Rules1),
-    FSConfig = build_config(AllowBlocked, Rules2),
-    LoadedRepl = [],
-    LoadedRT = case Loaded1 of
-                   true ->
-                       RTConfig;
-                   false ->
-                       []
-               end,
-    LoadedFS = case Loaded2 of
-                   true ->
-                       FSConfig;
-                   false ->
-                       []
-               end,
-    RT = LoadedRT,
-    FS = LoadedFS,
-    {RTConfig, FSConfig, LoadedRepl, LoadedRT, LoadedFS, RT, FS}.
+build_loading_configs_response(
+    {ReplRules, _} = Repl,
+    {RTRules, _} = RT,
+    {FSRules, _} = FS,
+    AllowBlocked) ->
 
-%%build_loading_configs_response_2({repl, realtime}, AllowBlocked, Rules, Loaded1, Rules, Loaded2) ->
-%%    RTConfig = build_config(AllowBlocked, Rules1),
-%%    FSConfig = build_config(AllowBlocked, Rules2),
-%%    LoadedRepl = [],
-%%    LoadedRT = case Loaded1 of
-%%                   true ->
-%%                       RTConfig;
-%%                   false ->
-%%                       []
-%%               end,
-%%    LoadedFS = case Loaded2 of
-%%                   true ->
-%%                       FSConfig;
-%%                   false ->
-%%                       []
-%%               end,
-%%    RT = LoadedRT,
-%%    FS = LoadedFS,
-%%    {RTConfig, FSConfig, LoadedRepl, LoadedRT, LoadedFS, RT, FS}.
+    SetLoadedConfig = fun
+                          (AB, {Config, true}) -> build_config(AB, Config);
+                          (_, {_, false}) -> []
+                      end,
+
+    SetConfig = fun
+                    (AB, {R1, true}, {R2, true}) -> build_merged_config(AB, R1, R2);
+                    (AB, {R1, true}, {_, false}) -> build_config(AB, R1);
+                    (AB, {_, false}, {R2, true}) -> build_config(AB, R2);
+                    (_, {_, false}, {_, false}) -> []
+                end,
+
+    LoadedReplConfig = SetLoadedConfig(AllowBlocked, Repl),
+    LoadedRTConfig = SetLoadedConfig(AllowBlocked, RT),
+    LoadedFSConfig = SetLoadedConfig(AllowBlocked, FS),
+    RTConfig = SetConfig(AllowBlocked, Repl, RT),
+    FSConfig = SetConfig(AllowBlocked, Repl, FS),
+
+    orddict:from_list([
+        {set_repl_config, build_config(AllowBlocked, ReplRules)},
+        {set_realtime_config, build_config(AllowBlocked, RTRules)},
+        {set_fullsync_config, build_config(AllowBlocked, FSRules)},
+        {loaded_repl, LoadedReplConfig},
+        {loaded_realtime, LoadedRTConfig},
+        {loaded_fullsync, LoadedFSConfig},
+        {realtime, RTConfig},
+        {fullsync, FSConfig}
+    ]).
 
 
+
+build_merged_config(AllowBlocked, ['*'], _) ->
+    build_config(AllowBlocked, ['*']);
+build_merged_config(AllowBlocked, _, ['*']) ->
+    build_config(AllowBlocked, ['*']);
+build_merged_config(AllowBlocked, R1, R2) ->
+    build_config(AllowBlocked, lists:usort(R1++R2)).
 
 build_config(allow, Rules) ->
     [{"test-cluster", {allow, Rules}, {block, []}}];
 build_config(block, Rules) ->
     [{"test-cluster", {allow, []}, {block, Rules}}].
+
+
 
 get_loading_rules(true) ->
     A =
@@ -304,7 +289,7 @@ get_loading_rules(true) ->
         ],
     B = [ [{lnot, X}]  || [X] <- A],
 
-    A ++ B;
+    A ++ B ++ [['*']];
 get_loading_rules(false) ->
     [
         ['*', {bucket, <<"bucket-1">>}],

@@ -2,25 +2,33 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("riak_repl2_object_filter.hrl").
 
--define(setup(F), {setup, fun start/0, fun stop/1, {timeout, 500, F}}).
-
 object_filter_console_test_() ->
-    [
-        {"Test Enable Both", ?setup(fun test_object_filter_enable_both/0)},
-        {"Test Enable Realtime", ?setup(fun test_object_filter_enable_realtime/0)},
-        {"Test Enable Fullsync", ?setup(fun test_object_filter_enable_fullsync/0)},
-        {"Test Disable Both", ?setup(fun test_object_filter_disable_both/0)},
-        {"Test Disable Realtime", ?setup(fun test_object_filter_disable_realtime/0)},
-        {"Test Disable Fullsync", ?setup(fun test_object_filter_disable_fullsync/0)},
+    {spawn,
+        [
+            {"Object Filtering Console Test Suite",
+                setup,
+                fun start/0,
+                fun stop/1,
+                fun(_) ->
+                    [
+                        {"Test Enable Both", fun test_object_filter_enable_both/0},
+                        {"Test Enable Realtime", fun test_object_filter_enable_realtime/0},
+                        {"Test Enable Fullsync", fun test_object_filter_enable_fullsync/0},
+                        {"Test Disable Both", fun test_object_filter_disable_both/0},
+                        {"Test Disable Realtime", fun test_object_filter_disable_realtime/0},
+                        {"Test Disable Fullsync", fun test_object_filter_disable_fullsync/0},
+                        {"Test Set Repl Config", fun test_object_filter_set_repl_config/0},
+                        {"Test Set Realtime Config", fun test_object_filter_set_realtime_config/0},
+                        {"Test Set Fullsync Config", fun test_object_filter_set_fullsync_config/0},
 
-        {"Test Set Repl Config", ?setup(fun test_object_filter_set_repl_config/0)},
-        {"Test Set Realtime Config", ?setup(fun test_object_filter_set_realtime_config/0)},
-        {"Test Set Fullsync Config", ?setup(fun test_object_filter_set_fullsync_config/0)},
-        {"Test Set Realtime Fullsync Config", ?setup(fun test_object_filter_set_realtime_fullsync_config/0)},
-        {"Test Set Repl Realtime Config", ?setup(fun test_object_filter_set_repl_realtime_config/0)},
-        {"Test Set Repl Fullsync Config", ?setup(fun test_object_filter_set_repl_fullsync_config/0)}
-%%        {"Test Set Repl Realtime Fullsync Config", ?setup(fun test_object_filter_set_repl_realtime_fullsync_config/0)}
-    ].
+                        {timeout, 500, {"Test Set Realtime Fullsync Config", fun test_object_filter_set_realtime_fullsync_config/0}},
+                        {timeout, 500, {"Test Set Repl Realtime Config", fun test_object_filter_set_repl_realtime_config/0}},
+                        {timeout, 500, {"Test Set Repl Fullsync Config", fun test_object_filter_set_repl_fullsync_config/0}}
+                    ]
+                end
+            }
+        ]
+    }.
 
 start() ->
     catch(meck:unload(riak_core_capability)),
@@ -132,9 +140,6 @@ test_object_filter_set_repl_realtime_config() ->
 test_object_filter_set_repl_fullsync_config() ->
     [run_test(X) || X <- get_loading_configs([repl, fullsync])].
 
-%%test_object_filter_set_repl_realtime_fullsync_config() ->
-%%    [run_test(X) || X <- get_loading_configs([repl, realtime, fullsync])].
-
 run_test(X) ->
     ?assertEqual(true, test_object_filter_load_config(X)),
     cleanup().
@@ -181,26 +186,11 @@ check_configs(LRepl2, LRT2, LFS2, RT2, FS2) ->
     LFS1 = sort_config(riak_repl2_object_filter:get_config(loaded_fullsync)),
     RT1 = sort_config(riak_repl2_object_filter:get_config(realtime)),
     FS1 = sort_config(riak_repl2_object_filter:get_config(fullsync)),
-
     A = LRepl1 == sort_config(LRepl2),
     B = LRT1 == sort_config(LRT2),
     C = LFS1 == sort_config(LFS2),
     D = RT1 == sort_config(RT2),
     E = FS1 == sort_config(FS2),
-
-%%    ct:pal(
-%%        "loaded repl actual: ~p~n" ++
-%%        "loaded repl expected: ~p~n~n" ++
-%%        "loaded realtime actual: ~p~n" ++
-%%        "loaded realtime expected: ~p~n~n" ++
-%%        "loaded fullsync actual: ~p~n" ++
-%%        "loaded fullsync expected: ~p~n~n" ++
-%%        "realtime actual: ~p~n" ++
-%%        "realtime expected: ~p~n~n" ++
-%%        "fullsync actual: ~p~n" ++
-%%        "fullsync expected: ~p~n~n",
-%%    [LRepl1, LRepl2, LRT1, LRT2, LFS1, LFS2, RT1, RT2, FS1, FS2]),
-
     A and B and C and D and E.
 
 

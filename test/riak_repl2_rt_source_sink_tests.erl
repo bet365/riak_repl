@@ -86,7 +86,7 @@ connection_test_() ->
      ]}.
 
 v2_to_v2_comms(_State) ->
-    {spawn,
+    {inorder,
      [
     {"v2 to v2 communication",
      setup,
@@ -96,14 +96,16 @@ v2_to_v2_comms(_State) ->
              [
               {"everything started okay",
                fun() ->
-                       assert_living_pids([Source, Sink])
+                       [RT] = riak_repl2_rtsource_conn_mgr:get_rtsource_conn_pids(Source),
+                       H = riak_repl2_rtsource_conn:get_helper_pid(RT),
+                       assert_living_pids([Source, Sink, RT, H])
                end},
               {timeout, 120,
                {"sending objects",
                fun() ->
-%                       meck:new(riak_repl_fullsync_worker, [passthrough]),
+
                        catch(meck:unload(riak_repl_fullsync_worker)),
-                       meck:new(riak_repl_fullsync_worker),
+                       meck:new(riak_repl_fullsync_worker, [passthrough]),
 
                        Bin = <<"data data data">>,
                        Key = <<"key">>,
@@ -150,7 +152,7 @@ v2_to_v2_comms_cleanup({Source, Sink}) ->
     connection_test_teardown_pids(Source, Sink).
 
 v1_to_v1_comms(_State) ->
-    {spawn,
+    {inorder,
      [
     {"v1 to v1 communication",
      setup,
@@ -160,7 +162,9 @@ v1_to_v1_comms(_State) ->
              [
               {"everything started okay",
                fun() ->
-                       assert_living_pids([Source, Sink])
+                       [RT] = riak_repl2_rtsource_conn_mgr:get_rtsource_conn_pids(Source),
+                       H = riak_repl2_rtsource_conn:get_helper_pid(RT),
+                       assert_living_pids([Source, Sink, RT, H])
                end},
 
               {timeout, 60,
@@ -223,7 +227,8 @@ connection_test_teardown_pids(Source, Sink) ->
     %% unlink(Source),
     %% unlink(Sink),
     process_flag(trap_exit, true),
-    [kill_proc(P) || P <- [Source, Sink]],
+    kill_proc(Sink),
+    exit(Source, shutdown),
     process_flag(trap_exit, false),
     ok.
     %% riak_repl2_rtsource_conn:stop(Source),

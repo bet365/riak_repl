@@ -12,7 +12,9 @@
     clear_config/1,
     check_config/1,
     load_config/2,
+    force_update/0,
     update/2
+
 ]).
 
 %% repl_console function calls
@@ -45,7 +47,6 @@
 
 -define(CURRENT_VERSION, 1.0).
 -define(RETRY_UPDATE, 6).
-
 
 
 %%%===================================================================
@@ -84,6 +85,9 @@ update(Node, List) when Node =:= node() ->
     gen_server:cast(?SERVER, {update, List});
 update(Node, List) ->
     gen_server:cast({?SERVER, Node}, {update, List}).
+
+force_update() ->
+    gen_server:cast(?SERVER, force_update).
 
 
 
@@ -180,11 +184,16 @@ handle_call(Request, _From, State) ->
     {reply, Response, NewState}.
 
 handle_cast({update, List}, State = #state{update_ref = undefined, update_list = L}) ->
-    Ref = erlang:send_after(100, self(), update_config),
+    Time = app_helper:get_env(riak_repl, object_filter_update_config_time, 500),
+    Ref = erlang:send_after(Time, self(), update_config),
     {noreply, State#state{update_list = L ++ List, update_ref = Ref}};
 
 handle_cast({update, List}, State = #state{update_list = U}) ->
-    {noreply, State#state{update_list = U ++ List}}.
+    {noreply, State#state{update_list = U ++ List}};
+
+handle_cast(force_update, _State) ->
+    load_config(),
+    {noreply, #state{config = active_config()}}.
 
 handle_info(poll_core_capability, State) ->
     Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
@@ -202,7 +211,8 @@ handle_info(update_config, State = #state{update_list = L1}) ->
         [] ->
             {noreply, State#state{config = active_config(), update_ref = undefined}};
         L2 ->
-            Ref = erlang:send_after(500, self(), update_config),
+            Time = app_helper:get_env(riak_repl, object_filter_update_config_retry_time, 500),
+            Ref = erlang:send_after(Time, self(), update_config),
             {noreply, State#state{config = active_config(), update_ref = Ref, update_list = L2}}
     end;
 

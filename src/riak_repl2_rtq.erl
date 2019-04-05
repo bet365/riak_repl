@@ -625,7 +625,7 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, riak_repl2_object_filter:realtime_filter(CName, Meta)],
+    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, not riak_repl2_object_filter:realtime_filter(CName, Meta)],
     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 %% ========================================================================================================= %%
 
@@ -692,7 +692,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
 %% ========================================================================================================= %%
 %% Object Filtering
 %% ========================================================================================================= %%
-                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
+                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, not riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
                     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
                     case BlacklistedRemotes of

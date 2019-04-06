@@ -695,36 +695,9 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
                     OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, not riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
                     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
-                    case BlacklistedRemotes of
-                        Config when Config /= [] ->
-                            case consumer_not_blacklisted(CName, Config) of
-                                true ->
-                                    case C#c.deliver of
-                                        undefined ->
-                                            % if the item can't be delivered due to cascading rt,
-                                            % just keep trying.
-                                            case maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2, FilteringEnabled, BlacklistedRemotes) of
-                                                {skipped, C2} ->
-                                                    C3 = C2#c{
-                                                        deliver = C#c.deliver,
-                                                        delivery_funs = C#c.delivery_funs
-                                                    },
-                                                    maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets);
-                                                {_WorkedOrNoFun, C2} ->
-                                                    C2
-                                            end;
 
-                                        %% we have a saved function due to being at the head of the queue, just add the function and let the push
-                                        %% functionality push the items out to the helpers using the saved deliverfuns
-                                        _ ->
-                                            save_consumer(C, DeliverFun)
-                                    end;
-                                false ->
-                                    %% not removing any deliver function as we have purposely not used it
-                                    C2 = C#c{skips = 0, cseq = CSeq2, delivered = true},
-                                    maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets)
-                            end;
-                        _ ->
+                    case lists:member(CName, OFFilteredConsumerNames) of
+                        true ->
                             case C#c.deliver of
                                 undefined ->
                                     % if the item can't be delivered due to cascading rt,
@@ -744,7 +717,11 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
                                 %% functionality push the items out to the helpers using the saved deliverfuns
                                 _ ->
                                     save_consumer(C, DeliverFun)
-                            end
+                            end;
+                        false ->
+                            %% not removing any deliver function as we have purposely not used it
+                            C2 = C#c{skips = 0, cseq = CSeq2, delivered = true, filtered = C#c.filtered + 1},
+                            maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets)
                     end
             end;
         false ->
@@ -752,6 +729,8 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
             %% until something pushed
             save_consumer(C, DeliverFun)
     end.
+
+
 
 filter({Enabled, Name, BlacklistRemotes}, {ConsumerName, Meta}) ->
     case riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) of

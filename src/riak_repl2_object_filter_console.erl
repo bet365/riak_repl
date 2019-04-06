@@ -13,6 +13,7 @@
     check_config/1,
     load_config/2,
     force_update/0,
+    force_update/1,
     update/2
 
 ]).
@@ -88,6 +89,13 @@ update(Node, List) ->
 
 force_update() ->
     gen_server:cast(?SERVER, force_update).
+force_update("all") ->
+    force_update(),
+    _ = [gen_server:cast({?SERVER, NodeName}, force_update) || NodeName <- nodes()],
+    ok;
+force_update(Node) ->
+    NodeName = list_to_atom(Node),
+    gen_server:cast({?SERVER, NodeName}, force_update).
 
 
 

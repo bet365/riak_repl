@@ -642,7 +642,7 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
                                      end, DeliverResults),
 
     State2 = if
-        AllSkippedOrFiltered andalso length(OFFilteredConsumerNames) > 0 ->
+        AllSkippedOrFiltered ->
             State;
         true ->
             ets:insert(QTab, QEntry2),

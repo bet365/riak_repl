@@ -345,8 +345,8 @@ decide_common_strategy(OurCaps, TheirCaps) ->
 decide_common_object_hash_version([], _TheirCaps) -> 0;
 decide_common_object_hash_version(_OurCaps, []) -> 0;
 decide_common_object_hash_version(OurCaps, TheirCaps) ->
-    OurVersion = proplists:get_value(object_hash_version, OurCaps, keylist),
-    TheirVersion = proplists:get_value(object_hash_version, TheirCaps, keylist),
+    OurVersion = proplists:get_value(object_hash_version, OurCaps, 0),
+    TheirVersion = proplists:get_value(object_hash_version, TheirCaps, 0),
     lists:min([OurVersion, TheirVersion]).
 
 %% Depending on the protocol version number, send our capabilities

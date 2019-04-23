@@ -40,7 +40,7 @@
 -behaviour(gen_fsm).
 
 %% API
--export([start_link/8,
+-export([start_link/9,
         start_fullsync/1,
         start_fullsync/2,
         cancel_fullsync/1,
@@ -100,7 +100,8 @@
         proto,
         bucket_filtering_config = [],
         bucket_filtering_enabled = false,
-        fullsync_object_filter = {disabled, 0, []}
+        fullsync_object_filter = {disabled, 0, []},
+        object_hash_version = 0
     }).
 
 %% -define(TRACE(Stmt),Stmt).
@@ -117,8 +118,8 @@
 %% estimate of them.
 -define(KEY_LIST_THRESHOLD,(1024)).
 
-start_link(SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}) ->
-    gen_fsm:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}], []).
+start_link(SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}, ObjectHashVersion) ->
+    gen_fsm:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}, ObjectHashVersion], []).
 
 start_fullsync(Pid) ->
     gen_fsm:send_event(Pid, start_fullsync).
@@ -135,7 +136,7 @@ pause_fullsync(Pid) ->
 resume_fullsync(Pid) ->
     gen_fsm:send_event(Pid, resume_fullsync).
 
-init([SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilterEnabled, BucketConfig}]) ->
+init([SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilterEnabled, BucketConfig}, ObjectHashVersion]) ->
     MinPool = app_helper:get_env(riak_repl, min_get_workers, 5),
     MaxPool = app_helper:get_env(riak_repl, max_get_workers, 100),
     VnodeGets = app_helper:get_env(riak_repl, vnode_gets, true),
@@ -146,7 +147,8 @@ init([SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter,
     State = #state{sitename=SiteName, socket=Socket, transport=Transport,
                    work_dir=WorkDir, client=Client, pool=Pid, vnode_gets=VnodeGets,
                    diff_batch_size=DiffBatchSize, proto=Proto, bucket_filtering_enabled = FilterEnabled,
-                   bucket_filtering_config=BucketConfig, fullsync_object_filter = FullsyncObjectFilter},
+                   bucket_filtering_config=BucketConfig, fullsync_object_filter = FullsyncObjectFilter,
+                   object_hash_version = ObjectHashVersion},
     riak_repl_util:schedule_fullsync(),
     {ok, wait_for_partition, State}.
 
@@ -759,7 +761,7 @@ bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, Fu
             end,
     {MPid, Bloom, Client, Transport, Socket, NSent, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}}.
 
-wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir, bucket_filtering_enabled = FilterEnabled,
+wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir, bucket_filtering_enabled = FilterEnabled, object_hash_version = ObjectHashVersion,
                                                       bucket_filtering_config = FilterConfig, fullsync_object_filter = FullsyncObjectFilter}) ->
     lager:info("Full-sync with site ~p; doing fullsync for ~p",
                [State#state.sitename, Partition]),
@@ -774,7 +776,8 @@ wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir, bucket_f
                                                               KeyListFn,
                                                               FilterEnabled,
                                                               FilterConfig,
-                                                              FullsyncObjectFilter),
+                                                              FullsyncObjectFilter,
+                                                              ObjectHashVersion),
     {next_state, build_keylist, State#state{kl_pid=KeyListPid,
                                             kl_ref=KeyListRef, kl_fn=KeyListFn,
                                             partition=Partition,

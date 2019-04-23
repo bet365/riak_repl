@@ -129,6 +129,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     OurCaps = decide_our_caps(RequestedStrategy, ObjectFiltering),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
+    ObjectHashVersion = decide_common_object_hash_version(OurCaps, TheirCaps),
 
 
     FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
@@ -155,7 +156,8 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
             {ok, FullsyncWorker} = riak_repl_keylist_server:start_link(Cluster,
                                                                        Transport, Socket,
                                                                        WorkDir, Client, ClientVer,
-                                                                       FullsyncObjectFilter, FullSyncBucketFilter),
+                                                                       FullsyncObjectFilter, FullSyncBucketFilter,
+                                                                       ObjectHashVersion),
             _ = riak_repl_keylist_server:start_fullsync(FullsyncWorker, [Partition]),
             {reply, ok, State#state{transport=Transport, socket=Socket, cluster=Cluster,
                                     fullsync_worker=FullsyncWorker, work_dir=WorkDir,
@@ -326,7 +328,8 @@ decide_our_caps(RequestedStrategy) ->
     [{strategy, SupportedStrategy}].
 decide_our_caps(RequestedStrategy, ObjectFiltering) ->
     Strategy = decide_our_caps(RequestedStrategy),
-    Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
+    ObjectHashVersion = [{object_hash_version, app_helper:get_env(riak_repl, fullsync_object_hash_version, 1)}],
+    Strategy ++ ObjectHashVersion ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
 
 %% decide what strategy to use, given our own capabilties and those
 %% of the remote source.
@@ -338,6 +341,13 @@ decide_common_strategy(OurCaps, TheirCaps) ->
         {aae,aae} -> aae;
         {_,_}     -> keylist
     end.
+
+decide_common_object_hash_version([], _TheirCaps) -> 0;
+decide_common_object_hash_version(_OurCaps, []) -> 0;
+decide_common_object_hash_version(OurCaps, TheirCaps) ->
+    OurVersion = proplists:get_value(object_hash_version, OurCaps, keylist),
+    TheirVersion = proplists:get_value(object_hash_version, TheirCaps, keylist),
+    lists:min([OurVersion, TheirVersion]).
 
 %% Depending on the protocol version number, send our capabilities
 %% as a list of properties, in binary.

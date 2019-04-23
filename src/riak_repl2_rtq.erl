@@ -636,9 +636,10 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
     %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
     %% We do not want to add an object that all consumers will filter or skip to the queue
     AllSkippedOrFiltered = lists:all(fun
-        (skipped) -> true;
-        (_) -> false
-    end, DeliverResults),
+                                         (skipped) -> true;
+                                         (filtered) -> true;
+                                         (_) -> false
+                                     end, DeliverResults),
 
     State2 = if
         AllSkippedOrFiltered andalso length(OFFilteredConsumerNames) > 0 ->

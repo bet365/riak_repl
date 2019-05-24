@@ -17,6 +17,8 @@
     realtime_filter/2
 ]).
 
+-define(MD_USERMETA, <<"X-Riak-Meta">>).
+
 %% =================================================
 %% API (for testing rules)
 -export([
@@ -149,32 +151,53 @@ filter_object_check_single_rule(Rule, ObjectData) ->
         '*' ->                              true;
         {bucket, MatchBucket} ->            true;
         {bucket, _} ->                      false;
-        {metadata, {K}} ->                  filter_object_check_metadatas(K, any, MatchMetaDatas);
-        {metadata, {K, V}} ->               filter_object_check_metadatas(K, V, MatchMetaDatas);
+        {metadata, {K}} ->                  filter_object_check_metadatas_key(K, MatchMetaDatas);
+        {metadata, {K, V}} ->               filter_object_check_metadatas_key_value(K, V, MatchMetaDatas);
+        {user_metadata, {K}} ->             filter_object_check_user_metadatas_key(K, MatchMetaDatas);
+        {user_metadata, {K, V}} ->          filter_object_check_user_metadatas_key_value(K, V, MatchMetaDatas);
         {lastmod_age_greater_than, Age} ->  filter_object_lastmod_age(greater, Age, MatchMetaDatas);
         {lastmod_age_less_than, Age} ->     filter_object_lastmod_age(less, Age, MatchMetaDatas);
         {lastmod_greater_than, TS} ->       filter_object_lastmod(greater, TS, MatchMetaDatas);
         {lastmod_less_than, TS} ->          filter_object_lastmod(less, TS, MatchMetaDatas)
     end.
 
-filter_object_check_metadatas(_, _, []) -> false;
-filter_object_check_metadatas(Key, Value, [Metadata| Rest]) ->
-    case filter_object_check_metadata(Key, Value, Metadata) of
+filter_object_check_metadatas_key(_, []) -> false;
+filter_object_check_metadatas_key(Key, [Metadata| Rest]) ->
+    case dict:is_key(Key, Metadata) of
         true -> true;
-        false -> filter_object_check_metadatas(Key, Value, Rest)
+        false -> filter_object_check_metadatas_key(Key,Rest)
     end.
 
-filter_object_check_metadata(Key, any, Metadata) ->
-    case dict:find(Key, Metadata) of
-        {ok, _} -> true;
-        error -> false
-    end;
-filter_object_check_metadata(Key, Value, Metadata) ->
+filter_object_check_metadatas_key_value(_, _, []) -> false;
+filter_object_check_metadatas_key_value(Key, Value, [Metadata| Rest]) ->
     case dict:find(Key, Metadata) of
         {ok, Value} -> true;
-        {ok, _} -> false;
-        error -> false
+        _ -> filter_object_check_metadatas_key_value(Key, Value, Rest)
     end.
+
+get_user_metadata(Metadata) ->
+    case dict:find(?MD_USERMETA, Metadata) of
+        {ok, L} -> L;
+        _ -> []
+    end.
+
+filter_object_check_user_metadatas_key(_, []) -> false;
+filter_object_check_user_metadatas_key(Key, [Metadata| Rest]) ->
+    UserMetaData = get_user_metadata(Metadata),
+    case lists:keymember(Key, 1, UserMetaData) of
+        true -> true;
+        false -> filter_object_check_metadatas_key(Key,Rest)
+    end.
+
+filter_object_check_user_metadatas_key_value(_, _, []) -> false;
+filter_object_check_user_metadatas_key_value(Key, Value, [Metadata| Rest]) ->
+    UserMetaData = get_user_metadata(Metadata),
+    case lists:member({Key, Value}, UserMetaData) of
+        true -> true;
+        _ -> filter_object_check_metadatas_key_value(Key, Value, Rest)
+    end.
+
+
 
 filter_object_lastmod_age(Mode, Age, MetaDatas) ->
     NowSecs = timestamp_to_secs(os:timestamp()),

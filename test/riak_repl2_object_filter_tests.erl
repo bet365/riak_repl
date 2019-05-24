@@ -57,7 +57,9 @@ cleanup(StartedApps) ->
 %% Sing Rules
 %% ===================================================================
 test_object_filter_single_rules() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>,
+    L = [{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}, {<<"X-Riak-Meta">>, [{<<"filter">>, <<1:32>>}]}],
+    M = dict:from_list(L),
     O = riak_object:new(B,K,V,M),
     [test_object_filter_single_rules(N, O) || N <- lists:seq(1,3)].
 
@@ -83,8 +85,10 @@ test_object_filter_single_rules(3, Obj) ->
 %% Multi Rules: pairwise
 %% ===================================================================
 test_object_filter_multi_rules_pairwise() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
-    Obj = riak_object:new(B,K,V,M),
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>,
+    L = [{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}, {<<"X-Riak-Meta">>, [{<<"filter">>, <<1:32>>}]}],
+    M = dict:from_list(L),
+    O = riak_object:new(B,K,V,M),
 
     Config =
         lists:flatten([
@@ -103,7 +107,7 @@ test_object_filter_multi_rules_pairwise() ->
 
     TestFun =
         fun({Rule, Outcome}) ->
-            Actual = filter_object_rule_test([Rule], Obj),
+            Actual = filter_object_rule_test([Rule], O),
             ?assertEqual(Outcome, Actual)
         end,
     [TestFun(A) || A <- Config].
@@ -112,8 +116,10 @@ test_object_filter_multi_rules_pairwise() ->
 %% Multi Rules: triplets
 %% ===================================================================
 test_object_filter_multi_rules_triplets() ->
-    B = <<"bucket">>, K = <<"key">>, V = <<"value">>, M = dict:from_list([{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}]),
-    Obj = riak_object:new(B,K,V,M),
+    B = <<"bucket">>, K = <<"key">>, V = <<"value">>,
+    L = [{filter, 1}, {<<"X-Riak-Last-Modified">>, os:timestamp()}, {<<"X-Riak-Meta">>, [{<<"filter">>, <<1:32>>}]}],
+    M = dict:from_list(L),
+    O = riak_object:new(B,K,V,M),
 
     Config =
         lists:flatten([
@@ -129,7 +135,7 @@ test_object_filter_multi_rules_triplets() ->
 
     TestFun =
         fun({Rule, Outcome}) ->
-            Actual = filter_object_rule_test([Rule], Obj),
+            Actual = filter_object_rule_test([Rule], O),
             ?assertEqual(Outcome, Actual)
         end,
     [TestFun(A) || A <- Config].
@@ -167,6 +173,24 @@ test_object_filter_get_fullsync_config_3() ->
             {metadata,{other}},
             {lnot,{metadata,{other}}},
             {lnot,{lnot,{metadata,{other}}}},
+            {user_metadata, {<<"filter">>, <<1:32>>}},
+            {lnot, {user_metadata, {<<"filter">>, <<1:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>, <<1:32>>}}}},
+            {user_metadata, {<<"filter">>, <<2:32>>}},
+            {lnot, {user_metadata, {<<"filter">>, <<2:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>, <<2:32>>}}}},
+            {user_metadata, {<<"filter">>}},
+            {lnot, {user_metadata, {<<"filter">>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>}}}},
+            {user_metadata, {<<"other">>, <<1:32>>}},
+            {lnot, {user_metadata, {<<"other">>, <<1:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>, <<1:32>>}}}},
+            {user_metadata, {<<"other">>, <<2:32>>}},
+            {lnot, {user_metadata, {<<"other">>, <<2:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>, <<2:32>>}}}},
+            {user_metadata, {<<"other">>}},
+            {lnot, {user_metadata, {<<"other">>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>}}}},
             {lastmod_age_greater_than, -1000},
             {lnot, {lastmod_age_greater_than, -1000}},
             {lnot, {lnot, {lastmod_age_greater_than, -1000}}},
@@ -247,6 +271,24 @@ test_object_filter_get_fullsync_config_3() ->
             {metadata,{other}},
             {lnot,{metadata,{other}}},
             {lnot,{lnot,{metadata,{other}}}},
+            {user_metadata, {<<"filter">>, <<1:32>>}},
+            {lnot, {user_metadata, {<<"filter">>, <<1:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>, <<1:32>>}}}},
+            {user_metadata, {<<"filter">>, <<2:32>>}},
+            {lnot, {user_metadata, {<<"filter">>, <<2:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>, <<2:32>>}}}},
+            {user_metadata, {<<"filter">>}},
+            {lnot, {user_metadata, {<<"filter">>}}},
+            {lnot, {lnot, {user_metadata, {<<"filter">>}}}},
+            {user_metadata, {<<"other">>, <<1:32>>}},
+            {lnot, {user_metadata, {<<"other">>, <<1:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>, <<1:32>>}}}},
+            {user_metadata, {<<"other">>, <<2:32>>}},
+            {lnot, {user_metadata, {<<"other">>, <<2:32>>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>, <<2:32>>}}}},
+            {user_metadata, {<<"other">>}},
+            {lnot, {user_metadata, {<<"other">>}}},
+            {lnot, {lnot, {user_metadata, {<<"other">>}}}},
             {lastmod_greater_than, TS1},
             {lnot, {lastmod_greater_than, TS1}},
             {lnot, {lnot, {lastmod_greater_than, TS1}}},
@@ -348,7 +390,32 @@ get_configs(metadata) ->
 
         {{metadata, {other}}, false},
         {{lnot, {metadata, {other}}}, true},
-        {{lnot, {lnot, {metadata, {other}}}}, false}
+        {{lnot, {lnot, {metadata, {other}}}}, false},
+
+        {{user_metadata, {<<"filter">>, <<1:32>>}}, true},
+        {{lnot, {user_metadata, {<<"filter">>, <<1:32>>}}}, false},
+        {{lnot, {lnot, {user_metadata, {<<"filter">>, <<1:32>>}}}}, true},
+
+        {{user_metadata, {<<"filter">>, <<2:32>>}}, false},
+        {{lnot, {user_metadata, {<<"filter">>, <<2:32>>}}}, true},
+        {{lnot, {lnot, {user_metadata, {<<"filter">>, <<2:32>>}}}}, false},
+
+        {{user_metadata, {<<"filter">>}}, true},
+        {{lnot, {user_metadata, {<<"filter">>}}}, false},
+        {{lnot, {lnot, {user_metadata, {<<"filter">>}}}}, true},
+
+        {{user_metadata, {<<"other">>, <<1:32>>}}, false},
+        {{lnot, {user_metadata, {<<"other">>, <<1:32>>}}}, true},
+        {{lnot, {lnot, {user_metadata, {<<"other">>, <<1:32>>}}}}, false},
+
+        {{user_metadata, {<<"other">>, <<2:32>>}}, false},
+        {{lnot, {user_metadata, {<<"other">>, <<2:32>>}}}, true},
+        {{lnot, {lnot, {user_metadata, {<<"other">>, <<2:32>>}}}}, false},
+
+        {{user_metadata, {<<"other">>}}, false},
+        {{lnot, {user_metadata, {<<"other">>}}}, true},
+        {{lnot, {lnot, {user_metadata, {<<"other">>}}}}, false}
+
     ];
 get_configs(lastmod) ->
     TS1 = timestamp_to_secs(os:timestamp()) + 1000,

@@ -426,6 +426,7 @@ supported_match_types(1.0) ->
         lnot,
         bucket,
         metadata,
+        user_metadata,
         lastmod_age_greater_than,
         lastmod_age_less_than,
         lastmod_greater_than,
@@ -446,6 +447,10 @@ supported_match_value_formats(1.0, bucket, MatchValue) ->
 supported_match_value_formats(1.0, metadata, {_DictKey, _DictValue}) ->
     true;
 supported_match_value_formats(1.0, metadata, {_DictKey}) ->
+    true;
+supported_match_value_formats(1.0, user_metadata, {_DictKey, _DictValue}) ->
+    true;
+supported_match_value_formats(1.0, user_metadata, {_DictKey}) ->
     true;
 supported_match_value_formats(1.0, lastmod_age_greater_than, Age) ->
     is_integer(Age);

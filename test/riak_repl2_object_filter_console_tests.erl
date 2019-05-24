@@ -268,6 +268,8 @@ get_loading_rules(true) ->
             [{bucket, {<<"type-1">>, <<"bucket-1">>}}],
             [{metadata, {key, "value"}}],
             [{metadata, {key}}],
+            [{user_metadata, {<<"user_key">>}}],
+            [{user_metadata, {<<"user_key">>, <<"user_value">>}}],
             [{lastmod_age_greater_than, 1000}],
             [{lastmod_age_greater_than, -1000}],
             [{lastmod_age_less_than, 1000}],

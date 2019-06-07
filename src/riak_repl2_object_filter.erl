@@ -5,6 +5,8 @@
 
 %% internal API function calls
 -export([
+    set_config/2,
+    set_status/2,
     get_maybe_downgraded_remote_config/2,
     get_maybe_downgraded_config/2,
     get_config/1,
@@ -33,11 +35,26 @@ filter_object_rule_test(Rule, Object) ->
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+safe_core_metadata_get(B, K, Default) ->
+    case riak_core_metadata:get(B, K) of
+        undefined ->
+            Default;
+        Value ->
+            Value
+    end.
+
+set_config(Key, Config) ->
+    riak_core_metadata:put(?OBF_CONFIG_KEY, Key, Config).
+set_status(Key, Status) ->
+    riak_core_metadata:put(?OBF_STATUS_KEY, Key, Status).
+
 %% returns the entire config for all clusters
 get_config(all) ->
-    app_helper:get_env(?OBF_CONFIG_KEY);
+    List = [fullsync, realtime, loaded_repl, loaded_realtime, loaded_fullsync],
+    [{Name, get_config(Name)} || Name <- List];
 get_config(Key) ->
-    app_helper:get_env(?OBF_CONFIG_KEY, Key, []).
+    safe_core_metadata_get(?OBF_CONFIG_KEY, Key, []).
 
 
 %% returns config only for the remote that is named in the argument
@@ -61,7 +78,7 @@ get_maybe_downgraded_config(Config, Version) ->
 
 %% returns the status of our local cluster for object filtering
 get_status(Key) ->
-    app_helper:get_env(?OBF_STATUS_KEY, Key, disabled).
+    safe_core_metadata_get(?OBF_STATUS_KEY, Key, disabled).
 
 
 %% returns the version of our local cluster for object filtering

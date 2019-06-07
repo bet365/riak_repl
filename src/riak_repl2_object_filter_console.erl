@@ -11,10 +11,7 @@
     disable/1,
     clear_config/1,
     check_config/1,
-    load_config/2,
-    force_update/0,
-    force_update/1,
-    update/2
+    load_config/2
 
 ]).
 
@@ -39,12 +36,7 @@
 
 
 -define(SERVER, ?MODULE).
-
--record(state, {
-    config = [],
-    update_list = [],
-    update_ref
-}).
+-record(state, {}).
 
 -define(CURRENT_VERSION, 1.0).
 -define(RETRY_UPDATE, 6).
@@ -77,25 +69,6 @@ safe_call(Fun) ->
             {error, {Type, Error}}
         end,
     print_response(R).
-
-
-
-
-
-update(Node, List) when Node =:= node() ->
-    gen_server:cast(?SERVER, {update, List});
-update(Node, List) ->
-    gen_server:cast({?SERVER, Node}, {update, List}).
-
-force_update() ->
-    gen_server:cast(?SERVER, force_update).
-force_update("all") ->
-    force_update(),
-    _ = [gen_server:cast({?SERVER, NodeName}, force_update) || NodeName <- nodes()],
-    ok;
-force_update(Node) ->
-    NodeName = list_to_atom(Node),
-    gen_server:cast({?SERVER, NodeName}, force_update).
 
 
 
@@ -153,8 +126,6 @@ status_all() ->
 %%% gen_server callbacks
 %%%===================================================================
 init([]) ->
-    load_config(),
-
     Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
     set_version(Version),
 
@@ -167,41 +138,32 @@ init([]) ->
         true ->
             ok
     end,
-    {ok, #state{config = active_config()}}.
+    {ok, #state{}}.
 
 handle_call(Request, _From, State) ->
-    {Response, NewState} =
+    Response =
         case Request of
             enable ->
-                object_filtering_enable(repl, State);
+                object_filtering_enable(repl);
             {enable, Mode} ->
-                object_filtering_enable(list_to_atom(Mode), State);
+                object_filtering_enable(list_to_atom(Mode));
             disable ->
-                object_filtering_disable(repl, State);
+                object_filtering_disable(repl);
             {disable, Mode} ->
-                object_filtering_disable(list_to_atom(Mode), State);
+                object_filtering_disable(list_to_atom(Mode));
             {check_config, Path} ->
-                object_filtering_check_config_file(Path, State);
+                object_filtering_check_config_file(Path);
             {load_config, Mode, Path} ->
-                object_filtering_load_config_file(list_to_atom(Mode), Path, State);
+                object_filtering_load_config_file(list_to_atom(Mode), Path);
             {clear_config, Mode} ->
-                object_filtering_clear_config(list_to_atom(Mode), State);
+                object_filtering_clear_config(list_to_atom(Mode));
             R ->
                 {{error, no_request, R}, State}
         end,
-    {reply, Response, NewState}.
+    {reply, Response, State}.
 
-handle_cast({update, List}, State = #state{update_ref = undefined, update_list = L}) ->
-    Time = app_helper:get_env(riak_repl, object_filter_update_config_time, 500),
-    Ref = erlang:send_after(Time, self(), update_config),
-    {noreply, State#state{update_list = L ++ List, update_ref = Ref}};
-
-handle_cast({update, List}, State = #state{update_list = U}) ->
-    {noreply, State#state{update_list = U ++ List}};
-
-handle_cast(force_update, _State) ->
-    load_config(),
-    {noreply, #state{config = active_config()}}.
+handle_cast(_Request, State) ->
+    {ok, State}.
 
 handle_info(poll_core_capability, State) ->
     Version = riak_core_capability:get(?OBF_VERSION_KEY, 0),
@@ -212,17 +174,6 @@ handle_info(poll_core_capability, State) ->
             set_version(Version)
     end,
     {noreply, State};
-
-handle_info(update_config, State = #state{update_list = L1}) ->
-    RetryList = preform_updates(L1),
-    case RetryList of
-        [] ->
-            {noreply, State#state{config = active_config(), update_ref = undefined}};
-        L2 ->
-            Time = app_helper:get_env(riak_repl, object_filter_update_config_retry_time, 500),
-            Ref = erlang:send_after(Time, self(), update_config),
-            {noreply, State#state{config = active_config(), update_ref = Ref, update_list = L2}}
-    end;
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -236,182 +187,81 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 %%%===================================================================
-%%% Update
+%%% Set Version and clustername
 %%%===================================================================
 
-preform_updates(L) ->
-    Updated = [update_config(Update) || Update <- L],
-    lists:foldl(fun
-                    (ok, Acc) -> Acc;
-                    ({Key, 0}, Acc) -> lager:warning("failed to update key: ~p", [Key]), Acc;
-                    ({Key, Counter}, Acc) -> [{Key, Counter}] ++ Acc
-                end,
-        [], Updated).
-
-update_config({{Key, config}, N}) ->
-    New = riak_core_metadata:get(?OBF_CONFIG_KEY, Key),
-    Old = riak_repl2_object_filter:get_config(Key),
-    case New == Old of
-        true ->
-            {{Key, config}, N-1};
-        false ->
-            set_config(Key, New),
-            ok
-    end;
-update_config({{Key, status}, N}) ->
-    New = riak_core_metadata:get(?OBF_STATUS_KEY, Key),
-    Old = riak_repl2_object_filter:get_status(Key),
-    case New == Old of
-        true ->
-            {{Key, status}, N-1};
-        false ->
-            set_status(Key, New),
-            ok
-    end.
-
-
-
-update_all_nodes(State = #state{config = Config}) ->
-    NewConfig = active_config(),
-    case orddict:fetch_keys(NewConfig -- Config) of
-        [] ->
-            State;
-        Changes ->
-            List = [{Key, ?RETRY_UPDATE} || Key <- Changes],
-            [?MODULE:update(Node, List) || Node <- nodes()],
-            State#state{config = NewConfig}
-    end.
-
-active_config() ->
-    orddict:from_list(
-        [
-            {{loaded_repl, config}, riak_repl2_object_filter:get_config(loaded_repl)},
-            {{loaded_realtime, config} ,riak_repl2_object_filter:get_config(loaded_realtime)},
-            {{loaded_fullsync, config}, riak_repl2_object_filter:get_config(loaded_fullsync)},
-            {{realtime, config}, riak_repl2_object_filter:get_config(realtime)},
-            {{fullsync, config}, riak_repl2_object_filter:get_config(fullsync)},
-            {{realtime, status}, riak_repl2_object_filter:get_status(realtime)},
-            {{fullsync, status}, riak_repl2_object_filter:get_status(fullsync)}
-    ]).
-
-saved_config() ->
-    orddict:from_list(
-        [
-            {{loaded_repl, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_repl, [])},
-            {{loaded_realtime, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_realtime, [])},
-            {{loaded_fullsync, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, loaded_fullsync, [])},
-            {{realtime, config}, safe_core_metadata_get(?OBF_CONFIG_KEY, realtime, [])},
-            {{fullsync, config},  safe_core_metadata_get(?OBF_CONFIG_KEY, fullsync, [])},
-            {{realtime, status},  safe_core_metadata_get(?OBF_STATUS_KEY, realtime, disabled)},
-            {{fullsync, status}, safe_core_metadata_get(?OBF_STATUS_KEY, fullsync, disabled)}
-    ]).
-
-load_config() ->
-    Config = saved_config(),
-    set_status(realtime, safe_orddict_find({realtime, status}, Config, disabled)),
-    set_status(fullsync, safe_orddict_find({fullsync, status}, Config, disabled)),
-    set_config(loaded_repl, safe_orddict_find({loaded_repl, config}, Config, [])),
-    set_config(loaded_realtime, safe_orddict_find({loaded_realtime, config}, Config, [])),
-    set_config(loaded_fullsync, safe_orddict_find({loaded_fullsync, config}, Config, [])),
-    set_config(realtime, safe_orddict_find({realtime, config}, Config, [])),
-    set_config(fullsync, safe_orddict_find({fullsync, config}, Config, [])).
-
-safe_orddict_find(Key, Orddict, Default) ->
-    case orddict:find(Key, Orddict) of
-        {ok, V} ->
-            V;
-        error ->
-            Default
-    end.
-
-safe_core_metadata_get(B, K, Default) ->
-    case riak_core_metadata:get(B, K) of
-        undefined ->
-            Default;
-        Value ->
-            Value
-    end.
+set_version(Version) ->
+    application:set_env(?OBF_VERSION_KEY, active, Version).
+set_clustername(Name) ->
+    application:set_env(riak_repl, clustername, Name).
 
 %%%===================================================================
 %%% Disable
 %%%===================================================================
-object_filtering_disable(repl, State) ->
-    save_status(realtime, disabled),
-    save_status(fullsync, disabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_disable(realtime, State) ->
-    save_status(realtime, disabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_disable(fullsync, State) ->
-    save_status(fullsync, disabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_disable(Mode, State) ->
-    {return_error_unknown_repl_mode(object_filtering_disable, Mode), State}.
+object_filtering_disable(repl) ->
+    riak_repl2_object_filter:set_status(realtime, disabled),
+    riak_repl2_object_filter:set_status(fullsync, disabled),
+    ok;
+object_filtering_disable(realtime) ->
+    riak_repl2_object_filter:set_status(realtime, disabled),
+    ok;
+object_filtering_disable(fullsync) ->
+    riak_repl2_object_filter:set_status(fullsync, disabled),
+    ok;
+object_filtering_disable(Mode) ->
+    return_error_unknown_repl_mode(object_filtering_disable, Mode).
 
 %%%===================================================================
 %%% Enable
 %%%===================================================================
-object_filtering_enable(repl, State) ->
-    save_status(realtime, enabled),
-    save_status(fullsync, enabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_enable(realtime, State) ->
-    save_status(realtime, enabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_enable(fullsync, State) ->
-    save_status(fullsync, enabled),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_enable(Mode, State) ->
-    {return_error_unknown_repl_mode(object_filtering_enabled, Mode), State}.
+object_filtering_enable(repl) ->
+    riak_repl2_object_filter:set_status(realtime, enabled),
+    riak_repl2_object_filter:set_status(fullsync, enabled),
+    ok;
+object_filtering_enable(realtime) ->
+    riak_repl2_object_filter:set_status(realtime, enabled),
+    ok;
+object_filtering_enable(fullsync) ->
+    riak_repl2_object_filter:set_status(fullsync, enabled),
+    ok;
+object_filtering_enable(Mode) ->
+    return_error_unknown_repl_mode(object_filtering_enabled, Mode).
 
 %%%===================================================================
 %%% Check Config
 %%%===================================================================
-object_filtering_check_config_file(Path, State) ->
-    Response = case file:consult(Path) of
-                   {ok, FilteringConfig} ->
-                        case check_filtering_rules(FilteringConfig) of
-                            ok ->
-                                ok;
-                            Error2 ->
-                                Error2
-                        end;
-                    Error1 ->
-                        Error1
-                end,
-    {Response, State}.
+object_filtering_check_config_file(Path) ->
+    case file:consult(Path) of
+        {ok, FilteringConfig} ->
+            check_filtering_rules(FilteringConfig);
+        Error1 ->
+            Error1
+    end.
 
 %%%===================================================================
 %%% Load Config
 %%%===================================================================
-object_filtering_load_config_file(Mode, Path, State) ->
+object_filtering_load_config_file(Mode, Path) ->
     Modes = [repl, fullsync, realtime],
     case lists:member(Mode, Modes) of
         true ->
-            object_filtering_load_config_file_helper(Mode, Path, State);
+            object_filtering_load_config_file_helper(Mode, Path);
         false ->
-            {return_error_unknown_repl_mode(object_filtering_config_file, Mode), State}
+            return_error_unknown_repl_mode(object_filtering_config_file, Mode)
     end.
 
 
-object_filtering_load_config_file_helper(Mode, Path, State) ->
+object_filtering_load_config_file_helper(Mode, Path) ->
     case file:consult(Path) of
         {ok, FilteringConfig} ->
             case check_filtering_rules(FilteringConfig) of
                 ok ->
-                    NewState = merge_and_load_configs(Mode, FilteringConfig, State),
-                    {ok, NewState};
+                    merge_and_load_configs(Mode, FilteringConfig);
                 Error2 ->
-                    {Error2, State}
+                    Error2
             end;
         Error1 ->
-            {Error1, State}
+            Error1
     end.
 
 %%%===================================================================
@@ -559,30 +409,30 @@ is_multi_rule_supported([]) -> true;
 is_multi_rule_supported([Rule|Rest]) ->
     is_single_rule_supported(Rule) and is_multi_rule_supported(Rest).
 %% ====================================================================================================================
-merge_and_load_configs(repl, ReplConfig, State) ->
+merge_and_load_configs(repl, ReplConfig) ->
     %% Change Repl, MergedRT, and MergedFS
     RTConfig = riak_repl2_object_filter:get_config(loaded_realtime),
     FSConfig = riak_repl2_object_filter:get_config(loaded_fullsync),
     MergedRT = merge_config(ReplConfig, RTConfig),
     MergedFS = merge_config(ReplConfig, FSConfig),
-    save_config(loaded_repl, ReplConfig),
-    save_config(realtime, MergedRT),
-    save_config(fullsync, MergedFS),
-    update_all_nodes(State);
-merge_and_load_configs(realtime, RTConfig, State) ->
+    riak_repl2_object_filter:set_config(loaded_repl, ReplConfig),
+    riak_repl2_object_filter:set_config(realtime, MergedRT),
+    riak_repl2_object_filter:set_config(fullsync, MergedFS),
+    ok;
+merge_and_load_configs(realtime, RTConfig) ->
     %% Change RT, MergedRT
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedRT = merge_config(ReplConfig, RTConfig),
-    save_config(loaded_realtime, RTConfig),
-    save_config(realtime, MergedRT),
-    update_all_nodes(State);
-merge_and_load_configs(fullsync, FSConfig, State) ->
+    riak_repl2_object_filter:set_config(loaded_realtime, RTConfig),
+    riak_repl2_object_filter:set_config(realtime, MergedRT),
+    ok;
+merge_and_load_configs(fullsync, FSConfig) ->
     %% Change FS, MergedFS
     ReplConfig = riak_repl2_object_filter:get_config(loaded_repl),
     MergedFS = merge_config(ReplConfig, FSConfig),
-    save_config(loaded_fullsync, FSConfig),
-    save_config(fullsync, MergedFS),
-    update_all_nodes(State).
+    riak_repl2_object_filter:set_config(loaded_fullsync, FSConfig),
+    riak_repl2_object_filter:set_config(fullsync, MergedFS),
+    ok.
 
 merge_config(Config1, Config2) ->
     merge_config_helper(Config1, Config2, []).
@@ -619,45 +469,24 @@ join_configs(Config1, [Elem|Rest]) ->
         true -> join_configs(Config1, Rest)
     end.
 %% ====================================================================================================================
-object_filtering_clear_config(Mode, State) ->
-    object_filtering_clear_config_helper(Mode, State).
+object_filtering_clear_config(Mode) ->
+    object_filtering_clear_config_helper(Mode).
 
-object_filtering_clear_config_helper(all, State) ->
-    save_config(loaded_repl, []),
-    save_config(loaded_realtime, []),
-    save_config(loaded_fullsync, []),
-    save_config(realtime, []),
-    save_config(fullsync, []),
-    NewState = update_all_nodes(State),
-    {ok, NewState};
-object_filtering_clear_config_helper(repl, State) ->
-    NewState = merge_and_load_configs(repl, [], State),
-    {ok, NewState};
-object_filtering_clear_config_helper(realtime, State) ->
-    NewState = merge_and_load_configs(realtime, [], State),
-    {ok, NewState};
-object_filtering_clear_config_helper(fullsync, State) ->
-    NewState = merge_and_load_configs(fullsync, [], State),
-    {ok, NewState};
-object_filtering_clear_config_helper(Mode, State) ->
-    {return_error_unknown_repl_mode(object_filtering_clear_config, Mode), State}.
-%% ====================================================================================================================
-save_config(Key, Config) ->
-    riak_core_metadata:put(?OBF_CONFIG_KEY, Key, Config),
-    set_config(Key, Config).
-save_status(Key, Status) ->
-    riak_core_metadata:put(?OBF_STATUS_KEY, Key, Status),
-    set_status(Key, Status).
-
-%% ====================================================================================================================
-set_config(Key, Config) ->
-    application:set_env(?OBF_CONFIG_KEY, Key, Config).
-set_status(Key, Status) ->
-    application:set_env(?OBF_STATUS_KEY, Key, Status).
-set_version(Version) ->
-    application:set_env(?OBF_VERSION_KEY, active, Version).
-set_clustername(Name) ->
-    application:set_env(riak_repl, clustername, Name).
+object_filtering_clear_config_helper(all) ->
+    riak_repl2_object_filter:set_config(loaded_repl, []),
+    riak_repl2_object_filter:set_config(loaded_realtime, []),
+    riak_repl2_object_filter:set_config(loaded_fullsync, []),
+    riak_repl2_object_filter:set_config(realtime, []),
+    riak_repl2_object_filter:set_config(fullsync, []),
+    ok;
+object_filtering_clear_config_helper(repl) ->
+    merge_and_load_configs(repl, []);
+object_filtering_clear_config_helper(realtime) ->
+    merge_and_load_configs(realtime, []);
+object_filtering_clear_config_helper(fullsync) ->
+    merge_and_load_configs(fullsync, []);
+object_filtering_clear_config_helper(Mode) ->
+    return_error_unknown_repl_mode(object_filtering_clear_config, Mode).
 %% ====================================================================================================================
 invalid_rule(RemoteName, allowed, Rule) -> {error, {invalid_rule_type_allowed, riak_repl2_object_filter:get_version(), RemoteName, Rule}};
 invalid_rule(RemoteName, blocked, Rule) -> {error, {invalid_rule_type_blocked, riak_repl2_object_filter:get_version(), RemoteName, Rule}}.

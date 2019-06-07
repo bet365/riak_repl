@@ -36,11 +36,13 @@ setup() ->
     meck:new(riak_core_metadata, [passthrough]),
     meck:expect(riak_core_metadata, get, 2,
         fun
-            ({riak_repl2_object_filter, config}, _) -> [];
-            ({riak_repl2_object_filter, status}, _) -> disabled
-
+            (B, K) ->
+                app_helper:get_env(B, K)
         end),
-    meck:expect(riak_core_metadata, put, 3, fun(_,_,_) -> ok end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
 
     App1 = riak_repl_test_util:start_lager(),
     App2 = riak_repl2_object_filter_console:start_link(),

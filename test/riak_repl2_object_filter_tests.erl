@@ -35,8 +35,7 @@ setup() ->
     catch(meck:unload(riak_core_metadata)),
     meck:new(riak_core_metadata, [passthrough]),
     meck:expect(riak_core_metadata, get, 2,
-        fun
-            (B, K) ->
+        fun(B, K) ->
                 app_helper:get_env(B, K)
         end),
     meck:expect(riak_core_metadata, put, 3,

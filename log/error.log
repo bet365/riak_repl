@@ -1,0 +1,2 @@
+2019-06-07 16:14:48.372 [error] <0.19419.1> gen_server riak_repl2_rtq terminated with reason: bad argument in call to ets:lookup(metadata_manager_prefixes_ets, {riak_repl2_object_filter,status}) in riak_core_metadata_manager:ets_tab/1 line 603
+2019-06-07 16:14:48.373 [error] <0.19419.1> CRASH REPORT Process <0.19419.1> with 1 neighbours exited with reason: bad argument in call to ets:lookup(metadata_manager_prefixes_ets, {riak_repl2_object_filter,status}) in riak_core_metadata_manager:ets_tab/1 line 603

@@ -54,8 +54,7 @@
          object_filtering_check_config/1,
          object_filtering_status_all/1,
          object_filtering_status/1,
-         object_filtering_print_config/1,
-         object_filtering_force_update/1]).
+         object_filtering_print_config/1]).
 
 add_listener(Params) ->
     lager:warning(?V2REPLDEP, []),

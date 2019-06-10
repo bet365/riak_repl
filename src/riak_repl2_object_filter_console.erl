@@ -37,9 +37,7 @@
 
 -define(SERVER, ?MODULE).
 -record(state, {}).
-
 -define(CURRENT_VERSION, 1.0).
--define(RETRY_UPDATE, 6).
 
 
 %%%===================================================================

@@ -1187,8 +1187,3 @@ object_filtering_print_config([Mode]) ->
     riak_repl2_object_filter_console:get_config(Mode);
 object_filtering_print_config([Mode, Remote]) ->
     riak_repl2_object_filter_console:get_config(Mode, Remote).
-
-object_filtering_force_update([]) ->
-    riak_repl2_object_filter_console:force_update();
-object_filtering_force_update([Command]) ->
-    riak_repl2_object_filter_console:force_update(Command).

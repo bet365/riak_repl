@@ -43,6 +43,17 @@ setup() ->
     meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, split) -> {ok, {[],[]}} end ),
     meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, _) -> {ok,[]} end ),
 
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     folsom:start(),
     error_logger:tty(false),
     riak_repl_test_util:start_test_ring(),
@@ -145,10 +156,22 @@ v2_to_v2_comms_setup() ->
     meck:expect(poolboy, checkout, fun(_ServName, _SomeBool, _Timeout) ->
                                            spawn(fun() -> ok end)
                                    end),
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     {Source, Sink}.
 
 v2_to_v2_comms_cleanup({Source, Sink}) ->
     meck:unload(poolboy),
+    catch(meck:unload(riak_core_metadata)),
     connection_test_teardown_pids(Source, Sink).
 
 v1_to_v1_comms(_State) ->
@@ -202,6 +225,18 @@ v1_to_v1_setup() ->
     {ok, _ListenPid} = start_sink(?VER1),
     {ok, {Source, Sink}} = start_source(?VER1),
     meck:new(poolboy, [passthrough]),
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     meck:expect(poolboy, checkout, fun(_ServName, _SomeBool, _Timeout) ->
                                            spawn(fun() -> ok end)
                                    end),
@@ -209,6 +244,7 @@ v1_to_v1_setup() ->
 
 v1_to_v1_cleanup({Source, Sink}) ->
     meck:unload(poolboy),
+    catch(meck:unload(riak_core_metadata)),
     connection_test_teardown_pids(Source, Sink).
 
 assert_living_pids([]) ->

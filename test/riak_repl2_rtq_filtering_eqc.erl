@@ -68,6 +68,17 @@ setup() ->
     ok = meck:expect(riak_repl_stats, rt_sink_errors,
         fun() -> ok end),
 
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     folsom:start(),
 
     ok.
@@ -76,6 +87,7 @@ cleanup(_) ->
     kill_and_wait(riak_repl2_rtq),
     application:unset_env(riak_repl, rtq_max_bytes),
     catch(meck:unload(riak_repl_stats)),
+    catch(meck:unload(riak_core_metadata)),
     meck:unload(),
     ok.
 

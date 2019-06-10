@@ -6,6 +6,18 @@
 -define(CLEAN_ENV, application:unset_env(riak_repl, rtq_max_bytes)).
 
 rtq_trim_test() ->
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     folsom:start(),
     %% make sure the queue is 10mb
     ?SETUP_ENV,
@@ -23,6 +35,7 @@ rtq_trim_test() ->
         %% the queue is now empty
         ?assert(gen_server:call(Pid, {is_empty, rtq_test}))
     after
+        catch(meck:unload(riak_core_metadata)),
         ?CLEAN_ENV,
         exit(Pid, kill)
     end.
@@ -53,11 +66,24 @@ set_filtering_rules(Pid) ->
 
 status_test_() ->
     {setup, fun() ->
+
+        catch(meck:unload(riak_core_metadata)),
+        meck:new(riak_core_metadata, [passthrough]),
+        meck:expect(riak_core_metadata, get, 2,
+            fun(B, K) ->
+                app_helper:get_env(B, K)
+            end),
+        meck:expect(riak_core_metadata, put, 3,
+            fun(B,K, V) ->
+                application:set_env(B, K, V)
+            end),
+
         ?SETUP_ENV,
         {ok, QPid} = riak_repl2_rtq:start_link(),
         QPid
     end,
     fun(QPid) ->
+        catch(meck:unload(riak_core_metadata)),
         ?CLEAN_ENV,
         riak_repl_test_util:kill_and_wait(QPid)
     end,
@@ -137,6 +163,17 @@ evict_test_() ->
 overload_protection_start_test_() ->
     [
         {"able to start after a crash without ets errors", fun() ->
+            catch(meck:unload(riak_core_metadata)),
+            meck:new(riak_core_metadata, [passthrough]),
+            meck:expect(riak_core_metadata, get, 2,
+                fun(B, K) ->
+                    app_helper:get_env(B, K)
+                end),
+            meck:expect(riak_core_metadata, put, 3,
+                fun(B,K, V) ->
+                    application:set_env(B, K, V)
+                end),
+
             {ok, Rtq1} = riak_repl2_rtq:start_link(),
             unlink(Rtq1),
             exit(Rtq1, kill),
@@ -145,18 +182,42 @@ overload_protection_start_test_() ->
             ?assertMatch({ok, _Pid}, Got),
             riak_repl2_rtq:stop(),
             catch exit(whereis(riak_repl2_rtq), kill),
-            ets:delete(rtq_overload_ets)
+            ets:delete(rtq_overload_ets),
+            catch(meck:unload(riak_core_metadata))
         end},
 
         {"start with overload and recover options", fun() ->
+            catch(meck:unload(riak_core_metadata)),
+            meck:new(riak_core_metadata, [passthrough]),
+            meck:expect(riak_core_metadata, get, 2,
+                fun(B, K) ->
+                    app_helper:get_env(B, K)
+                end),
+            meck:expect(riak_core_metadata, put, 3,
+                fun(B,K, V) ->
+                    application:set_env(B, K, V)
+                end),
+
             Got = riak_repl2_rtq:start_link([{overload_threshold, 5000}, {overload_recover, 2500}]),
             ?assertMatch({ok, _Pid}, Got),
             riak_repl2_rtq:stop(),
             catch exit(whereis(riak_repl2_rtq), kill),
-            ets:delete(rtq_overload_ets)
+            ets:delete(rtq_overload_ets),
+            catch(meck:unload(riak_core_metadata))
         end},
 
         {"start the rtq overload counter process", fun() ->
+            catch(meck:unload(riak_core_metadata)),
+            meck:new(riak_core_metadata, [passthrough]),
+            meck:expect(riak_core_metadata, get, 2,
+                fun(B, K) ->
+                    app_helper:get_env(B, K)
+                end),
+            meck:expect(riak_core_metadata, put, 3,
+                fun(B,K, V) ->
+                    application:set_env(B, K, V)
+                end),
+
             Got1 = riak_repl2_rtq_overload_counter:start_link(),
             ?assertMatch({ok, _Pid}, Got1),
             {ok, Pid1} = Got1,
@@ -165,7 +226,8 @@ overload_protection_start_test_() ->
             riak_repl_test_util:wait_until_down(Pid1),
             Got2 = riak_repl2_rtq_overload_counter:start_link([{report_interval, 20}]),
             ?assertMatch({ok, _Pid}, Got2),
-            riak_repl2_rtq_overload_counter:stop()
+            riak_repl2_rtq_overload_counter:stop(),
+            catch(meck:unload(riak_core_metadata))
         end}
 
     ].
@@ -173,6 +235,18 @@ overload_protection_start_test_() ->
 overload_test_() ->
     {foreach,
      fun() ->
+
+         catch(meck:unload(riak_core_metadata)),
+         meck:new(riak_core_metadata, [passthrough]),
+         meck:expect(riak_core_metadata, get, 2,
+             fun(B, K) ->
+                 app_helper:get_env(B, K)
+             end),
+         meck:expect(riak_core_metadata, put, 3,
+             fun(B,K, V) ->
+                 application:set_env(B, K, V)
+             end),
+
         % if you want lager started, and you're using bash, you can put
         % ENABLE_LAGER=TRUE in front of whatever you're using to run the tests
         % (make test, rebar eunit) and it will turn on lager for you.
@@ -191,6 +265,7 @@ overload_test_() ->
     fun(_) ->
             riak_repl2_rtq_overload_counter:stop(),
             riak_repl2_rtq:stop(),
+            catch(meck:unload(riak_core_metadata)),
             catch exit(whereis(riak_repl2_rtq), kill),
             catch exit(whereis(riak_repl2_rtq_overload_counter), kill),
             ets:delete(rtq_overload_ets),
@@ -280,12 +355,25 @@ overload_test_() ->
     ]}.
 
 start_rtq() ->
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     ?SETUP_ENV,
     {ok, Pid} = riak_repl2_rtq:start_link(),
     gen_server:call(Pid, {register, rtq_test}),
     Pid.
 
 kill_rtq(QPid) ->
+    catch(meck:unload(riak_core_metadata)),
     ?CLEAN_ENV,
     riak_repl_test_util:kill_and_wait(QPid).
 

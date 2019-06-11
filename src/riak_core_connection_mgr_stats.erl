@@ -22,6 +22,9 @@
 %%
 %% -------------------------------------------------------------------
 
+%% TODO: change the metric registration to exometer, redirect all folsom
+%% functions to the stat_mngr and on to exom_mgr.
+
 -module(riak_core_connection_mgr_stats).
 -author("Chris Tilt").
 
@@ -47,10 +50,12 @@
 start_link() ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
-register_stats() ->
-  _ = [(catch folsom_metrics:delete_metric(Stat)) ||
-    Stat <- folsom_metrics:get_metrics(),
+%% TODO: investigate the folsom_metric:get_metrics function call
+register_stats() -> % whyy delete_metric?
+  _ = [(catch folsom_metrics:delete_metric(Stat)) || %TODO: folsom stats to exometer?
+    Stat <- folsom_metrics:get_metrics(), %  TODO: register stats in exometer
     is_tuple(Stat), element(1, Stat) == ?APP],
+  %% TODO: all register app functions can go to the stat_app_mgr
   riak_core_stat_cache:register_app(?APP, {?MODULE, produce_stats, []}).
 
 %% @spec get_stats() -> proplist()
@@ -264,7 +269,7 @@ do_update(Stat, IPAddr, Protocol) ->
 %% dynamically update (and create if needed) a stat
 create_or_update(Name, UpdateVal, Type) ->
   case (catch folsom_metrics:notify_existing_metric(Name, UpdateVal, Type)) of
-    ok ->
+    ok -> % TODO: riak_stat_mngr:notify
       ok;
     {'EXIT', _} ->
       register_stat(Name, Type),
@@ -272,9 +277,9 @@ create_or_update(Name, UpdateVal, Type) ->
   end.
 
 register_stat(Name, spiral) ->
-  ok = folsom_metrics:new_spiral(Name);
+  ok = folsom_metrics:new_spiral(Name); % TODO: ri_s_mngr:new_spiral
 register_stat(Name, counter) ->
-  ok = folsom_metrics:new_counter(Name).
+  ok = folsom_metrics:new_counter(Name).% tODO: as above
 
 %% @spec produce_stats() -> proplist()
 %% @doc Produce a proplist-formatted view of the current aggregation
@@ -286,4 +291,4 @@ produce_stats() ->
 %% Get the value of the named stats metric
 %% NOTE: won't work for Histograms
 get_stat(Name) ->
-  folsom_metrics:get_metric_value(Name).
+  folsom_metrics:get_metric_value(Name). % TODO: definitely change to exometer?

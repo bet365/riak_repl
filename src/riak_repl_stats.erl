@@ -53,10 +53,10 @@ stop() ->
 register_stats() ->
     _ = [reregister_stat(Name, Type) || {Name, Type} <- stats()],
     riak_core_stat_cache:register_app(?APP, {?MODULE, produce_stats, []}),
-    ok = folsom_metrics:notify_existing_metric({?APP, last_report}, tstamp(), gauge).
+    ok = notify({?APP, last_report}, tstamp(), gauge).
 
 reregister_stat(Name, Type) ->
-    catch folsom_metrics:delete_metric({?APP, Name}),
+    catch delete({?APP, Name}),
     register_stat(Name, Type).
 
 client_bytes_sent(Bytes) ->
@@ -147,8 +147,13 @@ rt_dirty() ->
         false -> ok
     end.
 
+notify(Name, Value, Type) ->
+  riak_stat_mngr:notify(Name, Value, Type).
 
-get_stats() ->
+delete(Arg) ->
+  riak_stat_mngr:delete_metric(Arg).
+
+get_stats() -> % TODO: look for more functions like this and abstract it out
     case erlang:whereis(riak_repl_stats) of
         Pid when is_pid(Pid) ->
             {ok, Stats, _TS} = riak_core_stat_cache:get_stats(?APP),
@@ -166,7 +171,7 @@ init([]) ->
     case is_rt_dirty() of
         true ->
             lager:warning("RT marked as dirty upon startup"),
-            ok = folsom_metrics:notify_existing_metric({?APP, rt_dirty}, {inc, 1}, counter),
+            ok = notify({?APP, rt_dirty}, {inc, 1}, counter),
             % let the coordinator know about the dirty state when the node
             % comes back up
             lager:debug("Notifying coordinator of rt_dirty state"),
@@ -177,12 +182,12 @@ init([]) ->
     {ok, ok}.
 
 register_stat(Name, counter) ->
-    ok = folsom_metrics:new_counter({?APP, Name});
+    ok = riak_stat_mngr:counter({?APP, Name});
 register_stat(Name, history) ->
     BwHistoryLen =  get_bw_history_len(),
-    ok = folsom_metrics:new_history({?APP, Name}, BwHistoryLen);
+    ok = riak_stat_mngr:history({?APP, Name}, BwHistoryLen);
 register_stat(Name, gauge) ->
-    ok = folsom_metrics:new_gauge({?APP, Name}).
+    ok = riak_stat_mngr:gauge({?APP, Name}).
 
 stats() ->
     [{server_bytes_sent, counter},
@@ -224,7 +229,7 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({increment_counter, Name, IncrBy}, State) ->
-    ok = folsom_metrics:notify_existing_metric({?APP, Name}, {inc, IncrBy}, counter),
+    ok = notify({?APP, Name}, {inc, IncrBy}, counter),
     {noreply, State};
 handle_cast(stop, State) ->
     {stop, normal, State};
@@ -244,20 +249,20 @@ handle_info(report_bw, State) ->
     ServerTx = bytes_to_kbits_per_sec(ThisServerBytesSent, lookup_stat(last_server_bytes_sent), DeltaSecs),
     ServerRx = bytes_to_kbits_per_sec(ThisServerBytesRecv, lookup_stat(last_server_bytes_recv), DeltaSecs),
 
-    _ = [ok = folsom_metrics:notify_existing_metric({?APP, Metric}, Reading, history)
+    _ = [ok = notify({?APP, Metric}, Reading, history)
      || {Metric, Reading} <- [{client_tx_kbps, ClientTx},
                               {client_rx_kbps, ClientRx},
                               {server_tx_kbps, ServerTx},
                               {server_rx_kbps, ServerRx}]],
 
-    _ = [ok = folsom_metrics:notify_existing_metric({?APP, Metric}, Reading, gauge)
+    _ = [ok = notify({?APP, Metric}, Reading, gauge)
      || {Metric, Reading} <- [{last_client_bytes_sent, ThisClientBytesSent},
                               {last_client_bytes_recv, ThisClientBytesRecv},
                               {last_server_bytes_sent, ThisServerBytesSent},
                               {last_server_bytes_recv, ThisServerBytesRecv}]],
 
     schedule_report_bw(),
-    ok = folsom_metrics:notify_existing_metric({?APP, last_report}, Now, gauge),
+    ok = notify({?APP, last_report}, Now, gauge),
     {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 
@@ -275,7 +280,7 @@ bytes_to_kbits_per_sec(_, _, _) ->
     undefined.
 
 lookup_stat(Name) ->
-    folsom_metrics:get_metric_value({?APP, Name}).
+    riak_stat_mngr:get_fol_val({?APP, Name}).
 
 now_diff(NowSecs, ThenSecs) when is_number(NowSecs), is_number(ThenSecs) ->
     NowSecs - ThenSecs;
@@ -283,7 +288,7 @@ now_diff(_, _) ->
     undefined.
 
 tstamp() ->
-    folsom_utils:now_epoch().
+    folsom_utils:now_epoch(). %% TODO: change this to exometer?
 
 get_bw_history_len() ->
     app_helper:get_env(riak_repl, bw_history_len, 8).
@@ -324,7 +329,7 @@ remove_rt_dirty_file() ->
 
 
 clear_rt_dirty() ->
-    remove_rt_dirty_file(),
+    remove_rt_dirty_file(), % TODO: sort this out
     %% folsom_metrics:notify_existing_metric doesn't support clear yet
     folsom_metrics_counter:clear({riak_repl, rt_dirty}).
 
@@ -344,7 +349,7 @@ is_rt_dirty() ->
 repl_stats_test_() ->
     error_logger:tty(false),
     {"stats test", setup, fun() ->
-                    folsom:start(),
+                    folsom:start(), % TODO: need to change folsom to exometer
                     meck:new(folsom_utils, [passthrough]),
                     meck:new(riak_core_cluster_mgr, [passthrough]),
                     meck:new(riak_repl2_fscoordinator_sup, [passthrough]),
@@ -458,7 +463,7 @@ for_n_minutes(0, _Time, _Bytes) ->
     ok;
 for_n_minutes(Minutes, Time0, Bytes) ->
     Time = tick(Time0, 60),
-    [folsom_metrics:notify_existing_metric({?APP, Name},
+    [notify({?APP, Name},
                                            {inc, Bytes},
                                            counter) || Name <-
                                                            [client_bytes_sent,

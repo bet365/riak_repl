@@ -51,13 +51,14 @@ stop() ->
     gen_server:cast(?MODULE, stop).
 
 register_stats() ->
-    _ = [reregister_stat(Name, Type) || {Name, Type} <- stats()],
+  riak_stat_mngr:register_stats(?APP, stats()),
+%%    _ = [reregister_stat(Name, Type) || {Name, Type} <- stats()],
     riak_core_stat_cache:register_app(?APP, {?MODULE, produce_stats, []}),
-    ok = notify({?APP, last_report}, tstamp(), gauge).
+    update(last_report, tstamp(), gauge).
 
-reregister_stat(Name, Type) ->
-    catch delete({?APP, Name}),
-    register_stat(Name, Type).
+%%reregister_stat(Name, Type) ->
+%%    catch delete({?APP, Name}),
+%%    register_stat(Name, Type).
 
 client_bytes_sent(Bytes) ->
     increment_counter(client_bytes_sent, Bytes).
@@ -147,13 +148,15 @@ rt_dirty() ->
         false -> ok
     end.
 
-notify(Name, Value, Type) ->
-  riak_stat_mngr:notify(Name, Value, Type).
+update(Name, IncrBy, Type) ->
+  riak_stat_mngr:update_or_create(?APP, Name, IncrBy, Type).
+%%notify(Name, Value, Type) ->
+%%  riak_stat_mngr:notify(Name, Value, Type).
 
-delete(Arg) ->
-  riak_stat_mngr:delete_metric(Arg).
+%%delete(Arg) ->
+%%  riak_stat_mngr:delete_metric(Arg).
 
-get_stats() -> % TODO: look for more functions like this and abstract it out
+get_stats() ->
     case erlang:whereis(riak_repl_stats) of
         Pid when is_pid(Pid) ->
             {ok, Stats, _TS} = riak_core_stat_cache:get_stats(?APP),
@@ -171,7 +174,7 @@ init([]) ->
     case is_rt_dirty() of
         true ->
             lager:warning("RT marked as dirty upon startup"),
-            ok = notify({?APP, rt_dirty}, {inc, 1}, counter),
+            update(rt_dirty, 1, counter),
             % let the coordinator know about the dirty state when the node
             % comes back up
             lager:debug("Notifying coordinator of rt_dirty state"),
@@ -181,13 +184,14 @@ init([]) ->
     end,
     {ok, ok}.
 
-register_stat(Name, counter) ->
-    ok = riak_stat_mngr:counter({?APP, Name});
-register_stat(Name, history) ->
-    BwHistoryLen =  get_bw_history_len(),
-    ok = riak_stat_mngr:history({?APP, Name}, BwHistoryLen);
-register_stat(Name, gauge) ->
-    ok = riak_stat_mngr:gauge({?APP, Name}).
+%%% Histogram length is decided default in exometer
+%%register_stat(Name, counter) ->
+%%    ok = riak_stat_mngr:counter({?APP, Name});
+%%register_stat(Name, history) ->
+%%    BwHistoryLen =  get_bw_history_len(),
+%%    ok = riak_stat_mngr:history({?APP, Name}, BwHistoryLen);
+%%register_stat(Name, gauge) ->
+%%    ok = riak_stat_mngr:gauge({?APP, Name}).
 
 stats() ->
     [{server_bytes_sent, counter},
@@ -206,10 +210,10 @@ stats() ->
      {objects_forwarded, counter},
      {elections_elected, counter},
      {elections_leader_changed, counter},
-     {client_rx_kbps, history},
-     {client_tx_kbps, history},
-     {server_rx_kbps, history},
-     {server_tx_kbps, history},
+     {client_rx_kbps, histogram},
+     {client_tx_kbps, histogram},
+     {server_rx_kbps, histogram},
+     {server_tx_kbps, histogram},
      {last_report, gauge},
      {last_client_bytes_sent, gauge},
      {last_client_bytes_recv, gauge},
@@ -229,7 +233,8 @@ handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
 handle_cast({increment_counter, Name, IncrBy}, State) ->
-    ok = notify({?APP, Name}, {inc, IncrBy}, counter),
+    update(Name, IncrBy, counter),
+%%    ok = notify({?APP, Name}, {inc, IncrBy}, counter),
     {noreply, State};
 handle_cast(stop, State) ->
     {stop, normal, State};
@@ -249,20 +254,20 @@ handle_info(report_bw, State) ->
     ServerTx = bytes_to_kbits_per_sec(ThisServerBytesSent, lookup_stat(last_server_bytes_sent), DeltaSecs),
     ServerRx = bytes_to_kbits_per_sec(ThisServerBytesRecv, lookup_stat(last_server_bytes_recv), DeltaSecs),
 
-    _ = [ok = notify({?APP, Metric}, Reading, history)
+    _ = [update(Metric, Reading, histogram)
      || {Metric, Reading} <- [{client_tx_kbps, ClientTx},
                               {client_rx_kbps, ClientRx},
                               {server_tx_kbps, ServerTx},
                               {server_rx_kbps, ServerRx}]],
 
-    _ = [ok = notify({?APP, Metric}, Reading, gauge)
+    _ = [update(Metric, Reading, gauge)
      || {Metric, Reading} <- [{last_client_bytes_sent, ThisClientBytesSent},
                               {last_client_bytes_recv, ThisClientBytesRecv},
                               {last_server_bytes_sent, ThisServerBytesSent},
                               {last_server_bytes_recv, ThisServerBytesRecv}]],
 
     schedule_report_bw(),
-    ok = notify({?APP, last_report}, Now, gauge),
+    update(last_report, Now, gauge),
     {noreply, State};
 handle_info(_Info, State) -> {noreply, State}.
 
@@ -280,7 +285,7 @@ bytes_to_kbits_per_sec(_, _, _) ->
     undefined.
 
 lookup_stat(Name) ->
-    riak_stat_mngr:get_fol_val({?APP, Name}).
+    riak_stat_mngr:get_value(Name).
 
 now_diff(NowSecs, ThenSecs) when is_number(NowSecs), is_number(ThenSecs) ->
     NowSecs - ThenSecs;
@@ -293,9 +298,12 @@ tstamp() ->
 get_bw_history_len() ->
     app_helper:get_env(riak_repl, bw_history_len, 8).
 
-backwards_compat(Name, history) ->
+
+% TODO: change this to be compatible with exometer?
+backwards_compat(Name, histogram) ->
     Stats = folsom_metrics:get_history_values({?APP, Name}, get_bw_history_len()),
-    Readings = [[Reading || {event, Reading} <- Events] || {_Moment, Events} <- Stats],
+
+  Readings = [[Reading || {event, Reading} <- Events] || {_Moment, Events} <- Stats],
     {Name, lists:flatten(Readings)};
 backwards_compat(_Name, gauge) ->
     [];
@@ -349,7 +357,7 @@ is_rt_dirty() ->
 repl_stats_test_() ->
     error_logger:tty(false),
     {"stats test", setup, fun() ->
-                    folsom:start(), % TODO: need to change folsom to exometer
+                    riak_stat_mngr:start(), % TODO: need to change folsom to exometer
                     meck:new(folsom_utils, [passthrough]),
                     meck:new(riak_core_cluster_mgr, [passthrough]),
                     meck:new(riak_repl2_fscoordinator_sup, [passthrough]),
@@ -358,13 +366,12 @@ repl_stats_test_() ->
                     meck:expect(riak_repl2_fscoordinator_sup, started,
                         fun(_Node) -> [] end),
                     {ok, _CPid} = riak_core_stat_cache:start_link(),
-                    {ok, Pid} = riak_repl_stats:start_link(),
+                    {ok, Pid} = start_link(),
                     tick(1000, 0),
                     Pid
             end,
      fun(_Pid) ->
-             folsom:stop(),
-             riak_repl_stats:stop(),
+             stop(),
              riak_core_stat_cache:stop(),
              meck:unload(folsom_utils),
              meck:unload(riak_core_cluster_mgr),
@@ -379,7 +386,7 @@ repl_stats_test_() ->
 test_register_stats() ->
    error_logger:tty(false),
     register_stats(),
-    RegisteredReplStats = [Stat || {App, Stat} <- folsom_metrics:get_metrics(),
+    RegisteredReplStats = [Stat || {App, Stat} <- get_stats(),
                                    App == riak_repl],
     {Stats, _Types} = lists:unzip(stats()),
     ?assertEqual(lists:sort(Stats), lists:sort(RegisteredReplStats)).
@@ -463,15 +470,14 @@ for_n_minutes(0, _Time, _Bytes) ->
     ok;
 for_n_minutes(Minutes, Time0, Bytes) ->
     Time = tick(Time0, 60),
-    [notify({?APP, Name},
-                                           {inc, Bytes},
+    [update(Name, Bytes,
                                            counter) || Name <-
                                                            [client_bytes_sent,
                                                             client_bytes_recv,
                                                             server_bytes_sent,
                                                             server_bytes_recv]],
 
-    riak_repl_stats:handle_info(report_bw, ok),
+    handle_info(report_bw, ok),
     for_n_minutes(Minutes - 1, Time, Bytes).
 
 tick(Time, Interval) ->

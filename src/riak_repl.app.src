@@ -12,6 +12,7 @@
                   ebloom,
                   riak_core,
                   riak_kv,
+                  riak_stat,
                   ranch]},
   {registered,   [riak_repl_connector_sup,
                   riak_repl_leader,

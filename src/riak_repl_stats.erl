@@ -43,6 +43,7 @@
          remove_rt_dirty_file/0,
          is_rt_dirty/0]).
 
+-define(PFX, riak_stat_mngr:prefix()).
 -define(APP, riak_repl).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -51,14 +52,18 @@ stop() ->
     gen_server:cast(?MODULE, stop).
 
 register_stats() ->
-  riak_stat_mngr:register_stats(?APP, stats()),
+  register_stats(stats()),
 %%    _ = [reregister_stat(Name, Type) || {Name, Type} <- stats()],
     riak_core_stat_cache:register_app(?APP, {?MODULE, produce_stats, []}),
     update(last_report, tstamp(), gauge).
 
+register_stats(Stats) ->
+  riak_stat_mngr:register_stats(?APP, Stats).
+
 %%reregister_stat(Name, Type) ->
 %%    catch delete({?APP, Name}),
 %%    register_stat(Name, Type).
+
 
 client_bytes_sent(Bytes) ->
     increment_counter(client_bytes_sent, Bytes).
@@ -165,8 +170,18 @@ get_stats() ->
     end.
 
 produce_stats() ->
-    lists:flatten([backwards_compat(Stat, Type) ||
-        {Stat, Type} <- stats()]).
+  [print_stats(find_entries(stat_name(Stat), enabled), []) || {Stat, _Type} <- stats()].
+%%  lists:flatten([backwards_compat(Stat, Type) ||
+%%        {Stat, _Type} <- stats()]).
+
+print_stats(Arg, Attr) ->
+  riak_stat_assist_mgr:print_stats(Arg, Attr).
+
+find_entries(Arg, Status) ->
+  riak_stat_assist_mgr:find_entries(Arg, Status).
+
+stat_name(Name) ->
+  riak_stat_mngr:stat_name(?PFX, ?APP, Name).
 
 init([]) ->
     register_stats(),
@@ -187,7 +202,7 @@ init([]) ->
 %%% Histogram length is decided default in exometer
 %%register_stat(Name, counter) ->
 %%    ok = riak_stat_mngr:counter({?APP, Name});
-%%register_stat(Name, history) ->
+%%register_stat(Name, histogram) ->
 %%    BwHistoryLen =  get_bw_history_len(),
 %%    ok = riak_stat_mngr:history({?APP, Name}, BwHistoryLen);
 %%register_stat(Name, gauge) ->
@@ -223,6 +238,7 @@ stats() ->
      {rt_sink_errors, counter},
      {rt_dirty, counter}].
 
+
 increment_counter(Name) ->
     increment_counter(Name, 1).
 
@@ -231,6 +247,7 @@ increment_counter(Name, IncrBy) when is_atom(Name) andalso is_integer(IncrBy) ->
 
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
+
 
 handle_cast({increment_counter, Name, IncrBy}, State) ->
     update(Name, IncrBy, counter),
@@ -293,22 +310,23 @@ now_diff(_, _) ->
     undefined.
 
 tstamp() ->
-    folsom_utils:now_epoch(). %% TODO: change this to exometer?
+%%    folsom_utils:now_epoch(). %% exometer does this in a similar way
+  riak_stat_mngr:timestamp().
 
-get_bw_history_len() ->
-    app_helper:get_env(riak_repl, bw_history_len, 8).
+%%get_bw_history_len() ->
+%%    app_helper:get_env(riak_repl, bw_history_len, 8).
 
 
-% TODO: change this to be compatible with exometer?
-backwards_compat(Name, histogram) ->
-    Stats = folsom_metrics:get_history_values({?APP, Name}, get_bw_history_len()),
 
-  Readings = [[Reading || {event, Reading} <- Events] || {_Moment, Events} <- Stats],
-    {Name, lists:flatten(Readings)};
-backwards_compat(_Name, gauge) ->
-    [];
-backwards_compat(Name,  _Type) ->
-    {Name, lookup_stat(Name)}.
+%%backwards_compat(Name, histogram) ->
+%%    Stats = folsom_metrics:get_history_values({?APP, Name}, get_bw_history_len()),
+%%  Stats = riak_stat_mngr:get_values([?PFX, ?APP | Name]),
+%%  Readings = [[Reading || {event, Reading} <- Events] || {_Moment, Events} <- Stats],
+%%    {Name, lists:flatten(Readings)};
+%%backwards_compat(_Name, gauge) ->
+%%    [];
+%%backwards_compat(Name,  _Type) ->
+%%    {Name, lookup_stat(Name)}.
 
 rt_dirty_filename() ->
     %% or riak_repl/work_dir?
@@ -337,9 +355,12 @@ remove_rt_dirty_file() ->
 
 
 clear_rt_dirty() ->
-    remove_rt_dirty_file(), % TODO: sort this out
+    remove_rt_dirty_file(), %
     %% folsom_metrics:notify_existing_metric doesn't support clear yet
-    folsom_metrics_counter:clear({riak_repl, rt_dirty}).
+%%    folsom_metrics_counter:clear({riak_repl, rt_dirty}).
+    riak_stat_mngr:register_stats(?APP, {rt_dirty, counter}).
+    % re_registers so it is reset
+
 
 is_rt_dirty() ->
     DirtyRTFile = rt_dirty_filename(),
@@ -357,7 +378,7 @@ is_rt_dirty() ->
 repl_stats_test_() ->
     error_logger:tty(false),
     {"stats test", setup, fun() ->
-                    riak_stat_mngr:start(), % TODO: need to change folsom to exometer
+                    riak_stat_mngr:start(),
                     meck:new(folsom_utils, [passthrough]),
                     meck:new(riak_core_cluster_mgr, [passthrough]),
                     meck:new(riak_repl2_fscoordinator_sup, [passthrough]),

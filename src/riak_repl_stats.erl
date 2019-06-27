@@ -58,7 +58,8 @@ register_stats() ->
     update(last_report, tstamp(), gauge).
 
 register_stats(Stats) ->
-  riak_stat_mngr:register_stats(?APP, Stats).
+  riak_stat_coordinator:coordinate(admin, {register, {?APP, Stats}}).
+%%  riak_stat_mngr:register_stats(?APP, Stats).
 
 %%reregister_stat(Name, Type) ->
 %%    catch delete({?APP, Name}),
@@ -154,7 +155,9 @@ rt_dirty() ->
     end.
 
 update(Name, IncrBy, Type) ->
-  riak_stat_mngr:update_or_create(?APP, Name, IncrBy, Type).
+  riak_stat_coordinator:coordinate(exometer,
+    {update, {lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type}}).
+%%  riak_stat_mngr:update_or_create(?APP, Name, IncrBy, Type).
 %%notify(Name, Value, Type) ->
 %%  riak_stat_mngr:notify(Name, Value, Type).
 

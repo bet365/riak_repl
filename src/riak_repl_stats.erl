@@ -43,7 +43,7 @@
          remove_rt_dirty_file/0,
          is_rt_dirty/0]).
 
--define(PFX, riak_stat_mngr:prefix()).
+-define(PFX, riak_stat_admin:prefix()).
 -define(APP, riak_repl).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -58,7 +58,7 @@ register_stats() ->
     update(last_report, tstamp(), gauge).
 
 register_stats(Stats) ->
-  riak_stat_coordinator:coordinate(admin, {register, {?APP, Stats}}).
+  riak_stat:register(?APP, Stats).
 %%  riak_stat_mngr:register_stats(?APP, Stats).
 
 %%reregister_stat(Name, Type) ->
@@ -155,11 +155,11 @@ rt_dirty() ->
     end.
 
 update(Name, IncrBy, Type) ->
-  riak_stat_coordinator:coordinate(exometer,
-    {update, {lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type}}).
+  riak_stat:update(lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type).
 %%  riak_stat_mngr:update_or_create(?APP, Name, IncrBy, Type).
 %%notify(Name, Value, Type) ->
 %%  riak_stat_mngr:notify(Name, Value, Type).
+
 
 %%delete(Arg) ->
 %%  riak_stat_mngr:delete_metric(Arg).
@@ -178,13 +178,13 @@ produce_stats() ->
 %%        {Stat, _Type} <- stats()]).
 
 print_stats(Arg, Attr) ->
-  riak_stat_assist_mgr:print_stats(Arg, Attr).
+  riak_stat_info:print(Arg, Attr).
 
 find_entries(Arg, Status) ->
-  riak_stat_assist_mgr:find_entries(Arg, Status).
+  riak_stat_data:find_entries(Arg, Status).
 
-stat_name(Name) ->
-  riak_stat_mngr:stat_name(?PFX, ?APP, Name).
+stat_name(Name) -> % get rid of this
+  riak_stat_admin:stat_name(?PFX, ?APP, Name).
 
 init([]) ->
     register_stats(),
@@ -305,7 +305,7 @@ bytes_to_kbits_per_sec(_, _, _) ->
     undefined.
 
 lookup_stat(Name) ->
-    riak_stat_mngr:get_value(Name).
+    riak_stat_exometer:get_value(Name). % todo: change to riak_stat
 
 now_diff(NowSecs, ThenSecs) when is_number(NowSecs), is_number(ThenSecs) ->
     NowSecs - ThenSecs;
@@ -314,7 +314,7 @@ now_diff(_, _) ->
 
 tstamp() ->
 %%    folsom_utils:now_epoch(). %% exometer does this in a similar way
-  riak_stat_mngr:timestamp().
+  riak_stat_exometer:timestamp().
 
 %%get_bw_history_len() ->
 %%    app_helper:get_env(riak_repl, bw_history_len, 8).
@@ -361,7 +361,7 @@ clear_rt_dirty() ->
     remove_rt_dirty_file(), %
     %% folsom_metrics:notify_existing_metric doesn't support clear yet
 %%    folsom_metrics_counter:clear({riak_repl, rt_dirty}).
-    riak_stat_mngr:register_stats(?APP, {rt_dirty, counter}).
+    riak_stat:register(?APP, [{rt_dirty, counter}]).
     % re_registers so it is reset
 
 

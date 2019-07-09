@@ -46,14 +46,15 @@
 
 -define(SERVER, ?MODULE).
 -define(APP, riak_conn_mgr_stats).
+-define(PFX, riak_stat:prefix()).
 
 start_link() ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %% TODO: investigate the folsom_metric:get_metrics function call
 register_stats() -> % whyy delete_metric?
-  _ = [(catch folsom_metrics:delete_metric(Stat)) || %TODO: folsom stats to exometer?
-    Stat <- folsom_metrics:get_metrics(), %  TODO: register stats in exometer
+  _ = [(catch riak_stat:unregister(Stat)) || %TODO: folsom stats to exometer?
+    Stat <- riak_stat:get_stats(), %  TODO: register stats in exometer
     is_tuple(Stat), element(1, Stat) == ?APP],
   %% TODO: all register app functions can go to the stat_app_mgr
   riak_core_stat_cache:register_app(?APP, {?MODULE, produce_stats, []}).
@@ -206,12 +207,7 @@ predicate_by_protocol(_X, _MatchId) ->
 
 %% Public interface to accumulate stats
 update(Stat, Addrs, ProtocolId) ->
-  case app_helper:get_env(?APP, stat) of
-    stats_off ->
-      ok;
-    stats_on ->
-      gen_server:cast(?SERVER, {update, Stat, Addrs, ProtocolId})
-  end.
+      gen_server:cast(?SERVER, {update, Stat, Addrs, ProtocolId}).
 
 %% gen_server
 
@@ -268,27 +264,33 @@ do_update(Stat, IPAddr, Protocol) ->
 
 %% dynamically update (and create if needed) a stat
 create_or_update(Name, UpdateVal, Type) ->
-  case (catch folsom_metrics:notify_existing_metric(Name, UpdateVal, Type)) of
-    ok -> % TODO: riak_stat_mngr:notify
-      ok;
-    {'EXIT', _} ->
-      register_stat(Name, Type),
-      create_or_update(Name, UpdateVal, Type)
-  end.
+%%  case (catch
+    riak_stat:update(Name, UpdateVal, Type).
+%%  of
+%%    ok -> %
+%%      ok;
+%%    {'EXIT', _} ->
+%%      register_stat(Name, Type).
+%%      create_or_update(Name, UpdateVal, Type)
+%%  end.
 
-register_stat(Name, spiral) ->
-  ok = folsom_metrics:new_spiral(Name); % TODO: ri_s_mngr:new_spiral
-register_stat(Name, counter) ->
-  ok = folsom_metrics:new_counter(Name).% tODO: as above
+%% create or update above uses just exometer:update, changed for riak_stat to
+%% update or create so only riak_stat:update(Name, Val, Type) is needed
+
+%%register_stat(Name, spiral) ->
+%%  ok = riak_stat:register(Name);
+%%register_stat(Name, counter) ->
+%%  ok = folsom_metrics:new_counter(Name).
 
 %% @spec produce_stats() -> proplist()
 %% @doc Produce a proplist-formatted view of the current aggregation
 %%      of stats.
 produce_stats() ->
-  Stats = [Stat || Stat <- folsom_metrics:get_metrics(), is_tuple(Stat), element(1, Stat) == ?APP],
+  Stats = [Stat || Stat <- riak_stat:get_stats(), is_tuple(Stat), element(1, Stat) == ?APP],
   lists:flatten([{Stat, get_stat(Stat)} || Stat <- Stats]).
 
 %% Get the value of the named stats metric
 %% NOTE: won't work for Histograms
+%% -> changed for ets:select
 get_stat(Name) ->
-  folsom_metrics:get_metric_value(Name). % TODO: definitely change to exometer?
+  riak_stat_coordinator:select([?PFX, ?APP | Name]).

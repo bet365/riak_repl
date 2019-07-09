@@ -35,6 +35,9 @@
          elections_leader_changed/0,
          register_stats/0,
          get_stats/0,
+         get_app_stats/0,
+         get_stats_status/0,
+         get_stats_info/0,
          produce_stats/0,
          rt_source_errors/0,
          rt_sink_errors/0,
@@ -43,7 +46,7 @@
          remove_rt_dirty_file/0,
          is_rt_dirty/0]).
 
--define(PFX, riak_stat_admin:prefix()).
+-define(PFX, riak_stat:prefix()).
 -define(APP, riak_repl).
 
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
@@ -178,13 +181,22 @@ produce_stats() ->
 %%        {Stat, _Type} <- stats()]).
 
 print_stats(Arg, Attr) ->
-  riak_stat_info:print(Arg, Attr).
+  riak_stat_admin:print(Arg, Attr).
 
 find_entries(Arg, Status) ->
-  riak_stat_data:find_entries(Arg, Status).
+  riak_stat_admin:find_entries(Arg, Status).
 
-stat_name(Name) -> % get rid of this
+stat_name(Name) ->
   riak_stat_admin:stat_name(?PFX, ?APP, Name).
+
+get_app_stats() ->
+  riak_stat:get_app_stats(?APP).
+
+get_stats_status() ->
+  riak_stat:get_stats_status(?APP).
+
+get_stats_info() ->
+  riak_stat:get_stats_info(?APP).
 
 init([]) ->
     register_stats(),
@@ -305,7 +317,7 @@ bytes_to_kbits_per_sec(_, _, _) ->
     undefined.
 
 lookup_stat(Name) ->
-    riak_stat_exometer:get_value(Name). % todo: change to riak_stat
+    riak_stat_coordinator:select([?PFX, ?APP | Name]).
 
 now_diff(NowSecs, ThenSecs) when is_number(NowSecs), is_number(ThenSecs) ->
     NowSecs - ThenSecs;

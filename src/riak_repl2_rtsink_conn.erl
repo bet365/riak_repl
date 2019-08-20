@@ -66,6 +66,7 @@
 %% Register with service manager
 sync_register_service() ->
     %% version {3,0} supports typed bucket replication
+    %% TODO[sr] here we will add a new version for source and sink to use for the new version of realtime repl.
     ProtoPrefs = {realtime,[{3,0}, {2,0}, {1,4}, {1,1}, {1,0}]},
     TcpOptions = [{keepalive, true}, % find out if connection is dead, this end doesn't send
                   {packet, 0},
@@ -181,6 +182,7 @@ handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
 %% Note pattern patch on Ref
+%%TODO[sr] this ackin'g mechanism will change ... no longer cum ack, and also deal with large skip's issue!
 handle_cast({ack, Ref, Seq, Skips}, State = #state{transport = T, socket = S,
                                             seq_ref = Ref,
                                             acked_seq = AckedTo,
@@ -200,6 +202,8 @@ handle_cast({ack, Ref, Seq, _Skips}, State) ->
     %% Nothing to send, it's old news.
     lager:debug("Received ack ~p for previous sequence ~p\n", [Seq, Ref]),
     {noreply, State};
+
+
 handle_cast({drop, BucketType}, #state{bt_timer = undefined, bt_interval = Interval} = State) ->
     {ok, Timer} = timer:send_after(Interval, report_bt_drops),
     {noreply, bt_dropped(BucketType, State#state{bt_timer = Timer})};

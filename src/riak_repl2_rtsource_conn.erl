@@ -72,7 +72,7 @@
 %% longer support 1.3.1
 %% prefered version list: [{2,0}, {1,5}, {1,1}, {1,0}]
 
-
+%% TODO[sr] new version for realtime proto {4,0} -> stabilse realtime (need to be able to support {3,0} !!!
 -define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]},
                       {?TCP_OPTIONS, ?MODULE, self()}}).
 
@@ -335,6 +335,8 @@ recv(TcpBin, State = #state{remote = Name,
     case riak_repl2_rtframe:decode(TcpBin) of
         {ok, undefined, Cont} ->
             {noreply, State#state{cont = Cont}};
+
+        %% TODO[sr] this will be a new ackin'g mechanism!
         {ok, {ack, Seq}, Cont} when ProtoMajor >= 2 ->
             %% TODO: report this better per-remote
             riak_repl_stats:objects_sent(),
@@ -357,6 +359,9 @@ recv(TcpBin, State = #state{remote = Name,
                     _ = erlang:cancel_timer(HBTRef),
                     recv(Cont, schedule_heartbeat(State#state{hb_timeout_tref=undefined}))
             end;
+
+
+
         {ok, heartbeat, Cont} ->
             %% Compute last heartbeat roundtrip in msecs and
             %% reschedule next.

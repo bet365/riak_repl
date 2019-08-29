@@ -249,13 +249,11 @@ set_bucket_meta(Obj) ->
     ObjectFilteringRules = riak_repl2_object_filter:get_realtime_blacklist(Obj),
     M = orddict:store(?BT_META_BLACKLIST, ObjectFilteringRules, M0),
     case riak_object:bucket(Obj) of
-        {Type, B} ->
+        {Type, _B} ->
             PropsHash = riak_repl_bucket_type_util:property_hash(Type),
             M1 = orddict:store(?BT_META_TYPED_BUCKET, true, M),
             M2 = orddict:store(?BT_META_TYPE, Type, M1),
-            M3 = orddict:store(?BT_META_PROPS_HASH, PropsHash, M2),
-            orddict:store(?BT_META_BUCKET_NAME, B, M3);
-        B ->
-            M2 = orddict:store(?BT_META_TYPED_BUCKET, false, M),
-            orddict:store(?BT_META_BUCKET_NAME, B, M2)
+            orddict:store(?BT_META_PROPS_HASH, PropsHash, M2);
+        _ ->
+            orddict:store(?BT_META_TYPED_BUCKET, false, M)
     end.

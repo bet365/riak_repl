@@ -46,7 +46,6 @@
 -define(BT_META_TYPED_BUCKET, typed_bucket).
 -define(BT_META_TYPE, bucket_type).
 -define(BT_META_PROPS_HASH, properties_hash_val).
--define(BT_META_BUCKET_NAME, bucket_name).
 -define(BT_META_BLACKLIST, realtime_blacklist).
 
 -type(ip_addr_str() :: string()).

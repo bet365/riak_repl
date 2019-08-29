@@ -39,14 +39,6 @@
          show_local_cluster_id/1,
          delete_block_provider_redirect/1]).
 
--export([add_filtered_bucket/1,
-         remove_filtered_bucket/1,
-         reset_filtered_buckets/1,
-         enable_bucket_filtering/1,
-         disable_bucket_filtering/1,
-         print_bucket_filtering_config/1,
-         remove_bucket_from_filtering/1]).
-
 -export([object_filtering_enable/1,
          object_filtering_disable/1,
          object_filtering_clear_config/1,
@@ -1097,62 +1089,6 @@ simple_parse(Str) ->
     {value, Value, _Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
     Value.
 
-
-%% ========================================================================================================= %%
-%% Bucket Filtering (legacy)
-%% ========================================================================================================= %%
-add_filtered_bucket([BucketName, ClusterName]) ->
-    lager:info("add filtered bucket: ~s, allowed to route to: ~p~n", [ClusterName, BucketName]),
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:add_filtered_bucket/2,
-        {ClusterName, list_to_binary(BucketName)}),
-    ok.
-
-%% Remove an association for ClusterName against BucketName - Given bucket won't be replicated to that cluster
-remove_filtered_bucket([BucketName, ClusterName]) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:remove_cluster_from_bucket_config/2,
-        {ClusterName, list_to_binary(BucketName)}),
-    ok.
-
-reset_filtered_buckets([]) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:reset_filtered_buckets/2, []),
-    ok.
-
-enable_bucket_filtering([]) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_bucket_filtering_state/2, true),
-    ok.
-
-disable_bucket_filtering([]) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_bucket_filtering_state/2, false),
-    ok.
-
-remove_bucket_from_filtering([BucketName]) ->
-    riak_core_ring_manager:ring_trans(fun riak_repl_ring:remove_filtered_bucket/2, list_to_binary(BucketName)),
-    ok.
-
-print_bucket_filtering_config([]) ->
-    Ring = get_ring(),
-    IsEnabled = enable_flag_to_list(riak_repl_ring:get_bucket_filtering_state(Ring)),
-    BucketConfig = riak_repl_ring:get_filtered_bucket_config(Ring),
-
-    case BucketConfig of
-        [] ->
-            io:format("Enabled: ~s~n~n", [IsEnabled]),
-            io:format("Bucket filtering not configured~n");
-        _ ->
-            io:format("Filtered bucket config~n~n"),
-            io:format("Enabled: ~s~n~n", [IsEnabled]),
-            Sep = string:copies("-", 20),
-            io:format("~-20s ~-20s~n", ["Bucket", "To Cluster"]),
-            io:format("~-20s ~-20s~n", [Sep, Sep]),
-            [begin
-                 ClusterNamesJoined = string:join(ClusterNames, ", "),
-                 io:format("~-20s ~-20s~n", [Bucket, ClusterNamesJoined])
-             end || {Bucket, ClusterNames} <- BucketConfig]
-    end,
-    ok.
-
-enable_flag_to_list(B) when is_boolean(B) -> atom_to_list(B);
-enable_flag_to_list(_) -> "false".
 
 %% ========================================================================================================= %%
 %% Object Filtering (API for riak-repl calls)

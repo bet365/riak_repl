@@ -11,7 +11,7 @@
 %% API
 -export([start_link/1,
          stop/1,
-         make_keylist/6,
+         make_keylist/4,
          diff/4,
          diff_stream/5,
          itr_new/2]).
@@ -42,9 +42,7 @@
                      diff_hash = 0,
                      missing = 0,
                      need_vclocks = true,
-                     errors = [],
-                     filter_buckets = false,
-                     shared_buckets = []}).
+                     errors = []}).
 
 %% ===================================================================
 %% Public API
@@ -61,8 +59,8 @@ stop(Pid) ->
 %% Return {ok, Ref} if build starts successfully, then sends
 %% a gen_fsm event {Ref, keylist_built} to the OwnerFsm or
 %% a {Ref, {error, Reason}} event on failures
-make_keylist(Pid, Partition, Filename, FilterEnabled, FilterConfig, FullsyncObjectFilter) ->
-    riak_core_gen_server:call(Pid, {make_keylist, Partition, Filename, FilterEnabled, FilterConfig, FullsyncObjectFilter}, ?LONG_TIMEOUT).
+make_keylist(Pid, Partition, Filename, FullsyncObjectFilter) ->
+    riak_core_gen_server:call(Pid, {make_keylist, Partition, Filename, FullsyncObjectFilter}, ?LONG_TIMEOUT).
    
 %% Computes the difference between two keylist sorted files.
 %% Returns {ok, Ref} or {error, Reason}
@@ -94,7 +92,7 @@ handle_call(stop, _From, State) ->
     _ = file:delete(State#state.filename),
     {stop, normal, ok, State};
 %% request from client of server to write a keylist of hashed key/value to Filename for Partition
-handle_call({make_keylist, Partition, Filename, FilterEnabled, FilterConfig, FullsyncObjectFilter}, From, State) ->
+handle_call({make_keylist, Partition, Filename, FullsyncObjectFilter}, From, State) ->
     Ref = make_ref(),
     riak_core_gen_server:reply(From, {ok, Ref}),
 
@@ -108,14 +106,10 @@ handle_call({make_keylist, Partition, Filename, FilterEnabled, FilterConfig, Ful
             Worker = fun() ->
                     %% Spend as little time on the vnode as possible,
                     %% accept there could be a potentially huge message queue
-                    %% ------
-                    %% We also have to pass bucket filtering params through to the fold, leaves returns unchanged,
-                    %% but the function has no access to state to retrieve the values and i don't want to keep getting
-                    %% environment variables inside the folds
                     Req = case riak_core_capability:get({riak_repl, bloom_fold}, false) of
                         true ->
                             riak_core_util:make_fold_req(fun ?MODULE:keylist_fold/3,
-                                                         {Self, 0, 0, FilterEnabled, FilterConfig, FullsyncObjectFilter},
+                                                         {Self, 0, 0, FullsyncObjectFilter},
                                                          false,
                                                          [{iterator_refresh,
                                                                  true}]);
@@ -139,7 +133,7 @@ handle_call({make_keylist, Partition, Filename, FilterEnabled, FilterConfig, Ful
                                     %% total is 0, sorry
                                     riak_core_gen_server:cast(Self,
                                                               {kl_finish, 0});
-                                {FoldRef, {Self, _Count, Total, _FilterEnabled, _FilterConfig, _FullsyncObjectFilter}} ->
+                                {FoldRef, {Self, _Count, Total, _FullsyncObjectFilter}} ->
                                     riak_core_gen_server:cast(Self,
                                                               {kl_finish, Total});
                                 {'DOWN', MonRef, process, VNodePid, Reason} ->
@@ -399,27 +393,22 @@ missing_key(PBKey, DiffState) ->
 %% modules are not the same.
 %%
 %% See http://www.javalimit.com/2010/05/passing-funs-to-other-erlang-nodes.html
-keylist_fold({B,Key}=K, V, {MPid, Count, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}) ->
+keylist_fold({B,Key}=K, V, {MPid, Count, Total, FullsyncObjectFilter}) ->
     try
-        F = case should_we_filter(FilterEnabled, B, FilteredBucketsList) of
-                true ->
-                    true;
-                false ->
-                    RObj = riak_object:from_binary(B,Key,V),
-                    case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
-                        true ->
-                            true;
-                        false ->
+        RObj = riak_object:from_binary(B,Key,V),
+        Filtered = case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
+                       true ->
+                           true;
+                       false ->
                             H = hash_object(RObj),
                             Bin = term_to_binary({pack_key(K), H}),
                             %% write key/value hash to file
                             riak_core_gen_server:cast(MPid, {keylist, Bin}),
                             false
-                    end
-            end,
-        check_keylist_ack({Count, MPid, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}, F)
+                   end,
+        check_keylist_ack({Count, MPid, Total, FullsyncObjectFilter}, Filtered)
     catch _:_ ->
-            {MPid, Count, Total, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
+            {MPid, Count, Total, FullsyncObjectFilter}
     end;
 %% legacy support for the 2-tuple accumulator in 1.2.0 and earlier
 keylist_fold({B,Key}=K, V, {MPid, Count}) ->
@@ -441,10 +430,7 @@ keylist_fold({B,Key}=K, V, {MPid, Count}) ->
             {MPid, Count}
     end.
 
-should_we_filter(Enabled, B, BucketsList) ->
-    Enabled andalso lists:member(B, BucketsList).
-
-check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}, Filtered) ->
+check_keylist_ack({Count, MPid, Total1, FullsyncObjectFilter}, Filtered) ->
     Total2 = case Filtered of
                  true -> Total1;
                  false -> Total1 +1
@@ -454,7 +440,7 @@ check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, Full
         100 ->
             %% send keylist_ack to "self" every 100 key/value hashes
             ok = riak_core_gen_server:call(MPid, keylist_ack, infinity),
-            {MPid, 0, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter};
+            {MPid, 0, Total2, FullsyncObjectFilter};
         _ ->
-            {MPid, Count+1, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
+            {MPid, Count+1, Total2, FullsyncObjectFilter}
     end.

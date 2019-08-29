@@ -13,7 +13,7 @@
 -include("riak_repl.hrl").
 
 %% API
--export([start_link/6]).
+-export([start_link/5]).
 
 %% gen_fsm
 -export([init/1, 
@@ -47,21 +47,18 @@
         stage_start,
         partition_start,
         skipping=false,
-        bucket_filtering_config = [],
-        bucket_filtering_enabled = false,
         fullsync_object_filter = {disabled, 0, []}
     }).
 
-start_link(SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter, {FilterEnabled, FilterConfig}) ->
-    gen_fsm:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter, {FilterEnabled, FilterConfig}], []).
+start_link(SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter) ->
+    gen_fsm:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter], []).
 
-init([SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter, {FilterEnabled, FilterConfig}]) ->
+init([SiteName, Transport, Socket, WorkDir, FullsyncObjectFilter]) ->
     AckFreq = app_helper:get_env(riak_repl,client_ack_frequency,
         ?REPL_DEFAULT_ACK_FREQUENCY),
     {ok, wait_for_fullsync,
         #state{sitename=SiteName,transport=Transport,socket=Socket,work_dir=WorkDir,
-            kl_ack_freq=AckFreq, bucket_filtering_enabled = FilterEnabled, bucket_filtering_config = FilterConfig,
-            fullsync_object_filter = FullsyncObjectFilter}}.
+            kl_ack_freq=AckFreq, fullsync_object_filter = FullsyncObjectFilter}}.
 
 wait_for_fullsync(Command, State)
         when Command == start_fullsync; Command == resume_fullsync ->
@@ -125,8 +122,8 @@ request_partition(continue,
     lager:info("Full-sync with site ~p completed", [State#state.sitename]),
     riak_repl_tcp_client:send(State#state.transport, State#state.socket, fullsync_complete),
     {next_state, wait_for_fullsync, State#state{partition=undefined}};
-request_partition(continue, #state{partitions=[P|T], work_dir=WorkDir, socket=Socket, bucket_filtering_config = FilterConfig,
-    bucket_filtering_enabled = FilterEnabled, fullsync_object_filter = FullsyncObjectFilter} = State) ->
+request_partition(continue, #state{partitions=[P|T], work_dir=WorkDir, socket=Socket,
+    fullsync_object_filter = FullsyncObjectFilter} = State) ->
     %% Possibly try to obtain the per-vnode lock before connecting.
     %% If we return error, we expect the coordinator to start us again later.
     case riak_repl_util:maybe_get_vnode_lock(P) of
@@ -143,8 +140,6 @@ request_partition(continue, #state{partitions=[P|T], work_dir=WorkDir, socket=So
             {ok, KeyListRef} = riak_repl_fullsync_helper:make_keylist(KeyListPid,
                                                                       P,
                                                                       KeyListFn,
-                                                                      FilterEnabled,
-                                                                      FilterConfig,
                                                                       FullsyncObjectFilter),
             {next_state, request_partition, State#state{kl_fn=KeyListFn,
                                                         our_kl_ready=false,

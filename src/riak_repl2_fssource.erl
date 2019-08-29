@@ -132,17 +132,6 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
 
 
     FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
-%% ========================================================================================================= %%
-%% Bucket Filtering (legacy)
-%% ========================================================================================================= %%
-    BucketFilteringEnabledOnBothSides = compare_bucket_filtering_flags(OurCaps, TheirCaps),
-
-    %% This is the list of buckets that we need to do bucket filtering with
-    SharedBucketList = maybe_exchange_filtered_buckets(BucketFilteringEnabledOnBothSides, Cluster, Socket, Transport),
-
-    FullSyncBucketFilter = {BucketFilteringEnabledOnBothSides, SharedBucketList},
-%% ========================================================================================================= %%
-
     {_, ClientVer, _} = Proto,
 
     case Strategy of
@@ -155,7 +144,7 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
             {ok, FullsyncWorker} = riak_repl_keylist_server:start_link(Cluster,
                                                                        Transport, Socket,
                                                                        WorkDir, Client, ClientVer,
-                                                                       FullsyncObjectFilter, FullSyncBucketFilter),
+                                                                       FullsyncObjectFilter),
             _ = riak_repl_keylist_server:start_fullsync(FullsyncWorker, [Partition]),
             {reply, ok, State#state{transport=Transport, socket=Socket, cluster=Cluster,
                                     fullsync_worker=FullsyncWorker, work_dir=WorkDir,
@@ -326,7 +315,7 @@ decide_our_caps(RequestedStrategy) ->
     [{strategy, SupportedStrategy}].
 decide_our_caps(RequestedStrategy, ObjectFiltering) ->
     Strategy = decide_our_caps(RequestedStrategy),
-    Strategy ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
+    Strategy ++ [ObjectFiltering].
 
 %% decide what strategy to use, given our own capabilties and those
 %% of the remote source.
@@ -387,32 +376,3 @@ maybe_soft_exit(Reason, State) ->
             Owner ! {soft_exit, self(), Reason},
             {stop, normal, State}
     end.
-
-%% ========================================================================================================= %%
-%% Bucket Filtering (legacy)
-%% ========================================================================================================= %%
-compare_bucket_filtering_flags(OurCaps, TheirCaps) ->
-    OurBucketFilteringState = proplists:get_value(bucket_filtering, OurCaps, false),
-    TheirBucketFilteringState = proplists:get_value(bucket_filtering, TheirCaps, false),
-
-    case {OurBucketFilteringState, TheirBucketFilteringState} of
-        {true, true} -> true;
-        {_, _} -> false
-    end.
-
-maybe_exchange_filtered_buckets(false, _, _Socket, _Transport) ->
-    [];
-maybe_exchange_filtered_buckets(true, ClusterName, Socket, Transport) ->
-    TheirConfig =
-        case Transport:recv(Socket, 0, ?PEERINFO_TIMEOUT) of
-            {ok, Data} ->
-                binary_to_term(Data);
-            {Error, Socket} ->
-                throw(Error);
-            {Error, Socket, Reason} ->
-                throw({Error, Reason})
-        end,
-    BucketsToClusterName = riak_repl_util:filtered_buckets_for_clustername(ClusterName),
-    Transport:send(Socket, term_to_binary(BucketsToClusterName)),
-    %% is this too lazy?
-    lists:usort(BucketsToClusterName ++ TheirConfig).

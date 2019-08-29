@@ -19,7 +19,9 @@
     push/2,
     push/3,
     status/0,
-     ack/2
+    ack/2,
+    shutdown/0,
+    stop/0
 ]).
 
 -define(overload_ets, rtq_overload_ets).
@@ -66,6 +68,13 @@ status() ->
 
 ack(Name, Seq) ->
     gen_server:cast(?SERVER, {ack, Name, Seq, os:timestamp()}).
+
+shutdown() ->
+    gen_server:call(?SERVER, shutting_down, infinity).
+
+stop() ->
+    gen_server:call(?SERVER, stop, infinity).
+
 
 %%%===================================================================
 %%% gen_server callbacks

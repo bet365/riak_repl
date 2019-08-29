@@ -12,6 +12,13 @@
     terminate/2,
     code_change/3]).
 
+-export([
+    push/4,
+    status/0,
+    ack/1,
+    stop/0
+]).
+
 -define(SERVER, ?MODULE).
 
 -record(state, {}).
@@ -22,6 +29,25 @@
 
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+
+
+push(RSeq, NumItems, Bin, Meta) ->
+    gen_server:cast(?SERVER, {push, RSeq, NumItems, Bin, Meta}).
+
+status() ->
+    Status = gen_server:call(?SERVER, status, infinity),
+    % I'm having the calling process do derived stats because
+    % I don't want to block the rtq from processing objects.
+    MaxBytes = proplists:get_value(max_bytes, Status),
+    CurrentBytes = proplists:get_value(bytes, Status),
+    PercentBytes = round( (CurrentBytes / MaxBytes) * 100000 ) / 1000,
+    [{percent_bytes_used, PercentBytes} | Status].
+
+ack(Seq) ->
+    gen_server:cast(?SERVER, {ack, Seq, os:timestamp()}).
+
+stop() ->
+    gen_server:call(?SERVER, stop, infinity).
 
 %%%===================================================================
 %%% gen_server callbacks

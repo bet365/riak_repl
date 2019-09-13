@@ -88,7 +88,8 @@
             % determine if there's been drops accurately if the source says there
             % were skips before it's sent even one item.
             filtered = 0,
-            last_seen  % a timestamp of when we received the last ack to measure latency
+            last_seen,  % a timestamp of when we received the last ack to measure latency
+            consumer_qbytes = 0
            }).
 
 -type name() :: term().
@@ -363,7 +364,10 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
                          deliver = undefined} | Cs2];
         false ->
             %% New registration, start from the beginning
-            CSeq = MinSeq,
+
+            %% With new method of realtime queue, we cannot start from the begining of the queue anymore
+            %% because any items that are in the queue will not have this consumer in its consumer list (to be ack'd)
+            CSeq = QSeq,
             UpdCs = [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
     end,
 
@@ -579,6 +583,11 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
     OFFilteredConsumerNames = [CName || CName <- AllConsumers, not Filter(CName)],
     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
+    %% Now we are storing all consumers to ack this in a list with the object
+    %% This will aid the removal of phantom ack'ing, and a 'queue' per consumer
+
+    QEntry3 = {QSeq2, NumItems, Bin, Meta, OFFilteredConsumerNames},
+
     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
     {DeliverResults, Cs3} = lists:unzip(DeliverAndCs3),
@@ -595,7 +604,7 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
         AllSkippedOrFiltered ->
             State;
         true ->
-            ets:insert(QTab, QEntry2),
+            ets:insert(QTab, QEntry3),
             Size = ets_obj_size(Bin, State),
             update_q_size(State, Size)
     end,
@@ -627,12 +636,9 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun) -
                     maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun);
                 [QEntry] ->
 
-                    {_, _, _, Meta} = QEntry,
-                    Filter = fun(ConsumerName) -> riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) end,
-                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- CsNames, not Filter(ConsumerName)],
-                    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
+                    {_, _, _, _, TooAckList} = QEntry,
 
-                    case lists:member(CName, OFFilteredConsumerNames) of
+                    case lists:member(CName, TooAckList) of
                         true ->
                             case C#c.deliver of
                                 undefined ->

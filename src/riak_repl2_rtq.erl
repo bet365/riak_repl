@@ -467,22 +467,17 @@ record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
             skip
     end.
 
-ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
-    %% Scan through the clients, updating Name for Seq and also finding the minimum
-    %% sequence
-    {UpdCs, MinSeq} = lists:foldl(
-                        fun(C, {Cs2, MinSeq2}) ->
-                                case {C#c.name, C#c.last_seen} of
-                                    {Name, LastSeen} ->
-                                        record_consumer_latency(Name, LastSeen, Seq, NewTs),
-                                        {[C#c{aseq = Seq} | Cs2], min(Seq, MinSeq2)};
-                                    _ ->
-                                        {[C | Cs2], min(C#c.aseq, MinSeq2)}
-                                end
-                        end, {[], QSeq}, Cs),
-    %% Remove any entries from the ETS table before MinSeq
-    NewState = cleanup(QTab, MinSeq, State),
-    NewState#state{cs = UpdCs}.
+ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
+    case lists:keyfind(Name, #c.name, Cs) of
+        false ->
+            State;
+        C ->
+            %% record consumer latency
+            record_consumer_latency(Name, C#c.last_seen, Seq, NewTs),
+            State =  queue_cleanup(C#c.name, QTab, Seq, C#c.aseq, State),
+            io:format(user, "here ~n ~p ~n", [State]),
+            State
+    end.
 
 %% @private
 handle_info(_Msg, State) ->
@@ -543,14 +538,9 @@ unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
                 DeliveryFuns ->
                     _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
             end,
-            MinSeq = case Cs2 of
-                         [] ->
-                             State#state.qseq; % no consumers, remove it all
-                         _ ->
-                             lists:min([Seq || #c{aseq = Seq} <- Cs2])
-                     end,
-            NewState0 = cleanup(QTab, MinSeq, State),
-            {ok, NewState0#state{cs = Cs2}};
+
+            NewState = queue_cleanup(Name, QTab, C#c.aseq, State#state.qseq, State),
+            {ok, NewState#state{cs = Cs2}};
         false ->
             {{error, not_registered}, State}
     end.
@@ -580,13 +570,13 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
     AllConsumers = [Consumer#c.name || Consumer <- Cs],
 
     Filter = fun(ConsumerName) -> riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) end,
-    OFFilteredConsumerNames = [CName || CName <- AllConsumers, not Filter(CName)],
-    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
+    AllowedConsumerNames = [CName || CName <- AllConsumers, not Filter(CName)],
+    QEntry2 = set_local_forwards_meta(AllowedConsumerNames, QEntry),
 
     %% Now we are storing all consumers to ack this in a list with the object
     %% This will aid the removal of phantom ack'ing, and a 'queue' per consumer
 
-    QEntry3 = {QSeq2, NumItems, Bin, Meta, OFFilteredConsumerNames},
+    QEntry3 = {QSeq2, NumItems, Bin, Meta, AllowedConsumerNames},
 
     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
@@ -606,7 +596,8 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
         true ->
             ets:insert(QTab, QEntry3),
             Size = ets_obj_size(Bin, State),
-            update_q_size(State, Size)
+            NewState = update_q_size(State, Size),
+            update_cq_size(NewState, Size, AllowedConsumerNames)
     end,
     trim_q(State2#state{qseq = QSeq2, cs = Cs3});
 push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
@@ -636,7 +627,8 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun) -
                     maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun);
                 [QEntry] ->
 
-                    {_, _, _, _, TooAckList} = QEntry,
+                    {CSeq2, NumItems, Bin, Meta, TooAckList} = QEntry,
+                    QEntry2 = {CSeq2, NumItems, Bin, Meta},
 
                     case lists:member(CName, TooAckList) of
                         true ->
@@ -761,20 +753,30 @@ set_meta({_Seq, _NumItems, _Bin, Meta} = QEntry, Key, Value) ->
     Meta2 = orddict:store(Key, Value, Meta),
     setelement(4, QEntry, Meta2).
 
-%% Cleanup until the start of the table
-cleanup(_QTab, '$end_of_table', State) ->
+queue_cleanup(_Name, _QTab, '$end_of_table', _ACSeq, State) ->
     State;
-cleanup(QTab, Seq, State) ->
+queue_cleanup(Name, QTab, Seq, ACSeq, State) when Seq >= ACSeq ->
     case ets:lookup(QTab, Seq) of
-        [] -> cleanup(QTab, ets:prev(QTab, Seq), State);
-        [{_, _, Bin, _Meta}] ->
-           ShrinkSize = ets_obj_size(Bin, State),
-           NewState = update_q_size(State, -ShrinkSize),
-           ets:delete(QTab, Seq),
-           cleanup(QTab, ets:prev(QTab, Seq), NewState);
+        [] ->
+            queue_cleanup(Name, QTab, ets:prev(QTab, Seq), ACSeq, State);
+        [{_, _, Bin, _Meta, TooAckList}] ->
+            ShrinkSize = ets_obj_size(Bin, State),
+            State1 = update_cq_size(State, -ShrinkSize, [Name]),
+            State2 = case TooAckList -- [Name] of
+                         [] ->
+                             ets:delete(QTab, Seq),
+                             update_q_size(State1, -ShrinkSize);
+                         NewTooAckList ->
+                             ets:update_element(QTab, Seq, {5, NewTooAckList}),
+                             State
+                     end,
+            queue_cleanup(Name, QTab, ets:prev(QTab, Seq), ACSeq, State2);
         _ ->
-            lager:warning("Unexpected object in RTQ")
-    end.
+            lager:warning("Unexpected object in RTQ"),
+            State
+    end;
+queue_cleanup(_Name, _QTab, _Seq, _ACSeq, State) ->
+    State.
 
 ets_obj_size(Obj, _State=#state{word_size = WordSize}) when is_binary(Obj) ->
   ets_obj_size(Obj, WordSize);
@@ -789,6 +791,22 @@ ets_obj_size(Obj, _) ->
 
 update_q_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
   State#state{qsize_bytes = CurrentQSize + Diff}.
+
+update_cq_size(State = #state{cs = Cs}, Diff, ConsumerNames) ->
+    %% update consumer queue sizes
+    NewConsumers = lists:map(
+                        fun(C) ->
+                            case lists:member(C#c.name, ConsumerNames) of
+                                true ->
+                                    C#c{consumer_qbytes = C#c.consumer_qbytes + Diff};
+                                _ ->
+                                    C
+                            end
+                        end, Cs),
+
+    %% Return updated state
+    State#state{cs = NewConsumers}.
+
 
 %% Trim the queue if necessary
 trim_q(State = #state{max_bytes = undefined}) ->
@@ -836,9 +854,10 @@ trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
         '$end_of_table' ->
             {Cs, State, Entries, Objects};
         TrimSeq ->
-            [{_, NumObjects, Bin, _Meta}] = ets:lookup(QTab, TrimSeq),
+            [{_, NumObjects, Bin, _Meta, TooAckList}] = ets:lookup(QTab, TrimSeq),
             ShrinkSize = ets_obj_size(Bin, State),
-            NewState = update_q_size(State, -ShrinkSize),
+            NewState1 = update_q_size(State, -ShrinkSize),
+            NewState2 = update_cq_size(NewState1, -ShrinkSize, TooAckList),
             ets:delete(QTab, TrimSeq),
             Cs2 = [case CSeq < TrimSeq of
                        true ->
@@ -849,11 +868,11 @@ trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
                            C
                    end || C = #c{cseq = CSeq} <- Cs],
             %% Rinse and repeat until meet the target or the queue is empty
-            case qbytes(QTab, NewState) > MaxBytes of
+            case qbytes(QTab, NewState2) > MaxBytes of
                 true ->
-                    trim_q_entries(QTab, MaxBytes, Cs2, NewState, Entries + 1, Objects + NumObjects);
+                    trim_q_entries(QTab, MaxBytes, Cs2, NewState2, Entries + 1, Objects + NumObjects);
                 _ ->
-                    {Cs2, NewState, Entries + 1, Objects + NumObjects}
+                    {Cs2, NewState2, Entries + 1, Objects + NumObjects}
             end
     end.
 

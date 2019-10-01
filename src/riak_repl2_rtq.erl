@@ -394,7 +394,7 @@ handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};
 
 handle_call(summarize, _From, State = #state{qtab = QTab}) ->
-    Fun = fun({Seq, _NumItems, Bin, _Meta}, Acc) ->
+    Fun = fun({Seq, _NumItems, Bin, _Meta, _TooAckList}, Acc) ->
         Obj = riak_repl_util:from_wire(Bin),
         {Key, Size} = summarize_object(Obj),
         Acc ++ [{Seq, Key, Size}]
@@ -406,7 +406,7 @@ handle_call({evict, Seq}, _From, State = #state{qtab = QTab}) ->
     {reply, ok, State};
 handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
     case ets:lookup(QTab, Seq) of
-        [{Seq, _, Bin, _}] ->
+        [{Seq, _, Bin, _, _}] ->
             Obj = riak_repl_util:from_wire(Bin),
             case Key =:= riak_object:key(Obj) of
                 true ->
@@ -474,9 +474,7 @@ ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
         C ->
             %% record consumer latency
             record_consumer_latency(Name, C#c.last_seen, Seq, NewTs),
-            State =  queue_cleanup(C#c.name, QTab, Seq, C#c.aseq, State),
-            io:format(user, "here ~n ~p ~n", [State]),
-            State
+            queue_cleanup(C#c.name, QTab, Seq, C#c.aseq, State)
     end.
 
 %% @private

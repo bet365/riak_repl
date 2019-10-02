@@ -370,18 +370,9 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
 
             false ->
                 %% New registration, start from the beginning
-                %% With new method of realtime queue, we cannot start from the begining of the queue anymore
-                %% because any items that are in the queue will not have this consumer in the AckList
-                %% May change this in the future, will require iterating the queue to add the conumer to the list.
-                case Name of
-                    %% For the case of the queue migration, we want to give it access to everything!
-                    qm ->
-                        CSeq = MinSeq,
-                        [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs];
-                    _ ->
-                        CSeq = QSeq,
-                        [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
-                end
+                %% TODO: figure out what to do about inaccurate consumer_q_bytes!
+                CSeq = MinSeq,
+                [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
         end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
@@ -587,22 +578,26 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
             {DeliverStatus, C}
     end.
 
-%% /4
-push(NumItems, Bin, Meta, State = #state{cs = Cs, shutting_down = false}) ->
 
+allowed_consumers(Cs, Meta) ->
     AllConsumers = [Consumer#c.name || Consumer <- Cs],
     Filter = fun(ConsumerName) -> riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) end,
-    AllowedConsumerNames = [CName || CName <- AllConsumers, not Filter(CName)],
-    push_item(NumItems, Bin, Meta, AllowedConsumerNames, State);
+    [CName || CName <- AllConsumers, not Filter(CName)].
+
+%% /4
+push(NumItems, Bin, Meta, State = #state{cs = Cs, shutting_down = false}) ->
+    push_item(NumItems, Bin, Meta, allowed_consumers(Cs, Meta), State);
 push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
 
 %% /5
-push(NumItems, Bin, Meta, AckList, State = #state{shutting_down = false}) ->
-    push_item(NumItems, Bin, Meta, AckList, State);
-push(NumItems, Bin, Meta, _AckList, State = #state{shutting_down = true}) ->
-    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+push(NumItems, Bin, Meta, AckList, State = #state{cs = Cs, shutting_down = false}) ->
+    AllowedConsumers = allowed_consumers(Cs, Meta) -- AckList,
+    push_item(NumItems, Bin, Meta, AllowedConsumers, State);
+push(NumItems, Bin, Meta, AckList, State = #state{cs = Cs, shutting_down = true}) ->
+    AllowedConsumers = allowed_consumers(Cs, Meta) -- AckList,
+    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, AllowedConsumers),
     State.
 
 push_item(NumItems, Bin, Meta, AllowedConsumerNames,
@@ -744,7 +739,8 @@ maybe_deliver_item(C, QEntry) ->
             {filtered, C#c{cseq = Seq, aseq = Seq, filtered = C#c.filtered + 1, delivered = true, skips=0}}
     end.
 
-deliver_item(C, DeliverFun, {Seq, _NumItem, _Bin, _Meta} = QEntry) ->
+deliver_item(C, DeliverFun, QEntry) ->
+    Seq = element(1, QEntry),
     try
         Seq = C#c.cseq + 1, % bit of paranoia, remove after EQC
         QEntry2 = set_skip_meta(QEntry, Seq, C),

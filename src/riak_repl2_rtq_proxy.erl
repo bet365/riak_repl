@@ -43,7 +43,10 @@ push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 
 push(NumItems, Bin, Meta) ->
-    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta}).
+    push(NumItems, Bin, Meta, []).
+
+push(NumItems, Bin, Meta, AckList) ->
+    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta, AckList}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -72,6 +75,8 @@ handle_cast({push, NumItems, _Bin, _Meta}, State = #state{nodes=[]}) ->
     catch(riak_repl_stats:rt_source_errors()),
     {noreply, State};
 handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
+    handle_cast({push, NumItems, W1BinObjs, Meta, []}, State);
+handle_cast({push, NumItems, W1BinObjs, Meta, AckList}, State) ->
     %% push items to another node for queueing. If the other node does not speak binary
     %% object format, then downconvert the items (if needed) before pushing.
     [Node | Nodes] = State#state.nodes,
@@ -80,7 +85,12 @@ handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
     BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
     case meta_support(Node, State#state.meta_support) of
         true ->
-            gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
+            case riak_core_capability:get({riak_repl, ack_list}, false) of
+                false ->
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
+                true ->
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta, AckList})
+            end;
         false ->
             gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs})
     end,

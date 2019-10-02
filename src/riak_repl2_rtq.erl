@@ -350,29 +350,39 @@ handle_call(all_queues_empty, _From, State = #state{qseq = QSeq, cs = Cs}) ->
 
 handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
     %% This is okay because the consumer is still in the queue, so we can continue with the start of the queue
-    %% as the consumer will be part of the TooAckList for objects destined for it.
+    %% as the consumer will be part of the AckList for objects destined for it.
     MinSeq = minseq(QTab, QSeq),
-    case lists:keytake(Name, #c.name, Cs) of
-        {value, C = #c{aseq = PrevASeq, drops = PrevDrops}, Cs2} ->
-            %% Work out if anything should be considered dropped if
-            %% unacknowledged.
-            Drops = max(0, MinSeq - PrevASeq - 1),
+    UpdatedConsumers =
+        case lists:keytake(Name, #c.name, Cs) of
+            {value, C = #c{aseq = PrevASeq, drops = PrevDrops}, Cs2} ->
+                %% Work out if anything should be considered dropped if
+                %% unacknowledged.
+                Drops = max(0, MinSeq - PrevASeq - 1),
 
-            %% Re-registering, send from the last acked sequence
-            CSeq = case C#c.aseq < MinSeq of
-                true -> MinSeq;
-                false -> C#c.aseq
-            end,
-            UpdCs = [C#c{cseq = CSeq, drops = PrevDrops + Drops,
-                         deliver = undefined} | Cs2];
-        false ->
-            %% New registration, start from the beginning
-            %% With new method of realtime queue, we cannot start from the begining of the queue anymore
-            %% because any items that are in the queue will not have this consumer in the TooAckList
-            %% May change this in the future, will require iterating the queue to add the conumer to the list.
-            CSeq = QSeq,
-            UpdCs = [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
-    end,
+                %% Re-registering, send from the last acked sequence
+                CSeq =
+                    case C#c.aseq < MinSeq of
+                        true -> MinSeq;
+                        false -> C#c.aseq
+                    end,
+
+                [C#c{cseq = CSeq, drops = PrevDrops + Drops, deliver = undefined} | Cs2];
+
+            false ->
+                %% New registration, start from the beginning
+                %% With new method of realtime queue, we cannot start from the begining of the queue anymore
+                %% because any items that are in the queue will not have this consumer in the AckList
+                %% May change this in the future, will require iterating the queue to add the conumer to the list.
+                case Name of
+                    %% For the case of the queue migration, we want to give it access to everything!
+                    qm ->
+                        CSeq = MinSeq,
+                        [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs];
+                    _ ->
+                        CSeq = QSeq,
+                        [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
+                end
+        end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
     case folsom_metrics:metric_exists({latency, Name}) of
@@ -380,8 +390,7 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
         false ->
             folsom_metrics:new_histogram({latency, Name}, slide, RTQSlidingWindow)
     end,
-
-    {reply, {ok, CSeq}, State#state{cs = UpdCs}};
+    {reply, {ok, CSeq}, State#state{cs = UpdatedConsumers}};
 handle_call({unregister, Name}, _From, State) ->
     case unregister_q(Name, State) of
         {ok, NewState} ->
@@ -397,7 +406,7 @@ handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};
 
 handle_call(summarize, _From, State = #state{qtab = QTab}) ->
-    Fun = fun({Seq, _NumItems, Bin, _Meta, _TooAckList}, Acc) ->
+    Fun = fun({Seq, _NumItems, Bin, _Meta, _AckList}, Acc) ->
         Obj = riak_repl_util:from_wire(Bin),
         {Key, Size} = summarize_object(Obj),
         Acc ++ [{Seq, Key, Size}]
@@ -423,7 +432,7 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
     end;
 
 handle_call({pull_with_ack, Name, DeliverFun}, _From, State) ->
-    {reply, ok, pull(Name, DeliverFun, State)};
+    {reply, ok, pull(Name, DeliverFun, true, State)};
 
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
@@ -433,6 +442,9 @@ handle_call({push, NumItems, Bin}, From, State) ->
 handle_call({push, NumItems, Bin, Meta}, _From, State) ->
     State2 = maybe_flip_overload(State),
     {reply, ok, push(NumItems, Bin, Meta, State2)};
+handle_call({push, NumItems, Bin, Meta, AckList}, _From, State) ->
+    State2 = maybe_flip_overload(State),
+    {reply, ok, push(NumItems, Bin, Meta, AckList, State2)};
 
 handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
     {reply, ok, ack_seq(Name, Seq, Ts, State)}.
@@ -447,6 +459,12 @@ handle_cast({push, NumItems, Bin, Meta}, State) ->
     State2 = maybe_flip_overload(State),
     {noreply, push(NumItems, Bin, Meta, State2)};
 
+handle_cast({push, _NumItems, _Bin, _Meta, _AckList}, State=#state{cs=[]}) ->
+    {noreply, State};
+handle_cast({push, NumItems, Bin, Meta, AckList}, State) ->
+    State2 = maybe_flip_overload(State),
+    {noreply, push(NumItems, Bin, Meta, AckList, State2)};
+
 %% @private
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
@@ -456,7 +474,7 @@ handle_cast({report_drops, N}, State) ->
     {noreply, State3};
 
 handle_cast({pull, Name, DeliverFun}, State) ->
-     {noreply, pull(Name, DeliverFun, State)};
+     {noreply, pull(Name, DeliverFun, false, State)};
 
 handle_cast({ack, Name, Seq, Ts}, State) ->
        {noreply, ack_seq(Name, Seq, Ts, State)}.
@@ -480,7 +498,7 @@ ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
 
             case Seq > C#c.aseq of
                 true ->
-                    {NewState, NewC} = queue_cleanup(C, QTab, Seq, C#c.aseq, State),
+                    {NewState, NewC} = cleanup(C, QTab, Seq, C#c.aseq, State),
                     NewState#state{cs = Rest ++ [NewC#c{aseq = Seq}]};
                 false ->
                     State
@@ -547,7 +565,7 @@ unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
                     _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
             end,
 
-            {NewState, _NewC} = queue_cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
+            {NewState, _NewC} = cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
             {ok, NewState#state{cs = Cs2}};
         false ->
             {{error, not_registered}, State}
@@ -569,22 +587,31 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
             {DeliverStatus, C}
     end.
 
-push(NumItems, Bin, Meta, State = #state{qtab = QTab,
-                                         qseq = QSeq,
-                                         cs = Cs,
-                                         shutting_down = false}) ->
-    QSeq2 = QSeq + 1,
-    QEntry = {QSeq2, NumItems, Bin, Meta},
-    AllConsumers = [Consumer#c.name || Consumer <- Cs],
+%% /4
+push(NumItems, Bin, Meta, State = #state{cs = Cs, shutting_down = false}) ->
 
+    AllConsumers = [Consumer#c.name || Consumer <- Cs],
     Filter = fun(ConsumerName) -> riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) end,
     AllowedConsumerNames = [CName || CName <- AllConsumers, not Filter(CName)],
+    push_item(NumItems, Bin, Meta, AllowedConsumerNames, State);
+push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
+    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+    State.
+
+%% /5
+push(NumItems, Bin, Meta, AckList, State = #state{shutting_down = false}) ->
+    push_item(NumItems, Bin, Meta, AckList, State);
+push(NumItems, Bin, Meta, _AckList, State = #state{shutting_down = true}) ->
+    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+    State.
+
+push_item(NumItems, Bin, Meta, AllowedConsumerNames,
+    State = #state{qtab = QTab, qseq = QSeq, cs = Cs, shutting_down = false}) ->
+
+    QSeq2 = QSeq + 1,
+    QEntry = {QSeq2, NumItems, Bin, Meta},
     QEntry2 = set_local_forwards_meta(AllowedConsumerNames, QEntry),
-
-    %% Now we are storing all consumers to ack this in a list with the object
-    %% This will aid the removal of phantom ack'ing, and a 'queue' per consumer
-
-    QEntry3 = {QSeq2, NumItems, Bin, Meta, AllowedConsumerNames},
+    QEntry3 = {QSeq2, NumItems, Bin, Meta, []},
 
     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
@@ -609,16 +636,13 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
                 NewState = update_q_size(State2, Size),
                 update_consumer_q_sizes(NewState, Size, AllowedConsumerNames)
         end,
-    trim_q(State3);
-push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
-    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
-    State.
+    trim_q(State3).
 
-pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
+pull(Name, DeliverFun, WithAckList, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
      CsNames = [C#c.name || C <- Cs],
      UpdCs = case lists:keytake(Name, #c.name, Cs) of
                 {value, C, Cs2} ->
-                    [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun) | Cs2];
+                    [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun, WithAckList) | Cs2];
                 false ->
                     lager:error("Consumer ~p pulled from RTQ, but was not registered", [Name]),
                     _ = deliver_error(DeliverFun, not_registered),
@@ -627,46 +651,44 @@ pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
     State#state{cs = UpdCs}.
 
 
-maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun) ->
+maybe_pull(QTab, QSeq, C = #c{cseq = CSeq}, CsNames, DeliverFun, WithAckList) ->
     CSeq2 = CSeq + 1,
     case CSeq2 =< QSeq of
         true -> % something reday
             case ets:lookup(QTab, CSeq2) of
                 [] -> % entry removed, due to previously being unroutable
                     C2 = C#c{skips = C#c.skips + 1, cseq = CSeq2},
-                    maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun);
+                    maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, WithAckList);
                 [QEntry] ->
 
-                    {CSeq2, NumItems, Bin, Meta, TooAckList} = QEntry,
-                    QEntry2 = {CSeq2, NumItems, Bin, Meta},
+                    {CSeq2, NumItems, Bin, Meta, _AckList} = QEntry,
+                    QEntry2 =
+                        case WithAckList of
+                            true ->
+                                QEntry;
+                            _ ->
+                                {CSeq2, NumItems, Bin, Meta}
+                        end,
 
-                    case lists:member(CName, TooAckList) of
-                        true ->
-                            case C#c.deliver of
-                                undefined ->
-                                    % if the item can't be delivered due to cascading rt,
-                                    % just keep trying.
-                                    case maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2) of
-                                        {skipped, C2} ->
-                                            C3 = C2#c{
-                                                deliver = C#c.deliver,
-                                                delivery_funs = C#c.delivery_funs
-                                            },
-                                            maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun);
-                                        %% TODO: think about the filtered case!
-                                        {_WorkedOrNoFun, C2} ->
-                                            C2
-                                    end;
-
-                                %% we have a saved function due to being at the head of the queue, just add the function and let the push
-                                %% functionality push the items out to the helpers using the saved deliverfuns
-                                _ ->
-                                    save_consumer(C, DeliverFun)
+                    case C#c.deliver of
+                        undefined ->
+                            % if the item can't be delivered due to cascading rt, or filtering,
+                            % just keep trying.
+                            case maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2) of
+                                {skipped, C2} ->
+                                    C3 = C2#c{deliver = C#c.deliver, delivery_funs = C#c.delivery_funs},
+                                    maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun, WithAckList);
+                                {filtered, C2} ->
+                                    C3 = C2#c{deliver = C#c.deliver, delivery_funs = C#c.delivery_funs},
+                                    maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun, WithAckList);
+                                {_WorkedOrNoFun, C2} ->
+                                    C2
                             end;
-                        false ->
-                            %% not removing any deliver function as we have purposely not used it
-                            C2 = C#c{skips = 0, cseq = CSeq2, delivered = true, filtered = C#c.filtered + 1},
-                            maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun)
+
+                        %% we have a saved function due to being at the head of the queue, just add the function and let the push
+                        %% functionality push the items out to the helpers using the saved deliverfuns
+                        _ ->
+                            save_consumer(C, DeliverFun)
                     end
             end;
         false ->
@@ -678,8 +700,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun) -
 
 
 maybe_deliver_item(C = #c{deliver = undefined}, QEntry) ->
-    {_Seq, _NumItem, _Bin, Meta} = QEntry,
-
+    Meta = element(4, QEntry),
     Name = C#c.name,
     Routed = case orddict:find(routed_clusters, Meta) of
         error -> [];
@@ -699,7 +720,8 @@ maybe_deliver_item(C = #c{deliver = undefined}, QEntry) ->
             end,
     {Cause, C};
 maybe_deliver_item(C, QEntry) ->
-    {Seq, _NumItem, _Bin, Meta} = QEntry,
+    Seq = element(1, QEntry),
+    Meta = element(4, QEntry),
     #c{name = Name} = C,
     Routed = case orddict:find(routed_clusters, Meta) of
         error -> [];
@@ -760,38 +782,45 @@ set_skip_meta(QEntry, _Seq, _C = #c{skips = S}) ->
 set_local_forwards_meta(LocalForwards, QEntry) ->
     set_meta(QEntry, local_forwards, LocalForwards).
 
-set_meta({_Seq, _NumItems, _Bin, Meta} = QEntry, Key, Value) ->
+set_meta(QEntry, Key, Value) ->
+    Meta = element(4, QEntry),
     Meta2 = orddict:store(Key, Value, Meta),
     setelement(4, QEntry, Meta2).
 
-queue_cleanup(C, _QTab, '$end_of_table', OldSeq, State) ->
+
+cleanup(C, QTab, NewAck, OldAck, State) ->
+    AllConsumerNames = [C1#c.name || C1 <- State#state.cs],
+    queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State).
+
+queue_cleanup(C, _AllConsumerNames, _QTab, '$end_of_table', OldSeq, State) ->
     A = end_of_table,
     lager:error("hit here 0, NewAck: ~p, OldAck: ~p", [A, OldSeq]),
     {State, C};
-queue_cleanup(C, QTab, NewAck, OldAck, State) when NewAck >= OldAck ->
+queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State) when NewAck >= OldAck ->
     case ets:lookup(QTab, NewAck) of
         [] ->
             lager:error("hit here 1, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
-            queue_cleanup(C, QTab, ets:prev(QTab, NewAck), OldAck, State);
-        [{_, _, Bin, _Meta, TooAckList}] ->
+            queue_cleanup(C, AllConsumerNames, QTab, ets:prev(QTab, NewAck), OldAck, State);
+        [{_, _, Bin, _Meta, AckList}] ->
             lager:error("hit here 2, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
             ShrinkSize = ets_obj_size(Bin, State),
             NewC = update_cq_size(C, -ShrinkSize),
-            State2 = case TooAckList -- [C#c.name] of
+            AckList2 = AckList ++ [C#c.name],
+            State2 = case AllConsumerNames -- AckList2 of
                          [] ->
                              ets:delete(QTab, NewAck),
                              update_q_size(State, -ShrinkSize);
-                         NewTooAckList ->
-                             ets:update_element(QTab, NewAck, {5, NewTooAckList}),
+                         NewAckList ->
+                             ets:update_element(QTab, NewAck, {5, NewAckList}),
                              State
                      end,
-            queue_cleanup(NewC, QTab, ets:prev(QTab, NewAck), OldAck, State2);
+            queue_cleanup(NewC, AllConsumerNames, QTab, ets:prev(QTab, NewAck), OldAck, State2);
         _ ->
             lager:error("hit here 3, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
             lager:warning("Unexpected object in RTQ"),
             {State, C}
     end;
-queue_cleanup(C, _QTab, NewAck, OldAck, State) ->
+queue_cleanup(C, _AllConsumerNames, _QTab, NewAck, OldAck, State) ->
     lager:error("hit here 4, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
     {State, C}.
 
@@ -838,26 +867,27 @@ consumer_needs_trim(#c{consumer_max_bytes = MaxBytes, consumer_qbytes = CBytes})
     CBytes > MaxBytes.
 
 trim_consumers_q(State = #state{cs = Cs}, Seq) ->
+    AllConsumerNames = [C#c.name || C <- Cs],
     TrimmedCs = [C || C <- Cs, not consumer_needs_trim(C)],
     case Cs -- TrimmedCs of
         [] ->
             State;
         NotTrimmedCs ->
-            trim_consumers_q_entries(State, TrimmedCs, NotTrimmedCs, Seq)
+            trim_consumers_q_entries(State, AllConsumerNames, TrimmedCs, NotTrimmedCs, Seq)
     end.
 
-trim_consumers_q_entries(State, TrimmedCs, [], '$end_of_table') ->
+trim_consumers_q_entries(State, _AllConsumerNames, TrimmedCs, [], '$end_of_table') ->
     State#state{cs = TrimmedCs};
-trim_consumers_q_entries(State, TrimmedCs, [], _Seq) ->
+trim_consumers_q_entries(State, _AllConsumerNames, TrimmedCs, [], _Seq) ->
     State#state{cs = TrimmedCs};
-trim_consumers_q_entries(State, TrimmedCs, NotTrimmedCs, '$end_of_table') ->
+trim_consumers_q_entries(State, _AllConsumerNames, TrimmedCs, NotTrimmedCs, '$end_of_table') ->
     lager:warning("rtq trim consumer q, end of table with consumers needing trimming ~p", [NotTrimmedCs]),
     State#state{cs = TrimmedCs ++ NotTrimmedCs};
-trim_consumers_q_entries(State = #state{qtab = QTab}, TrimmedCs, NotTrimmedCs, Seq) ->
-    [{_, _, Bin, _Meta, TooAckList}] = ets:lookup(QTab, Seq),
+trim_consumers_q_entries(State = #state{qtab = QTab}, AllConsumerNames, TrimmedCs, NotTrimmedCs, Seq) ->
+    [{_, _, Bin, _Meta, AckList}] = ets:lookup(QTab, Seq),
     ShrinkSize = ets_obj_size(Bin, State),
     NotTrimmedCNames = [C#c.name || C <- NotTrimmedCs],
-
+    TooAckList = AllConsumerNames -- AckList,
     {NewState, NewConsumers} =
         case TooAckList -- NotTrimmedCNames of
             [] ->
@@ -932,10 +962,10 @@ trim_global_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
         '$end_of_table' ->
             {Cs, State, Entries, Objects};
         TrimSeq ->
-            [{_, NumObjects, Bin, _Meta, TooAckList}] = ets:lookup(QTab, TrimSeq),
+            [{_, NumObjects, Bin, _Meta, AckList}] = ets:lookup(QTab, TrimSeq),
             ShrinkSize = ets_obj_size(Bin, State),
             NewState1 = update_q_size(State, -ShrinkSize),
-            NewState2 = update_consumer_q_sizes(NewState1, -ShrinkSize, TooAckList),
+            NewState2 = update_consumer_q_sizes(NewState1, -ShrinkSize, AckList),
             ets:delete(QTab, TrimSeq),
             Cs2 = [case CSeq < TrimSeq of
                        true ->

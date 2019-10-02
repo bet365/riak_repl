@@ -480,8 +480,8 @@ ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
 
             case Seq > C#c.aseq of
                 true ->
-                    {NewState, NewC} = queue_cleanup(C, QTab, C#c.aseq, Seq, State),
-                    NewState#state{cs = Rest ++ [NewC]};
+                    {NewState, NewC} = queue_cleanup(C, QTab, Seq, C#c.aseq, State),
+                    NewState#state{cs = Rest ++ [NewC#c{aseq = Seq}]};
                 false ->
                     State
             end
@@ -547,7 +547,7 @@ unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
                     _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
             end,
 
-            {NewState, _NewC} = queue_cleanup(C, QTab, C#c.aseq, State#state.qseq, State),
+            {NewState, _NewC} = queue_cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
             {ok, NewState#state{cs = Cs2}};
         false ->
             {{error, not_registered}, State}
@@ -764,29 +764,35 @@ set_meta({_Seq, _NumItems, _Bin, Meta} = QEntry, Key, Value) ->
     Meta2 = orddict:store(Key, Value, Meta),
     setelement(4, QEntry, Meta2).
 
-queue_cleanup(C, _QTab, '$end_of_table', _TooSeq, State) ->
+queue_cleanup(C, _QTab, '$end_of_table', OldSeq, State) ->
+    A = end_of_table,
+    lager:error("hit here 0, NewAck: ~p, OldAck: ~p", [A, OldSeq]),
     {State, C};
-queue_cleanup(C, QTab, FromSeq, TooSeq, State) when FromSeq >= TooSeq ->
-    case ets:lookup(QTab, FromSeq) of
+queue_cleanup(C, QTab, NewAck, OldAck, State) when NewAck >= OldAck ->
+    case ets:lookup(QTab, NewAck) of
         [] ->
-            queue_cleanup(C, QTab, ets:next(QTab, FromSeq), TooSeq, State);
+            lager:error("hit here 1, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
+            queue_cleanup(C, QTab, ets:prev(QTab, NewAck), OldAck, State);
         [{_, _, Bin, _Meta, TooAckList}] ->
+            lager:error("hit here 2, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
             ShrinkSize = ets_obj_size(Bin, State),
             NewC = update_cq_size(C, -ShrinkSize),
             State2 = case TooAckList -- [C#c.name] of
                          [] ->
-                             ets:delete(QTab, FromSeq),
+                             ets:delete(QTab, NewAck),
                              update_q_size(State, -ShrinkSize);
                          NewTooAckList ->
-                             ets:update_element(QTab, FromSeq, {5, NewTooAckList}),
+                             ets:update_element(QTab, NewAck, {5, NewTooAckList}),
                              State
                      end,
-            queue_cleanup(NewC#c{aseq = FromSeq}, QTab, ets:next(QTab, FromSeq), TooSeq, State2);
+            queue_cleanup(NewC, QTab, ets:prev(QTab, NewAck), OldAck, State2);
         _ ->
+            lager:error("hit here 3, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
             lager:warning("Unexpected object in RTQ"),
             {State, C}
     end;
-queue_cleanup(C, _QTab, _FromSeq, _TooSeq, State) ->
+queue_cleanup(C, _QTab, NewAck, OldAck, State) ->
+    lager:error("hit here 4, NewAck: ~p, OldAck: ~p", [NewAck, OldAck]),
     {State, C}.
 
 ets_obj_size(Obj, _State=#state{word_size = WordSize}) when is_binary(Obj) ->

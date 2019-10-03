@@ -78,6 +78,7 @@
             aseq = 0,  % last sequence acked
             cseq = 0,  % last sequence sent
             skips = 0,
+            filtered = 0,
             drops = 0, % number of dropped queue entries (not items)
             errs = 0,  % delivery errors
             deliver,  % deliver function if pending, otherwise undefined
@@ -87,7 +88,6 @@
             % been dropped since the last delivery. The sink side can't
             % determine if there's been drops accurately if the source says there
             % were skips before it's sent even one item.
-            filtered = 0,
             last_seen,  % a timestamp of when we received the last ack to measure latency
             consumer_qbytes = 0,
             consumer_max_bytes = undefined
@@ -741,7 +741,7 @@ maybe_deliver_item(C, QEntry) ->
         {true, false} when C#c.delivered ->
             %% add to filtered list in queue
             Skipped = C#c.skips + 1,
-            {skipped, C#c{skips = Skipped}};
+            {skipped, C#c{skips = Skipped, cseq = Seq}};
 
         {true, false} ->
             %% add to filtered list in queue

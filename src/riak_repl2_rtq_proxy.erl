@@ -43,10 +43,8 @@ push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 
 push(NumItems, Bin, Meta) ->
-    push(NumItems, Bin, Meta, []).
+    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta}).
 
-push(NumItems, Bin, Meta, AckList) ->
-    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta, AckList}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -75,8 +73,6 @@ handle_cast({push, NumItems, _Bin, _Meta}, State = #state{nodes=[]}) ->
     catch(riak_repl_stats:rt_source_errors()),
     {noreply, State};
 handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
-    handle_cast({push, NumItems, W1BinObjs, Meta, []}, State);
-handle_cast({push, NumItems, W1BinObjs, Meta, AckList}, State) ->
     %% push items to another node for queueing. If the other node does not speak binary
     %% object format, then downconvert the items (if needed) before pushing.
     [Node | Nodes] = State#state.nodes,
@@ -87,9 +83,12 @@ handle_cast({push, NumItems, W1BinObjs, Meta, AckList}, State) ->
         true ->
             case riak_core_capability:get({riak_repl, ack_list}, false) of
                 false ->
-                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
+                    %% remove data from meta (could do it in queue!)
+                    Meta1 = orddict:erase(acked_clusters, Meta),
+                    Meta2 = orddict:erase(filtered_clusters, Meta1),
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta2});
                 true ->
-                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta, AckList})
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta})
             end;
         false ->
             gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs})

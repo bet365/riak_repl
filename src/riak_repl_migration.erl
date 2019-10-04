@@ -82,7 +82,7 @@ drain_queue(false, Peer, PeerWireVer) ->
     % would have made this a standard function, but I need a closure for the
     % value Peer
     riak_repl2_rtq:pull_sync(qm,
-             fun ({Seq, NumItem, W1BinObjs, Meta, TooAckList}) ->
+             fun ({Seq, NumItem, W1BinObjs, Meta}) ->
                 try
                     BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
                     CastObj = case PeerWireVer of
@@ -91,9 +91,12 @@ drain_queue(false, Peer, PeerWireVer) ->
                         w1 ->
                             case riak_core_capability:get({riak_repl, ack_list}, false) of
                                 false ->
-                                    {push, NumItem, BinObjs, Meta};
+                                    %% remove data from meta
+                                    Meta1 = orddict:erase(acked_clusters, Meta),
+                                    Meta2 = orddict:erase(filtered_clusters, Meta1),
+                                    {push, NumItem, BinObjs, Meta2};
                                 true ->
-                                    {push, NumItem, BinObjs, Meta, TooAckList}
+                                    {push, NumItem, BinObjs, Meta}
                             end
                     end,
                     gen_server:cast({riak_repl2_rtq,Peer}, CastObj),

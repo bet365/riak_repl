@@ -370,10 +370,9 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
 
             false ->
                 %% New registration, start from the beginning
-                %% TODO: loop ets, update consumer q size, add self to filter list if required
+                %% loop the rtq, update consumer q size, and add self to filter list if required
                 CSeq = MinSeq,
-                {State, NewC} = register_new_consumer(QTab, #c{name = Name, aseq = CSeq, cseq = CSeq}, CSeq, QSeq),
-                [NewC | Cs]
+                register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab))
         end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
@@ -571,15 +570,57 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
     end.
 
 
-register_new_consumer(QTab, #c{consumer_qbytes = CBytes} = C, Start, End) ->
-    ok.
+register_new_consumer(_State, C, '$end_of_table') ->
+    C;
+register_new_consumer(#state{qtab = QTab} = State, #c{name = Name} = C, Seq) ->
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            %% entry removed
+            register_new_consumer(QTab, C, ets:next(QTab, Seq));
+        [QEntry] ->
+            {Seq, NumItems, Bin, Meta} = QEntry,
+            Size = ets_obj_size(Bin, State),
+            RoutedList = meta_get(routed_clusters, [], Meta),
+            FilteredList = meta_get(filtered_clusters, [], Meta),
+            AckedList = meta_get(acked_clusters, [], Meta),
+            ShouldSkip = lists:member(Name, RoutedList),
+            ShouldFilter =  riak_repl2_object_filter:realtime_filter(Name, Meta),
+            AlreadyAcked = lists:member(Name, AckedList),
+            {ShouldSend, {UpdatedMeta, NewMeta}} =
+                register_new_consumer_update_meta(Name, Meta, ShouldSkip, ShouldFilter, AlreadyAcked, FilteredList),
+            case UpdatedMeta of
+                true ->
+                    ets:insert(QTab, {Seq, NumItems, Bin, NewMeta});
+                false ->
+                    ok
+            end,
+            NewC = case ShouldSend of
+                       true ->
+                           update_cq_size(C, Size);
+                       false ->
+                           C
+                   end,
+            register_new_consumer(State, NewC, ets:next(QTab, Seq))
+    end.
+
+%% should skip, true
+register_new_consumer_update_meta(_Name, Meta, true, _, _, _FilteredList) ->
+    {false, {false, Meta}};
+%% should filter, true
+register_new_consumer_update_meta(Name, Meta, _, true, _, FilteredList) ->
+    {false, {true, orddict:store(filtered_clusters, [Name | FilteredList], Meta)}};
+%% already acked, true
+register_new_consumer_update_meta(_Name, Meta, _, _, true, _FilteredList) ->
+    {false, {false, Meta}};
+%% should send, true
+register_new_consumer_update_meta(_Name, Meta, false, false, false, _FilteredList) ->
+    {true, {false, Meta}}.
 
 
 allowed_filtered_consumers(Cs, Meta) ->
     AllConsumers = [Consumer#c.name || Consumer <- Cs],
-    Filter = fun(ConsumerName) -> riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) end,
-    Allowed = [CName || CName <- AllConsumers, not Filter(CName)],
-    Filtered = AllConsumers -- Allowed,
+    Filtered = [CName || CName <- AllConsumers, riak_repl2_object_filter:realtime_filter(CName, Meta)],
+    Allowed = AllConsumers -- Filtered,
     {Allowed, Filtered}.
 
 meta_get(Key, Default, Meta) ->

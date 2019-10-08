@@ -302,30 +302,50 @@ init(Options) ->
 handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
                                           qseq = QSeq, cs = Cs}) ->
     Consumers =
-        [{Name, [{pending, QSeq - CSeq},  % items to be send
+        [{Name, [{consumer_qbytes, CBytes},
+                 {consumer_max_qbytes, CMaxBytes},
+                 {pending, QSeq - CSeq},  % items to be send
                  {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
+                 {c_drops, CDrops},
+                 {q_drops, QDrops},
                  {drops, Drops},          % number of dropped entries due to max bytes
                  {errs, Errs},            % number of non-ok returns from deliver fun
-                 {filtered, Filters}]}    % number of objects filtered
-         || #c{name = Name, aseq = ASeq, cseq = CSeq,
-               drops = Drops, errs = Errs, skips = Skips, filtered = Filters} <- Cs],
+                 {filtered, Filtered}]}    % number of objects filtered
 
-    ConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
+         || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
+            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes, consumer_max_bytes = CMaxBytes} <- Cs],
+
+    GetTrimmedFolsomMetrics =
+        fun(MetricName) ->
+            lists:foldl(fun
+                            ({min, Value}, Acc) -> [{latency_min, Value} | Acc];
+                            ({max, Value}, Acc) -> [{latency_max, Value} | Acc];
+                            ({percentile, Value}, Acc) -> [{latency_percentile, Value} | Acc];
+                            (_, Acc) -> Acc
+                        end, [], folsom_metrics:get_histogram_statistics(MetricName))
+        end,
+
+
+    UpdatedConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
                                     MetricName = {latency, ConsumerName},
                                     case folsom_metrics:metric_exists(MetricName) of
                                         true ->
-                                            Acc ++ [{ConsumerName, folsom_metrics:get_histogram_statistics(MetricName)}];
+                                            case lists:keytake(ConsumerName, 1, Acc) of
+                                                {value, {ConsumerName, ConsumerStats}, Rest} ->
+                                                    [{ConsumerName, ConsumerStats ++ GetTrimmedFolsomMetrics(MetricName)} | Rest];
+                                                _ ->
+                                                    Acc
+                                            end;
                                         false ->
                                             Acc
                                     end
-                                end, [], [ C#c.name || C <- Cs ]),
+                                end, Consumers, [ C#c.name || C <- Cs ]),
 
     Status =
         [{bytes, qbytes(QTab, State)},
          {max_bytes, MaxBytes},
-         {consumers, Consumers},
-         {overload_drops, State#state.overload_drops},
-         {consumer_latency, ConsumerStats}],
+         {consumers, UpdatedConsumerStats},
+         {overload_drops, State#state.overload_drops}],
     {reply, Status, State};
 
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
@@ -372,7 +392,8 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
                 %% New registration, start from the beginning
                 %% loop the rtq, update consumer q size, and add self to filter list if required
                 CSeq = MinSeq,
-                register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab))
+                RegisteredConsumer = register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab)),
+                [RegisteredConsumer | Cs]
         end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
@@ -630,10 +651,6 @@ meta_get(Key, Default, Meta) ->
     end.
 
 
-push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
-    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
-    State;
-
 push(NumItems, Bin, Meta,
     State = #state{qtab = QTab, qseq = QSeq, cs = Cs, shutting_down = false}) ->
 
@@ -674,7 +691,10 @@ push(NumItems, Bin, Meta,
                 NewState = update_q_size(State2, Size),
                 update_consumer_q_sizes(NewState, Size, ConsumersToUpdate)
         end,
-    trim_q(State3).
+    trim_q(State3);
+push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
+    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+    State.
 
 pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
      CsNames = [C#c.name || C <- Cs],

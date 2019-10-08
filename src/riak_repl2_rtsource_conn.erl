@@ -538,7 +538,6 @@ connect(RemoteName) ->
                   {bytes,0},
                   {max_bytes,104857600},
                   {consumers,[]},
-                  {overload_drops,0},
-                  {consumer_latency,[]}], RTQStats).
+                  {overload_drops,0}], RTQStats).
 
 -endif.

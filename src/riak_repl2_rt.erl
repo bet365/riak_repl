@@ -11,7 +11,6 @@
 -export([start_link/0, status/0, register_sink/1, get_sink_pids/0]).
 -export([enable/1, disable/1, enabled/0, start/1, stop/1, started/0]).
 -export([ensure_rt/2, register_remote_locator/0, postcommit/1]).
--export([set_queue_max_bytes/1, set_consumer_max_bytes/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -71,12 +70,6 @@ stop(Remote) ->
 started() ->
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     riak_repl_ring:rt_started(Ring).
-
-set_queue_max_bytes(Bytes) ->
-    ok.
-
-set_consumer_max_bytes(Remote, MaxBytes) ->
-    ok.
 
 %% Ensure the running realtime repl configuration on this node matches
 %% the desired configuration in the ring.

@@ -1133,3 +1133,24 @@ object_filtering_print_config([Mode]) ->
     riak_repl2_object_filter_console:get_config(Mode);
 object_filtering_print_config([Mode, Remote]) ->
     riak_repl2_object_filter_console:get_config(Mode, Remote).
+
+
+%% ========================================================================================================= %%
+%% Realtime Queue Max Bytes
+%% ========================================================================================================= %%
+
+set_realtime_queue_max_bytes([Bytes]) ->
+%%    ?RTQ_QUEUE_MAX_BYTES_PREFIX node
+    %% set it for all nodes
+    ok;
+set_realtime_queue_max_bytes([Bytes, Node]) ->
+    %% set it for a specific node
+    ok.
+
+set_realtime_queue_consumer_max_bytes([Bytes, Consumer]) ->
+%%    ?RTQ_CONSUMER_QUEUE_MAX_BYTES_PREFIX {consumer, node}
+    %% set for all nodes
+    ok;
+set_realtime_queue_consumer_max_bytes([Bytes, Consumer, Node]) ->
+    %% set for specific node
+    ok.

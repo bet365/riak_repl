@@ -16,6 +16,7 @@
 %% The queue is currently stored in a private ETS table.  Once
 %% all consumers are done with an item it is removed from the table.
 -module(riak_repl2_rtq).
+-include("riak_repl.hrl").
 
 -behaviour(gen_server).
 %% API
@@ -24,7 +25,6 @@
          start_test/0,
          register/1,
          unregister/1,
-         set_queue_max_bytes/1,
          push/3,
          push/2,
          pull/2,
@@ -56,7 +56,7 @@
 
 -record(state, {qtab = ets:new(?MODULE, [protected, ordered_set]), % ETS table
                 qseq = 0,  % Last sequence number handed out
-                max_bytes = undefined, % maximum ETS table memory usage in bytes
+                default_max_bytes = undefined, % maximum ETS table memory usage in bytes
 
                 % if the message q exceeds this, the rtq is overloaded
                 overload = ?DEFAULT_OVERLOAD :: pos_integer(),
@@ -91,8 +91,7 @@
             % determine if there's been drops accurately if the source says there
             % were skips before it's sent even one item.
             last_seen,  % a timestamp of when we received the last ack to measure latency
-            consumer_qbytes = 0,
-            consumer_max_bytes = undefined
+            consumer_qbytes = 0
            }).
 
 -type name() :: term().
@@ -150,17 +149,6 @@ is_empty(Name) ->
 -spec all_queues_empty() -> boolean().
 all_queues_empty() ->
     gen_server:call(?SERVER, all_queues_empty, infinity).
-
-%% @doc Set the maximum number of bytes to use - could take a while to return
-%% on a big queue. The maximum is for the backend data structure used itself,
-%% not just the raw size of the objects. This was chosen to keep a situation
-%% where overhead of stored objects would cause more memory to be used than
-%% expected just looking at MaxBytes.
--spec set_queue_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
-set_queue_max_bytes(MaxBytes) ->
-    % TODO if it always returns 'ok' it should likely be a cast, eg:
-    % why are we blocking the caller while it trims the queue?
-    gen_server:call(?SERVER, {set_queue_max_bytes, MaxBytes}, infinity).
 
 %% @doc Push an item onto the queue. Bin should be the list of objects to push
 %% run through term_to_binary, while NumItems is the length of that list
@@ -293,17 +281,20 @@ report_drops(N) ->
 %% @private
 init(Options) ->
     %% Default maximum realtime queue size to 100Mb
-    MaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
+    DefaultMaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{max_bytes = MaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+    {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 %% @private
-handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
+handle_call(status, _From, State = #state{qtab = QTab, default_max_bytes = DefaultMaxBytes,
                                           qseq = QSeq, cs = Cs}) ->
-    Consumers =
+
+  MaxBytes = get_queue_max_bytes(DefaultMaxBytes),
+
+  Consumers =
         [{Name, [{consumer_qbytes, CBytes},
-                 {consumer_max_qbytes, CMaxBytes},
+                 {consumer_max_qbytes, get_consumer_max_bytes(C)},
                  {pending, QSeq - CSeq},  % items to be send
                  {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
                  {c_drops, CDrops},
@@ -313,7 +304,7 @@ handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
                  {filtered, Filtered}]}    % number of objects filtered
 
          || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
-            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes, consumer_max_bytes = CMaxBytes} <- Cs],
+            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
 
     GetTrimmedFolsomMetrics =
         fun(MetricName) ->
@@ -412,8 +403,6 @@ handle_call({unregister, Name}, _From, State) ->
             {reply, {error, not_registered}, State}
   end;
 
-handle_call({set_queue_max_bytes, MaxBytes}, _From, State) ->
-    {reply, ok, trim_q(State#state{max_bytes = MaxBytes})};
 handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};
 
@@ -905,17 +894,17 @@ update_cq_size(C = #c{consumer_qbytes = QBytes}, Diff) ->
 %% Trim the queue if necessary
 trim_q(State = #state{qtab = QTab}) ->
     State1 = trim_consumers_q(State, ets:first(QTab)),
-    trim_global_q(State1).
+    trim_global_q(get_queue_max_bytes(State1), State1).
 
 
-consumer_needs_trim(#c{consumer_max_bytes = undefined}) ->
+consumer_needs_trim(undefined, _) ->
     false;
-consumer_needs_trim(#c{consumer_max_bytes = MaxBytes, consumer_qbytes = CBytes}) ->
+consumer_needs_trim(MaxBytes, #c{consumer_qbytes = CBytes}) ->
     CBytes > MaxBytes.
 
 trim_consumers_q(State = #state{cs = Cs}, Seq) ->
     AllClusters = [C#c.name || C <- Cs],
-    TrimmedCs = [C || C <- Cs, not consumer_needs_trim(C)],
+    TrimmedCs = [C || C <- Cs, not consumer_needs_trim(get_consumer_max_bytes(C), C)],
     case Cs -- TrimmedCs of
         [] ->
             State;
@@ -974,9 +963,9 @@ trim_single_consumer_q_entry(C = #c{cseq = CSeq}, ShrinkSize, TrimSeq) ->
 
 
 
-trim_global_q(State = #state{max_bytes = undefined}) ->
+trim_global_q(undefined, State) ->
     State;
-trim_global_q(State = #state{qtab = QTab, qseq = QSeq, max_bytes = MaxBytes}) ->
+trim_global_q(MaxBytes, State = #state{qtab = QTab, qseq = QSeq}) ->
     case qbytes(QTab, State) > MaxBytes of
         true ->
             {Cs2, NewState} = trim_global_q_entries(QTab, MaxBytes, State#state.cs,
@@ -1062,6 +1051,12 @@ get_all_delivery_funs(C) ->
         Deliver ->
             C#c.delivery_funs ++ [Deliver]
     end.
+
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+  riak_core_metadata:get(?RTQ_QUEUE_MAX_BYTES_PREFIX, node(), Default).
+
+get_consumer_max_bytes(#c{name = Name}) ->
+  riak_core_metadata:get(?RTQ_CONSUMER_QUEUE_MAX_BYTES_PREFIX, {Name, node()}, undefined).
 
 -ifdef(TEST).
 qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->

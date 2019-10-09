@@ -401,9 +401,7 @@ initial_config() ->
        {listeners, []},
        {sites, []},
        {realtime_cascades, always},
-       {version, ?REPL_VERSION},
-       {filteredbuckets, []},
-       {bucket_filtering_enabled, false}]
+       {version, ?REPL_VERSION}]
       ).
 
 add_list_trans(Item, ListName, Ring) ->

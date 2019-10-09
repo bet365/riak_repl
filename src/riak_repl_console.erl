@@ -433,20 +433,27 @@ disconnect([IP, PortStr]) ->
     riak_core_cluster_mgr:remove_remote_cluster({IP, Port}),
     ok.
 
-realtime([Cmd, Remote]) ->
+realtime(["consumer_max_bytes", Remote, MaxBytes]) ->
+    ?LOG_USER_CMD("Setting Max Bytes: ~p for Consumer: ~p", [MaxBytes, Remote]),
+    riak_repl2_rt:set_consumer_max_bytes(Remote, MaxBytes),
+    ok;
+realtime([Cmd, Arg]) ->
     case Cmd of
         "enable" ->
-            ?LOG_USER_CMD("Enable Realtime Replication to cluster ~p", [Remote]),
-            riak_repl2_rt:enable(Remote);
+            ?LOG_USER_CMD("Enable Realtime Replication to cluster ~p", [Arg]),
+            riak_repl2_rt:enable(Arg);
         "disable" ->
-            ?LOG_USER_CMD("Disable Realtime Replication to cluster ~p", [Remote]),
-            riak_repl2_rt:disable(Remote);
+            ?LOG_USER_CMD("Disable Realtime Replication to cluster ~p", [Arg]),
+            riak_repl2_rt:disable(Arg);
         "start" ->
-            ?LOG_USER_CMD("Start Realtime Replication to cluster ~p", [Remote]),
-            riak_repl2_rt:start(Remote);
+            ?LOG_USER_CMD("Start Realtime Replication to cluster ~p", [Arg]),
+            riak_repl2_rt:start(Arg);
         "stop" ->
-            ?LOG_USER_CMD("Stop Realtime Replication to cluster ~p", [Remote]),
-            riak_repl2_rt:stop(Remote)
+            ?LOG_USER_CMD("Stop Realtime Replication to cluster ~p", [Arg]),
+            riak_repl2_rt:stop(Arg);
+        "queue_max_bytes" ->
+            ?LOG_USER_CMD("Setting Max Bytes: ~p for Consumer: ~p", [Arg]),
+            riak_repl2_rt:set_queue_max_bytes(Arg)
     end,
     ok;
 realtime([Cmd]) ->
@@ -459,7 +466,11 @@ realtime([Cmd]) ->
         "stop" ->
             ?LOG_USER_CMD("Stop Realtime Replication to all connected clusters",
                       []),
-            _ = [riak_repl2_rt:stop(Remote) || Remote <- Remotes]
+            _ = [riak_repl2_rt:stop(Remote) || Remote <- Remotes];
+        "queue_max_bytes" ->
+            ok;
+        "consumer_max_bytes" ->
+            ok
     end,
     ok.
 

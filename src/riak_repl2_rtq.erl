@@ -24,7 +24,7 @@
          start_test/0,
          register/1,
          unregister/1,
-         set_max_bytes/1,
+         set_queue_max_bytes/1,
          push/3,
          push/2,
          pull/2,
@@ -156,11 +156,11 @@ all_queues_empty() ->
 %% not just the raw size of the objects. This was chosen to keep a situation
 %% where overhead of stored objects would cause more memory to be used than
 %% expected just looking at MaxBytes.
--spec set_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
-set_max_bytes(MaxBytes) ->
+-spec set_queue_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
+set_queue_max_bytes(MaxBytes) ->
     % TODO if it always returns 'ok' it should likely be a cast, eg:
     % why are we blocking the caller while it trims the queue?
-    gen_server:call(?SERVER, {set_max_bytes, MaxBytes}, infinity).
+    gen_server:call(?SERVER, {set_queue_max_bytes, MaxBytes}, infinity).
 
 %% @doc Push an item onto the queue. Bin should be the list of objects to push
 %% run through term_to_binary, while NumItems is the length of that list
@@ -412,7 +412,7 @@ handle_call({unregister, Name}, _From, State) ->
             {reply, {error, not_registered}, State}
   end;
 
-handle_call({set_max_bytes, MaxBytes}, _From, State) ->
+handle_call({set_queue_max_bytes, MaxBytes}, _From, State) ->
     {reply, ok, trim_q(State#state{max_bytes = MaxBytes})};
 handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};

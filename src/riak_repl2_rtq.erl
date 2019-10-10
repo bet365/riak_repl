@@ -287,10 +287,9 @@ init(Options) ->
     {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 %% @private
-handle_call(status, _From, State = #state{qtab = QTab, default_max_bytes = DefaultMaxBytes,
-                                          qseq = QSeq, cs = Cs}) ->
+handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
 
-  MaxBytes = get_queue_max_bytes(DefaultMaxBytes),
+  MaxBytes = get_queue_max_bytes(State),
 
   Consumers =
         [{Name, [{consumer_qbytes, CBytes},
@@ -1052,20 +1051,29 @@ get_all_delivery_funs(C) ->
             C#c.delivery_funs ++ [Deliver]
     end.
 
-get_queue_max_bytes(#state{default_max_bytes = Default}) ->
-  riak_core_metadata:get(?RTQ_QUEUE_MAX_BYTES_PREFIX, node(), Default).
 
-get_consumer_max_bytes(#c{name = Name}) ->
-  riak_core_metadata:get(?RTQ_CONSUMER_QUEUE_MAX_BYTES_PREFIX, {Name, node()}, undefined).
 
 -ifdef(TEST).
 qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
     %% when EQC testing, don't account for ETS overhead
     QSizeBytes.
+
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+    Default.
+
+get_consumer_max_bytes(_) ->
+    undefined.
+
 -else.
 qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
+
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes, Default).
+
+get_consumer_max_bytes(#c{name = Name}) ->
+    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}, undefined).
 -endif.
 
 is_queue_empty(Name, Cs) ->

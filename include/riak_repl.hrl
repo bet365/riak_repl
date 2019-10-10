@@ -48,8 +48,7 @@
 -define(BT_META_PROPS_HASH, properties_hash_val).
 -define(BT_META_BLACKLIST, realtime_blacklist).
 
--define(RTQ_CONSUMER_QUEUE_MAX_BYTES_PREFIX, riak_repl2_rtq_consumer_max_bytes).
--define(RTQ_QUEUE_MAX_BYTES_PREFIX, riak_repl2_rtq_max_bytes).
+-define(RIAK_REPL2_RTQ_CONFIG_KEY, {riak_repl2_rtq, config}).
 
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).

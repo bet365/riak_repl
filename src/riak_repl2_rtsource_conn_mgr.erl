@@ -1,6 +1,8 @@
 -module(riak_repl2_rtsource_conn_mgr).
 -behaviour(gen_server).
 
+-include("riak_repl.hrl").
+
 %% API
 -export([start_link/1]).
 
@@ -118,6 +120,7 @@ init([Remote]) ->
             end;
         v1 ->
             riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), []),
+            riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, []),
             case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, multi_connection) of
                 {ok, Ref} ->
                     {SourceNodes, SinkNodes} = case get_source_and_sink_nodes(Remote) of
@@ -172,7 +175,8 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _Fro
                         v1 ->
                             % save to ring
                             lager:info("Adding remote connections to data_mgr: ~p", [dict:fetch_keys(NewEndpoints)]),
-                            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), dict:fetch_keys(NewEndpoints))
+                            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), dict:fetch_keys(NewEndpoints)),
+                            riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, dict:fetch_keys(NewEndpoints))
                     end,
 
                     {reply, ok, NewState#state{endpoints = NewEndpoints}};
@@ -245,7 +249,8 @@ handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote
                            legacy ->
                                ok;
                            v1 ->
-                               riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote, node(), IPPort, Primary)
+                               riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote, node(), IPPort, Primary),
+                               riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, dict:fetch_keys(NewEndpoints))
                        end,
 
                        case Reason of
@@ -310,6 +315,13 @@ terminate(Reason, _State=#state{remote = Remote, endpoints = E}) ->
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 %%%=====================================================================================================================
+
+overwrite_shared_endpoints(Remote, Endpoints) ->
+    riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY(list_to_atom(Remote)), {realtime_connections, node()}, dict:fetch_keys(Endpoints)).
+
+get_shared_endpoints(Remote) ->
+    %% iterate!
+    ok.
 
 %%%===================================================================
 %%% Internal functions

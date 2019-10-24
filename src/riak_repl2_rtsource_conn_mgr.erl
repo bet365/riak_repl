@@ -22,7 +22,7 @@
     stop/1,
     get_all_status/1,
     get_all_status/2,
-    get_source_and_sink_nodes/1,
+    get_source_and_sink_nodes/2,
     get_endpoints/1,
     get_rtsource_conn_pids/1
 ]).
@@ -48,7 +48,8 @@
     source_nodes,
     sink_nodes,
     remove_endpoint,
-    endpoints
+    endpoints,
+    active_nodes
 }).
 
 %%%===================================================================
@@ -119,19 +120,18 @@ init([Remote]) ->
                     {stop, Reason}
             end;
         v1 ->
-            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), []),
-            riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, []),
+            overwrite_shared_endpoints(v1, Remote, []),
             case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, multi_connection) of
                 {ok, Ref} ->
-                    {SourceNodes, SinkNodes} = case get_source_and_sink_nodes(Remote) of
+                    State0 = #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E,
+                        rebalance_delay_fun = M, rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs},
+                    {SourceNodes, SinkNodes} = case get_source_and_sink_nodes(State0, Remote) of
                                                    no_leader ->
                                                        {[], []};
                                                    {X,Y} ->
                                                        {X,Y}
                                                end,
-
-                    {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes}};
+                    {ok, State0#state{source_nodes = SourceNodes, sink_nodes = SinkNodes}};
                 {error, Reason}->
                     lager:warning("Error connecting to remote, verions: v1"),
                     {stop, Reason}
@@ -175,8 +175,7 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _Fro
                         v1 ->
                             % save to ring
                             lager:info("Adding remote connections to data_mgr: ~p", [dict:fetch_keys(NewEndpoints)]),
-                            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), dict:fetch_keys(NewEndpoints)),
-                            riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, dict:fetch_keys(NewEndpoints))
+                            overwrite_shared_endpoints(v1, Remote, dict:fetch_keys(NewEndpoints))
                     end,
 
                     {reply, ok, NewState#state{endpoints = NewEndpoints}};
@@ -243,16 +242,7 @@ handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote
                    {Key, Pid} ->
                        NewEndpoints = dict:erase(Key, E),
                        State2 = State#state{endpoints = NewEndpoints},
-                       {IPPort, Primary} = Key,
-
-                       case Version of
-                           legacy ->
-                               ok;
-                           v1 ->
-                               riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote, node(), IPPort, Primary),
-                               riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY, {realtime_connections, Remote, node()}, dict:fetch_keys(NewEndpoints))
-                       end,
-
+                       overwrite_shared_endpoints(Version, Remote, dict:fetch_keys(NewEndpoints)),
                        case Reason of
                            normal ->
                                lager:info("riak_repl2_rtsource_conn terminated due to reason nomral, Endpoint: ~p", [Key]);
@@ -316,18 +306,30 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 %%%=====================================================================================================================
 
-overwrite_shared_endpoints(Remote, Endpoints) ->
-    riak_core_metadata:put(?RIAK_REPL2_RTSOURCE_KEY(list_to_atom(Remote)), {realtime_connections, node()}, dict:fetch_keys(Endpoints)).
+overwrite_shared_endpoints(Version, Remote, Endpoints) ->
+    overwrite_shared_endpoints(Version, Remote, Endpoints, node()).
+overwrite_shared_endpoints(v1, Remote, Endpoints, Node) ->
+    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, Node, Endpoints),
+    overwrite_shared_endpoints(v2, Remote, Endpoints, Node);
+overwrite_shared_endpoints(v2, Remote, Endpoints, Node) ->
+    riak_core_metadata:put(?RTSOURCE_REALTIME_CONNECTIONS_KEY(list_to_atom(Remote)), Node, dict:fetch_keys(Endpoints));
+overwrite_shared_endpoints(_, _Remote, _Endpoints, _Node) ->
+    ok.
 
 get_shared_endpoints(Remote) ->
     %% iterate!
     ok.
 
+get_active_nodes(#state{version = v1}) ->
+    riak_repl2_rtsource_conn_data_mgr:read(active_nodes);
+get_active_nodes(#state{version = v2, active_nodes = ActiveNodes}) ->
+    ActiveNodes.
+
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-maybe_rebalance(State, now) ->
-    case get_source_and_sink_nodes(State#state.remote) of
+maybe_rebalance(#state{version = V} = State, now) ->
+    case get_source_and_sink_nodes(V, State#state.remote) of
         no_leader ->
             lager:info("rebalancing triggered, but an error occured with regard to the leader in the data mgr, will rebalance in 5 seconds"),
             cancel_timer(State#state.rb_timeout_tref),
@@ -341,7 +343,7 @@ maybe_rebalance(State, now) ->
 
                 inconsistent_data ->
                     lager:info("rebalancing triggered, but an inconsistent data was found in realtime connections on data mgr, will rebalance in 5 seconds"),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, State#state.remote, node(), dict:fetch_keys(State#state.endpoints)),
+                    overwrite_shared_endpoints(V, State#state.remote, dict:fetch_keys(State#state.endpoints)),
                     cancel_timer(State#state.rb_timeout_tref),
                     RbTimeoutTref = erlang:send_after(State#state.rebalance_timer, self(), rebalance_now),
                     State#state{rb_timeout_tref = RbTimeoutTref};
@@ -376,7 +378,7 @@ maybe_rebalance(State, now) ->
                     "drop nodes ~p ~n"
                     "connect nodes ~p", [DropNodes, ConnectToNodes]),
                     {_RemoveAllConnections, NewState1} = check_and_drop_connections(State, DropNodes, ConnectedSinkNodes),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState1#state.remote, node(), dict:fetch_keys(NewState1#state.endpoints)),
+                    overwrite_shared_endpoints(V, NewState1#state.remote, dict:fetch_keys(NewState1#state.endpoints)),
                     NewState1#state{sink_nodes = NewSink, source_nodes = NewSource};
 
                 {true, {nodes_up_and_down, DropNodes, ConnectToNodes, Primary, Secondary, ConnectedSinkNodes}} ->
@@ -385,7 +387,7 @@ maybe_rebalance(State, now) ->
                     "connect nodes ~p", [DropNodes, ConnectToNodes]),
                     {RemoveAllConnections, NewState1} = check_and_drop_connections(State, DropNodes, ConnectedSinkNodes),
                     NewState2 = check_remove_endpoint(NewState1, ConnectToNodes),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState2#state.remote, node(), dict:fetch_keys(NewState2#state.endpoints)),
+                    overwrite_shared_endpoints(V, NewState2#state.remote, dict:fetch_keys(NewState2#state.endpoints)),
                     case RemoveAllConnections of
                         true ->
                             rebalance_connect(NewState2#state{sink_nodes = NewSink, source_nodes = NewSource}, Primary++Secondary);
@@ -568,22 +570,23 @@ check_and_drop_connections(State=#state{endpoints = E, remote = R, version = V},
             {false, State#state{endpoints = NewEndpoints, remove_endpoint = undefined}}
     end.
 
-remove_connections([], E, _, _) ->
+
+
+remove_connections(IPAddrs, Endpoints, Remote, Version) ->
+    NewDict = close_rtsource_conn(IPAddrs, Endpoints, Remote),
+    overwrite_shared_endpoints(Version, Remote, dict:fetch_keys(NewDict)),
+    NewDict.
+
+close_rtsource_conn([], E, _) ->
     E;
-remove_connections([Key={Addr, Primary} | Rest], E, Remote, Version) ->
+close_rtsource_conn([Key | Rest], E, Remote) ->
     RtSourcePid = dict:fetch(Key, E),
     exit(RtSourcePid, {shutdown, rebalance, Key}),
     lager:info("rtsource_conn is killed ~p", [Key]),
-    case Version of
-        legacy ->
-            ok;
-        v1 ->
-            riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote, node(), Addr, Primary)
-    end,
-    remove_connections(Rest, dict:erase(Key, E), Remote, Version).
+    close_rtsource_conn(Rest, dict:erase(Key, E), Remote).
 
-get_source_and_sink_nodes(Remote) ->
-    Source = riak_repl2_rtsource_conn_data_mgr:read(active_nodes),
+get_source_and_sink_nodes(State, Remote) ->
+    Source = get_active_nodes(State),
     case Source of
         no_leader ->
             no_leader;

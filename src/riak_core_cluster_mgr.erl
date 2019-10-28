@@ -807,7 +807,7 @@ shuffle(List) ->
 get_my_remote_ip_list(_Remote, [], _Return) ->
     {ok, []};
 get_my_remote_ip_list(Remote, RemoteUnsorted, Return) ->
-    case riak_repl2_rtsource_conn_data_mgr:read(active_nodes) of
+    case riak_repl_util:read_realtime_active_nodes() of
         no_leader ->
             {ok, []};
         %% SourceNodes = [SourceNode1, SourceNode3, SourceNode2 ...]
@@ -871,7 +871,7 @@ build_primary_dict([{Key, Value}| Rest], Dict) ->
 %% sink nodes to an index which would cause active connections to be dropped and made by other nodes.
 %% Output: dict -> Key-Value: {Index, SinkNode}
 link_addrs(AllPrimariesDict, SinkNodes, Remote) ->
-    case riak_repl2_rtsource_conn_data_mgr:read(realtime_connections, Remote) of
+    case riak_repl_util:read_realtime_endpoints(Remote) of
         no_leader ->
             no_leader;
         %% ActiveConnsDict: this is a dictionary of active realtime connections

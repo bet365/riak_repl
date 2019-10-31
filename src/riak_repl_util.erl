@@ -76,6 +76,7 @@
         ]).
 
 -export([
+    delete_realtime_endpoints/1,
     write_realtime_endpoints/4,
     write_realtime_endpoints/3,
     write_realtime_endpoints/2,
@@ -89,6 +90,13 @@
 % ---------------------------------------------------------------------------------- %
 %                           Realtime Functions                                       %
 % ---------------------------------------------------------------------------------- %
+
+delete_realtime_endpoints(Remote) ->
+    Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
+    Endpoints = read_realtime_endpoints(Version, Remote),
+    Keys = dict:fetch_keys(Endpoints),
+    lists:foreach(fun(Node) -> write_realtime_endpoints(Version, Remote, Node, []) end, Keys).
+
 write_realtime_endpoints(Remote, Endpoints) ->
     Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
     write_realtime_endpoints(Version, Remote, Endpoints).

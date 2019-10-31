@@ -82,7 +82,7 @@ init([]) ->
     State = case Version of
                 legacy ->
                     legacy_init(#state{});
-                v1 ->
+                _ ->
                     v1_init(#state{})
             end,
     {ok, State}.
@@ -190,10 +190,10 @@ handle_cast({set_leader_node, LeaderNode}, State=#state{version = V}) ->
             {noreply, State#state{leader_node = LeaderNode, is_leader = true}};
         {legacy, _} ->
             {noreply, State#state{leader_node = LeaderNode, is_leader = false}};
-        {v1, LeaderNode} ->
+        {_, LeaderNode} ->
             gen_server:cast(?SERVER, node_watcher_update),
             {noreply, become_leader(State, LeaderNode)};
-        {v1, _} ->
+        {_, _} ->
             {noreply, become_proxy(State, LeaderNode)}
     end;
 
@@ -354,6 +354,9 @@ handle_info(poll_core_capability, State=#state{version = OldVersion, core_capabi
             [erlang:send_after(30000, Pid, upgrade_connection_version) || {_Remote, Pid} <- riak_repl2_rtsource_conn_sup:enabled()],
             {noreply, v1_init(State)};
         {v1, _} ->
+            {noreply, State};
+        _ ->
+            %% v2 case, no need to worry about this. Everything has moved over to conn_mgr
             {noreply, State}
     end;
 

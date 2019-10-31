@@ -26,7 +26,7 @@ disable(Remote) ->
     lager:info("Stopping replication realtime source ~p", [Remote]),
     _ = supervisor:terminate_child(?MODULE, Remote),
     _ = supervisor:delete_child(?MODULE, Remote),
-    riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote).
+    riak_repl_util:delete_realtime_endpoints(Remote).
 
 enabled() ->
     [ {Remote, ConnMgrPid} || {Remote, ConnMgrPid, _, [riak_repl2_rtsource_conn_mgr]}

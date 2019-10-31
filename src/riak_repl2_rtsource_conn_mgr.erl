@@ -1,4 +1,4 @@
--module(riak_repl2_rtsource_conn_mgr).
+-module( riak_repl2_rtsource_conn_mgr).
 -behaviour(gen_server).
 
 -include("riak_repl.hrl").
@@ -24,7 +24,10 @@
     get_all_status/2,
     get_source_and_sink_nodes/2,
     get_endpoints/1,
-    get_rtsource_conn_pids/1
+    get_rtsource_conn_pids/1,
+
+    node_watcher_update/1,
+    set_leader/2
 ]).
 
 -define(SERVER, ?MODULE).
@@ -81,6 +84,7 @@ stop(Pid) ->
 
 get_all_status(Pid) ->
     get_all_status(Pid, infinity).
+
 get_all_status(Pid, Timeout) ->
     gen_server:call(Pid, all_status, Timeout).
 
@@ -92,6 +96,9 @@ get_rtsource_conn_pids(Pid) ->
 
 node_watcher_update(_Services) ->
     gen_server:cast(?SERVER, node_watcher_update).
+
+set_leader(LeaderNode, _LeaderPid) ->
+    gen_server:cast(?SERVER, {set_leader_node, LeaderNode}).
 
 
 %%%===================================================================
@@ -111,8 +118,8 @@ init([Remote]) ->
         case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
             legacy ->
                 {legacy, legacy};
-            Version ->
-                {Version, multi_connection}
+            V ->
+                {V, multi_connection}
 
         end,
 
@@ -226,12 +233,21 @@ handle_cast({connect_failed, Reason}, State = #state{remote = Remote, endpoints 
         end,
     {noreply, NewState};
 
-handle_cast(rebalance_delayed, State=#state{version = Version}) ->
-    case Version of
-        legacy ->
-            {noreply, maybe_rebalance_legacy(State, delayed)};
-        v1 ->
-            {noreply, maybe_rebalance(State, delayed)}
+handle_cast(rebalance_delayed, State=#state{version = legacy}) ->
+    {noreply, maybe_rebalance_legacy(State, delayed)};
+
+handle_cast(rebalance_delayed, State) ->
+    {noreply, maybe_rebalance(State, delayed)};
+
+handle_cast({set_leader_node, LeaderNode}, State) ->
+    lager:info("setting leader node as: ~p", [LeaderNode]),
+    case node() of
+        LeaderNode ->
+            %% we do this incase it was the previous leader that died!
+            %% we need to remove its connection data from the shared data store between all nodes
+            handle_cast(node_watcher_update, State#state{leader=true});
+        _ ->
+            {noreply, State#state{leader = false}}
     end;
 
 handle_cast(node_watcher_update, State=#state{leader = true, version = v2, remote = Remote}) ->

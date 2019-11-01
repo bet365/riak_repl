@@ -70,7 +70,7 @@ single_node_test_() ->
                 end},
 
                 {"regsiter restore cluster members fun", fun() ->
-                    Fun = fun() -> [{test_name_locator,?REMOTE_CLUSTER_ADDR}] end,
+                    Fun = fun() -> [{cluster_by_addr,?REMOTE_CLUSTER_ADDR}] end,
                     riak_core_cluster_mgr:register_restore_cluster_targets_fun(Fun),
                     ok
                 end},
@@ -801,14 +801,14 @@ check_secondary([Output|Rest], Expected, true) ->
     check_secondary(Rest, Expected, lists:member(Output, Expected)).
 
 make_deps(ActiveSourceNodes, ActiveConns) ->
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
-        fun(active_nodes) ->
-            lists:reverse(ActiveSourceNodes)
-        end),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
-        fun(realtime_connections, _Remote) ->
-            ActiveConns
-        end).
+    meck:expect(riak_repl_util, read_realtime_active_nodes, 0,
+        fun() -> lists:reverse(ActiveSourceNodes) end),
+    meck:expect(riak_repl_util, read_realtime_active_nodes, 1,
+        fun(_) -> lists:reverse(ActiveSourceNodes) end),
+    meck:expect(riak_repl_util, read_realtime_endpoints, 1,
+        fun(_) -> ActiveConns end),
+    meck:expect(riak_repl_util, read_realtime_endpoints, 2,
+        fun(_, _) -> ActiveConns end).
 
 
 wait_for(Fun) ->
@@ -1002,7 +1002,7 @@ start_link_setup(ClusterAddr) ->
     {ok, Pid2} = riak_core_connection_mgr:start_link(),
     {ok, Pid3} = riak_core_cluster_conn_sup:start_link(),
     %% now start cluster manager
-    {ok, Pid4 } = riak_core_cluster_mgr:start_link(),
+    {ok, Pid4} = riak_core_cluster_mgr:start_link(),
     start_fake_remote_cluster_service(),
     {Started, [Leader, Eventer, RingMgr, Pid1, Pid2, Pid3, Pid4]}.
 

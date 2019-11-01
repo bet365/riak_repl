@@ -45,7 +45,8 @@
          overwrite_realtime_connection_data/2,
          get_active_nodes/0,
          overwrite_active_nodes/2,
-         overwrite_active_nodes_and_realtime_connection_data/2
+         overwrite_active_nodes_and_realtime_connection_data/2,
+         cleanup_realtime_connection_data/2
          ]).
 
 -ifdef(TEST).
@@ -558,6 +559,21 @@ get_active_nodes() ->
             get_value(active_nodes, RC, []);
         RingError ->
             RingError
+    end.
+
+cleanup_realtime_connection_data(Ring, _) ->
+    RC = get_repl_config(ensure_config(Ring)),
+    RC2 = dict:erase(active_nodes, RC),
+    RC3 = dict:erase(realtime_connections, RC2),
+    case RC == RC3 of
+        true ->
+            %% nothing changed
+            {ignore, {not_changed, clustername}};
+        false ->
+            {new_ring, riak_core_ring:update_meta(
+                ?MODULE,
+                RC3,
+                Ring)}
     end.
 
 %% ===================================== %%

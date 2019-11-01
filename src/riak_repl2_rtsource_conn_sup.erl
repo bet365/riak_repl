@@ -6,7 +6,10 @@
     start_link/0,
     enable/1,
     disable/1,
-    enabled/0
+    enabled/0,
+
+    set_leader/2,
+    node_watcher_update/1
 ]).
 
 -export([init/1]).
@@ -29,8 +32,20 @@ disable(Remote) ->
     riak_repl_util:delete_realtime_endpoints(Remote).
 
 enabled() ->
-    [ {Remote, ConnMgrPid} || {Remote, ConnMgrPid, _, [riak_repl2_rtsource_conn_mgr]}
+    [{Remote, ConnMgrPid} || {Remote, ConnMgrPid, _, [riak_repl2_rtsource_conn_mgr]}
         <- supervisor:which_children(?MODULE), is_pid(ConnMgrPid)].
+
+set_leader(LeaderNode, _LeaderPid) ->
+    lists:foreach(
+        fun({_, Pid, _, [riak_repl2_rtsource_conn_mgr]}) ->
+            riak_repl2_rtsource_conn_mgr:set_leader(Pid, LeaderNode)
+        end, supervisor:which_children(?MODULE)).
+
+node_watcher_update(_Services) ->
+    lists:foreach(
+        fun({_, Pid, _, [riak_repl2_rtsource_conn_mgr]}) ->
+            riak_repl2_rtsource_conn_mgr:node_watcher_update(Pid)
+        end, supervisor:which_children(?MODULE)).
 
 %% @private
 init([]) ->
@@ -38,6 +53,7 @@ init([]) ->
     %% once connmgr is started by core.  Must be started/registered
     %% before sources are started.
     riak_repl2_rt:register_remote_locator(),
+    riak_core_node_watcher_events:add_sup_callback(fun ?MODULE:node_watcher_update/1),
 
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     Remotes = riak_repl_ring:rt_started(Ring),

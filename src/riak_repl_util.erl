@@ -118,27 +118,33 @@ read_realtime_endpoints(legacy, _Remote) ->
 read_realtime_endpoints(v1, Remote) ->
     riak_repl2_rtsource_conn_data_mgr:read(realtime_connections, Remote);
 read_realtime_endpoints(v2, Remote) ->
+    ActiveNodes = read_realtime_active_nodes(v2),
     iterate_realtime_endpoints(riak_core_metadata:iterator(?RTSOURCE_REALTIME_CONNECTIONS_KEY,
-        [{default, deleted}, {resolver, llw}, {match, {Remote, '_'}}]), []);
+        [{default, deleted}, {resolver, llw}, {match, {Remote, '_'}}]), [], ActiveNodes);
 read_realtime_endpoints(Version, Remote) ->
     lager:error("recieved unknown version! Remote: ~p Version: ~p", [Remote, Version]),
     dict:new().
 
-iterate_realtime_endpoints(Itr, Values) ->
+iterate_realtime_endpoints(Itr, Values, ActiveNodes) ->
     case riak_core_metadata:itr_done(Itr) of
         true ->
             riak_core_metadata:itr_close(Itr),
             dict:from_list(Values);
         false ->
-            add_endpoints(riak_core_metadata:itr_key_values(Itr), Itr, Values)
+            add_endpoints(ActiveNodes, riak_core_metadata:itr_key_values(Itr), Itr, Values)
     end.
 
-add_endpoints({Key, deleted}, Itr, Values) ->
-    add_endpoints({Key, []}, Itr, Values);
-add_endpoints({_, []}, Itr, Values) ->
-    iterate_realtime_endpoints(riak_core_metadata:itr_next(Itr), Values);
-add_endpoints({{_Remote, Node}, SinkConns}, Itr, Values) ->
-    iterate_realtime_endpoints(riak_core_metadata:itr_next(Itr), [{Node, SinkConns}| Values]).
+add_endpoints(ActiveNodes, {Key, deleted}, Itr, Values) ->
+    add_endpoints(ActiveNodes, {Key, []}, Itr, Values);
+add_endpoints(ActiveNodes, {_, []}, Itr, Values) ->
+    iterate_realtime_endpoints(ActiveNodes, riak_core_metadata:itr_next(Itr), Values);
+add_endpoints(ActiveNodes, {{_Remote, Node}, SinkConns}, Itr, Values) ->
+    case lists:member(Node, ActiveNodes) of
+        true ->
+            iterate_realtime_endpoints(riak_core_metadata:itr_next(Itr), [{Node, SinkConns}| Values], ActiveNodes);
+        false ->
+            iterate_realtime_endpoints(ActiveNodes, riak_core_metadata:itr_next(Itr), Values)
+    end.
 
 read_realtime_active_nodes() ->
     Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),

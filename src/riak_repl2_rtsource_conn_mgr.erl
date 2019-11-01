@@ -94,11 +94,11 @@ get_endpoints(Pid) ->
 get_rtsource_conn_pids(Pid) ->
     gen_server:call(Pid, get_rtsource_conn_pids).
 
-node_watcher_update(_Services) ->
-    gen_server:cast(?SERVER, node_watcher_update).
+node_watcher_update(Pid) ->
+    gen_server:cast(Pid, node_watcher_update).
 
-set_leader(LeaderNode, _LeaderPid) ->
-    gen_server:cast(?SERVER, {set_leader_node, LeaderNode}).
+set_leader(Pid, LeaderNode) ->
+    gen_server:cast(Pid, {set_leader_node, LeaderNode}).
 
 
 %%%===================================================================
@@ -111,9 +111,6 @@ init([Remote]) ->
     _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
     E = dict:new(),
     M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
-    riak_core_node_watcher_events:add_sup_callback(fun ?MODULE:node_watcher_update/1),
-
-
     {Version, ConnectionType} =
         case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
             legacy ->
@@ -182,10 +179,10 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _Fro
                         legacy ->
                             lager:info("Adding remote connection, however not sending to data_mgr as we are running legacy code base"),
                             ok;
-                        v1 ->
+                        _ ->
                             % save to ring
                             lager:info("Adding remote connections to data_mgr: ~p", [dict:fetch_keys(NewEndpoints)]),
-                            riak_repl_util:write_realtime_endpoints(v1, Remote, dict:fetch_keys(NewEndpoints))
+                            riak_repl_util:write_realtime_endpoints(V, Remote, dict:fetch_keys(NewEndpoints))
                     end,
 
                     {reply, ok, NewState#state{endpoints = NewEndpoints}};
@@ -258,10 +255,10 @@ handle_cast(node_watcher_update, State=#state{leader = true, version = v2, remot
     OldNodes = dict:fetch_keys(AllRemoteEndpoints),
     DownNodes = OldNodes -- NewNodes,
     lists:foreach(fun(Node) -> riak_repl_util:write_realtime_endpoints(v2, Remote, [], Node) end, DownNodes),
-    {noreply, State};
+    handle_cast(rebalance_delayed, State);
 
 handle_cast(node_watcher_update, State) ->
-    {noreply, State};
+    handle_cast(rebalance_delayed, State);
 
 handle_cast(Request, State) ->
     lager:warning("unhandled cast: ~p", [Request]),
@@ -319,24 +316,19 @@ handle_info(rebalance_now, State=#state{version = Version}) ->
 handle_info(poll_core_capability, State=#state{version = OldVersion}) ->
     IntervalSecs = app_helper:get_env(riak_repl, realtime_core_capability_polling_interval, 60),
     Time = IntervalSecs * 1000,
-    case OldVersion == ?CURRENT_VERSION of
-        false ->
-             case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
-                 ?CURRENT_VERSION ->
-                     cancel_timer(State#state.rb_timeout_tref),
-                     RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
-                     {noreply, State#state{version = ?CURRENT_VERSION, rb_timeout_tref = RbTimeoutTref}};
-                 OldVersion ->
-                     erlang:send_after(Time, self(), poll_core_capability),
-                     {noreply, State};
-                 OtherVersion ->
-                     cancel_timer(State#state.rb_timeout_tref),
-                     RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
-                     erlang:send_after(Time, self(), poll_core_capability),
-                     {noreply, State#state{version = OtherVersion, rb_timeout_tref = RbTimeoutTref}}
-             end;
-        true ->
-            {noreply, State}
+    case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
+        ?CURRENT_VERSION ->
+            cancel_timer(State#state.rb_timeout_tref),
+            RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
+            {noreply, State#state{version = ?CURRENT_VERSION, rb_timeout_tref = RbTimeoutTref}};
+        OldVersion ->
+            erlang:send_after(Time, self(), poll_core_capability),
+            {noreply, State};
+        OtherVersion ->
+            cancel_timer(State#state.rb_timeout_tref),
+            RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
+            erlang:send_after(Time, self(), poll_core_capability),
+            {noreply, State#state{version = OtherVersion, rb_timeout_tref = RbTimeoutTref}}
     end;
 
 handle_info(Info, State) ->
@@ -452,7 +444,7 @@ should_rebalance(State=
         no_leader ->
             no_leader;
         RTC ->
-            case check_data_mgr_conn_mgr_data_consistency(RTC, State) of
+            case check_realtime_connections_consistency(RTC, State) of
                 true ->
                     case {SourceComparison, SinkComparison} of
                         {equal, equal} ->
@@ -466,7 +458,7 @@ should_rebalance(State=
             end
     end.
 
-check_data_mgr_conn_mgr_data_consistency(RealtimeConnections, #state{endpoints = Endpoints}) ->
+check_realtime_connections_consistency(RealtimeConnections, #state{endpoints = Endpoints}) ->
     case dict:find(node(), RealtimeConnections) of
         {ok, Conns} ->
             lists:sort(Conns) == lists:sort(dict:fetch_keys(Endpoints));

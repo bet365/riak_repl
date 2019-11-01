@@ -61,7 +61,7 @@ start(_Type, _StartArgs) ->
 
     riak_core_capability:register(
         {riak_repl, realtime_connections},
-        [v1, legacy],
+        [v2, v1, legacy],
         legacy
         ),
     riak_core_capability:register(
@@ -111,15 +111,12 @@ start(_Type, _StartArgs) ->
             riak_repl2_leader:register_notify_fun(
               fun riak_core_cluster_mgr:set_leader/2),
 
+            % TODO: remove in the next release (data_mgr will no longer be used in v2 realtime_connections)
+            riak_repl2_leader:register_notify_fun(
+                fun riak_repl2_rtsource_conn_data_mgr:set_leader/2),
             % rtsource supverisors -> rtsource_conn_mgr will follow the leader
             riak_repl2_leader:register_notify_fun(
-                fun riak_repl2_rtsource_conn_data_mgr:set_leader/2
-            ),
-
-            % rtsource supverisors -> rtsource_conn_mgr will follow the leader
-            riak_repl2_leader:register_notify_fun(
-                fun riak_repl2_rtsource_conn_mgr:set_leader/2
-            ),
+                fun riak_repl2_rtsource_conn_sup:set_leader/2),
 
             %% fullsync co-ordincation will follow leader
             riak_repl2_leader:register_notify_fun(

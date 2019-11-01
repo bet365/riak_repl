@@ -512,20 +512,32 @@ setup() ->
             ok
         end),
 
-    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
-    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, fun(active_nodes) -> [node()]
-                                                         end),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
-        fun(realtime_connections, _Remote) ->
-            dict:new()
-        end
-    ),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, 4,
-        fun(_, _, _, _) ->
-            ok
-        end
-    ),
+    catch(meck:unload(riak_repl_util)),
+    meck:new(riak_repl_util, [passthrough]),
+
+    meck:expect(riak_repl_util, read_realtime_active_nodes, 0,
+        fun() -> [node()] end),
+    meck:expect(riak_repl_util, read_realtime_active_nodes, 1,
+        fun(_) -> [node()] end),
+
+    meck:expect(riak_repl_util, read_realtime_endpoints, 1,
+        fun(_) -> dict:new() end),
+    meck:expect(riak_repl_util, read_realtime_endpoints, 2,
+        fun(_, _) -> dict:new() end),
+
+    meck:expect(riak_repl_util, write_realtime_endpoints, 2,
+        fun(_) -> ok end),
+    meck:expect(riak_repl_util, write_realtime_endpoints, 3,
+        fun(_, _) -> ok end),
+    meck:expect(riak_repl_util, write_realtime_endpoints, 4,
+        fun(_, _) -> ok end),
+
+    meck:expect(riak_repl_util, delete_realtime_endpoints, 1,
+        fun(_) -> ok end),
+
+
+
+
 
     catch(meck:unload(riak_core_cluster_mgr)),
     meck:new(riak_core_cluster_mgr, [passthrough]),
@@ -569,7 +581,7 @@ cleanup(_Ctx) ->
     riak_repl_test_util:stop_test_ring(),
     riak_repl_test_util:maybe_unload_mecks(
       [riak_core_service_mgr,
-        riak_repl2_rtsource_conn_data_mgr,
+        riak_repl_util,
         riak_core_connection_mgr,
        riak_repl_util,
        riak_core_tcp_mon,

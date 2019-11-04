@@ -95,18 +95,18 @@ delete_realtime_endpoints(Remote) ->
     Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
     Endpoints = read_realtime_endpoints(Version, Remote),
     Keys = dict:fetch_keys(Endpoints),
-    lists:foreach(fun(Node) -> write_realtime_endpoints(Version, Remote, Node, []) end, Keys).
+    lists:foreach(fun(Node) -> ?MODULE:write_realtime_endpoints(Version, Remote, Node, []) end, Keys).
 
 write_realtime_endpoints(Remote, Endpoints) ->
     Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
-    write_realtime_endpoints(Version, Remote, Endpoints).
+    ?MODULE:write_realtime_endpoints(Version, Remote, Endpoints).
 write_realtime_endpoints(Version, Remote, Endpoints) ->
-    write_realtime_endpoints(Version, Remote, Endpoints, node()).
+    ?MODULE:write_realtime_endpoints(Version, Remote, Endpoints, node()).
 write_realtime_endpoints(v1, Remote, Endpoints, Node) ->
     riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, Node, Endpoints),
-    write_realtime_endpoints(v2, Remote, Endpoints, Node);
+    ?MODULE:write_realtime_endpoints(v2, Remote, Endpoints, Node);
 write_realtime_endpoints(v2, Remote, Endpoints, Node) ->
-    riak_core_metadata:put(?RTSOURCE_REALTIME_CONNECTIONS_KEY, {Remote, Node}, dict:fetch_keys(Endpoints));
+    riak_core_metadata:put(?RTSOURCE_REALTIME_CONNECTIONS_KEY, {Remote, Node}, Endpoints);
 write_realtime_endpoints(_, _Remote, _Endpoints, _Node) ->
     ok.
 

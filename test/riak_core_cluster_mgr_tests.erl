@@ -1031,6 +1031,9 @@ cleanup({Apps, Pids}) ->
     riak_core_service_mgr:stop(),
     riak_core_connection_mgr:stop(),
     %% tough to stop a supervisor
+    riak_repl_test_util:maybe_unload_mecks([
+        riak_repl_util
+    ]),
     catch exit(riak_core_cluster_conn_sup),
     catch exit(riak_repl2_leader_gs),
     riak_core_cluster_mgr:stop(),

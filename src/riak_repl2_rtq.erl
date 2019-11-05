@@ -67,32 +67,37 @@
                 overloaded = false :: boolean(),
                 overload_drops = 0 :: non_neg_integer(),
 
-                cs = [],
+                remotes = [],
                 shutting_down=false,
                 qsize_bytes = 0,
                 word_size=erlang:system_info(wordsize)
                }).
 
 % Consumers
--record(c, {name,      % consumer name
-            aseq = 0,  % last sequence acked
-            cseq = 0,  % last sequence sent
-            skips = 0,
-            filtered = 0,
-            q_drops = 0, % number of dropped queue entries (not items)
-            c_drops = 0,
-            drops = 0,
-            errs = 0,  % delivery errors
-            deliver,  % deliver function if pending, otherwise undefined
-            delivery_funs = [],
-            delivered = false,  % used by the skip count.
-            % skip_count is used to help the sink side determine if an item has
-            % been dropped since the last delivery. The sink side can't
-            % determine if there's been drops accurately if the source says there
-            % were skips before it's sent even one item.
-            last_seen,  % a timestamp of when we received the last ack to measure latency
-            consumer_qbytes = 0
-           }).
+-record(remote, {
+  name,                   %% remote name
+  aseq = 0,               %% remote min ack'd sequence number (from all consumers)
+  seq = 0,                %% last sequence sent to remote
+  queue_drops = 0,        %% number of dropped queue entries (not items)
+  remote_drops = 0,
+  total_drops = 0,
+  errors = 0,             %% delivery errors
+  active_consumers = [],  %% list of consumers ready to send to thier remote
+  inactive_consumers = [],%% list of consumers that are not ready, and require a 'pull' to become active
+  last_seen,              %% a timestamp of when we received the last ack to measure latency
+  remote_qbytes = 0
+}).
+
+-record(consumer, {
+  delivery_fun,
+  delivered = false,      %% used by the skip count.
+  ref,                    %% used by the ack'ing mechanism
+  seq = 0,                %% last sequence number sent to specific consumer
+  aseq = 0,               %% last ack'd sequence number by specific consumer
+  skips = 0,
+  sent = 0,
+  acked = 0
+}).
 
 -type name() :: term().
 -type seq() :: non_neg_integer().
@@ -287,23 +292,20 @@ init(Options) ->
     {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 %% @private
-handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
-
+handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
+  %% TODO: generate the old stats, unacked skipped etc ... (even pending is wrong here!)
   MaxBytes = get_queue_max_bytes(State),
-
   Consumers =
         [{Name, [{consumer_qbytes, CBytes},
-                 {consumer_max_qbytes, get_consumer_max_bytes(C)},
+                 {consumer_max_qbytes, get_remote_max_bytes(Remote)},
                  {pending, QSeq - CSeq},  % items to be send
-                 {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
-                 {c_drops, CDrops},
+                 {c_drops, RDrops},
                  {q_drops, QDrops},
                  {drops, Drops},          % number of dropped entries due to max bytes
-                 {errs, Errs},            % number of non-ok returns from deliver fun
-                 {filtered, Filtered}]}    % number of objects filtered
+                 {errs, Errs}]}            % number of non-ok returns from deliver fun
 
-         || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
-            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
+         || #remote{name = Name, seq = CSeq, queue_drops = QDrops, remote_drops = RDrops,
+            total_drops = Drops, errors = Errs, remote_qbytes = CBytes} = Remote <- Remotes],
 
     GetTrimmedFolsomMetrics =
         fun(MetricName) ->
@@ -329,7 +331,7 @@ handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
                                         false ->
                                             Acc
                                     end
-                                end, Consumers, [ C#c.name || C <- Cs ]),
+                                end, Consumers, [ Remote#remote.name || Remote <- Remotes ]),
 
     Status =
         [{bytes, qbytes(QTab, State)},
@@ -351,39 +353,41 @@ handle_call(is_running, _From,
             State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
-handle_call({is_empty, Name}, _From, State = #state{cs = Cs}) ->
-    Result = is_queue_empty(Name, Cs),
+handle_call({is_empty, Name}, _From, State = #state{remotes = Remotes}) ->
+    Result = is_queue_empty(Name, Remotes),
     {reply, Result, State};
 
-handle_call(all_queues_empty, _From, State = #state{cs = Cs}) ->
-    Result = lists:all(fun (#c{name = Name}) -> is_queue_empty(Name, Cs) end, Cs),
+handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
+    Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(Name, Remotes) end, Remotes),
     {reply, Result, State};
 
-
-handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
+%% TODO: we need additional register functions for consumers now!
+handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
     MinSeq = minseq(QTab, QSeq),
-    UpdatedConsumers =
-        case lists:keytake(Name, #c.name, Cs) of
-            {value, C = #c{aseq = PrevASeq, drops = PrevDrops, q_drops = QPrevDrops}, Cs2} ->
+    UpdatedRemotes =
+        %% TODO: use the new {send, acked} data in consumer records to decide drop count
+        case lists:keytake(Name, #remote.name, Remotes) of
+            {value, R = #remote{aseq = PrevASeq, total_drops = PrevDrops, queue_drops = QPrevDrops}, Cs2} ->
                 %% Work out if anything should be considered dropped if
                 %% unacknowledged.
+                %% (These are potential drops, as another consumer might have dealt with them!)
                 Drops = max(0, MinSeq - PrevASeq - 1),
 
                 %% Re-registering, send from the last acked sequence
                 CSeq =
-                    case C#c.aseq < MinSeq of
+                    case R#remote.aseq < MinSeq of
                         true -> MinSeq;
-                        false -> C#c.aseq
+                        false -> R#remote.aseq
                     end,
 
-                [C#c{cseq = CSeq, drops = PrevDrops + Drops, q_drops = QPrevDrops + Drops, deliver = undefined} | Cs2];
+                [R#remote{seq = CSeq, total_drops = PrevDrops + Drops, queue_drops = QPrevDrops + Drops} | Cs2];
 
             false ->
                 %% New registration, start from the beginning
                 %% loop the rtq, update consumer q size, and add self to filter list if required
-                CSeq = MinSeq,
-                RegisteredConsumer = register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab)),
-                [RegisteredConsumer | Cs]
+                RSeq = MinSeq,
+                RegisteredConsumer = register_new_remote(State, #remote{name = Name, aseq = RSeq, seq = RSeq}, ets:first(QTab)),
+                [RegisteredConsumer | Remotes]
         end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
@@ -392,7 +396,7 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
         false ->
             folsom_metrics:new_histogram({latency, Name}, slide, RTQSlidingWindow)
     end,
-    {reply, {ok, CSeq}, State#state{cs = UpdatedConsumers}};
+    {reply, {ok, CSeq}, State#state{remotes = UpdatedRemotes}};
 handle_call({unregister, Name}, _From, State) ->
     case unregister_q(Name, State) of
         {ok, NewState} ->
@@ -450,7 +454,7 @@ handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
 handle_cast({push, NumItems, Bin}, State) ->
     handle_cast({push, NumItems, Bin, []}, State);
 
-handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{cs=[]}) ->
+handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{remotes=[]}) ->
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta}, State) ->
     State2 = maybe_flip_overload(State),
@@ -479,18 +483,20 @@ record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
             skip
     end.
 
-ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
-    case lists:keytake(Name, #c.name, Cs) of
+%% TODO: this will need changing!
+ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, remotes = Remotes}) ->
+    case lists:keytake(Name, #remote.name, Remotes) of
         false ->
             State;
-        {value, C, Rest} ->
+        {value, R, Rest} ->
             %% record consumer latency
-            record_consumer_latency(Name, C#c.last_seen, Seq, NewTs),
+            record_consumer_latency(Name, R#remote.last_seen, Seq, NewTs),
 
-            case Seq > C#c.aseq of
+            case Seq > R#remote.aseq of
                 true ->
-                    {NewState, NewC} = cleanup(C, QTab, Seq, C#c.aseq, State),
-                    NewState#state{cs = Rest ++ [NewC#c{aseq = Seq}]};
+                    {NewState, NewR} = cleanup(R, QTab, Seq, R#remote.aseq, State),
+                    %% TODO: find min aseq for all consumers for given remote
+                    NewState#state{remotes = Rest ++ [NewR#remote{aseq = Seq}]};
                 false ->
                     State
             end
@@ -501,13 +507,13 @@ handle_info(_Msg, State) ->
     {noreply, State}.
 
 %% @private
-terminate(Reason, State=#state{cs = Cs}) ->
+terminate(Reason, State=#state{remotes = Remotes}) ->
   lager:info("rtq terminating due to: ~p
   State: ~p", [Reason, State]),
     %% when started from tests, we may not be registered
     catch(erlang:unregister(?SERVER)),
     flush_pending_pushes(),
-    DList = [get_all_delivery_funs(C) || C <- Cs],
+    DList = [get_all_delivery_funs(R) || R <- Remotes],
     _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
     ok.
 
@@ -544,29 +550,31 @@ flush_pending_pushes() ->
     end.
 
 
-unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
-     case lists:keytake(Name, #c.name, Cs) of
-        {value, C, Cs2} ->
+unregister_q(Name, State = #state{qtab = QTab, remotes = Remotes}) ->
+     case lists:keytake(Name, #remote.name, Remotes) of
+        {value, R, Rest} ->
             %% Remove C from Cs, let any pending process know
             %% and clean up the queue
-            case get_all_delivery_funs(C) of
+            case get_all_delivery_funs(R) of
                 [] ->
                     ok;
                 DeliveryFuns ->
                     _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
             end,
 
-            {NewState, _NewC} = cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
-            {ok, NewState#state{cs = Cs2}};
+            {NewState, _NewC} = cleanup(R, QTab, State#state.qseq, R#remote.aseq, State),
+            {ok, NewState#state{remotes = Rest}};
         false ->
             {{error, not_registered}, State}
     end.
 
-update_consumer_delivery_funs(DeliverAndConsumers) ->
-    [recast_saved_deliver_funs(DeliverStatus, C) || {DeliverStatus, C} <- DeliverAndConsumers].
-recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, name = Name}) ->
+update_remote_delivery_funs(DeliverAndRemotes) ->
+    [recast_saved_deliver_funs(DeliverStatus, R) || {DeliverStatus, R} <- DeliverAndRemotes].
+recast_saved_deliver_funs(DeliverStatus, R = #remote{active_consumers = Consumers, name = Name}) ->
     case DeliverStatus of
         delivered ->
+
+          lists:foreach(fun(#consumer{delivery_fun = DF}) -> gen_server:cast(?SERVER, {pull, Name, DF}) end, Consumers),
             case DeliveryFuns of
                 [] ->
                     {DeliverStatus, C};
@@ -575,17 +583,17 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
                     {DeliverStatus, C#c{delivery_funs = []}}
             end;
         _ ->
-            {DeliverStatus, C}
+            {DeliverStatus, R}
     end.
 
 
-register_new_consumer(_State, C, '$end_of_table') ->
-    C;
-register_new_consumer(#state{qtab = QTab} = State, #c{name = Name} = C, Seq) ->
+register_new_remote(_State, R, '$end_of_table') ->
+    R;
+register_new_remote(#state{qtab = QTab} = State, #remote{name = Name} = C, Seq) ->
     case ets:lookup(QTab, Seq) of
         [] ->
             %% entry removed
-            register_new_consumer(QTab, C, ets:next(QTab, Seq));
+          register_new_remote(QTab, C, ets:next(QTab, Seq));
         [QEntry] ->
             {Seq, NumItems, Bin, Meta} = QEntry,
             Size = ets_obj_size(Bin, State),
@@ -609,7 +617,7 @@ register_new_consumer(#state{qtab = QTab} = State, #c{name = Name} = C, Seq) ->
                        false ->
                            C
                    end,
-            register_new_consumer(State, NewC, ets:next(QTab, Seq))
+          register_new_remote(State, NewC, ets:next(QTab, Seq))
     end.
 
 %% should skip, true
@@ -657,12 +665,10 @@ push(NumItems, Bin, Meta,
 
     %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
     %% We do not want to add an object that all consumers will filter or skip to the queue
-    AllSkippedFilteredAcked = lists:all(fun
-                                         (skipped) -> true;
-                                         (filtered) -> true;
-                                         (acked) -> true;
-                                         (_) -> false
-                                     end, DeliverResults),
+    AllSkipped = lists:all(fun
+                               (skipped) -> true;
+                               (_) -> false
+                           end, DeliverResults),
 
 
     Routed = meta_get(routed_clusters, [], Meta),
@@ -670,7 +676,7 @@ push(NumItems, Bin, Meta,
     ConsumersToUpdate = AllowedConsumerNames -- (Routed ++ Acked),
     State2 = State#state{cs = Cs3, qseq = QSeq2},
     State3 =
-        case AllSkippedFilteredAcked of
+        case AllSkipped of
             true ->
                 State2;
             false ->
@@ -741,13 +747,14 @@ maybe_deliver_item(#c{name = Name} = C, {_Seq, _NumItems, _Bin, Meta} = QEntry) 
     IsRouted = lists:member(Name, Routed),
     IsFiltered = lists:member(Name, Filtered),
     IsAcked = lists:member(Name, Acked),
+    Skip = IsRouted or IsFiltered or IsAcked,
 
-    maybe_deliver_item(C, QEntry, IsRouted, IsFiltered, IsAcked).
+    maybe_deliver_item(C, QEntry, Skip).
 
 %% IsRouted = true
-maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, true, _, _) ->
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, true) ->
     {skipped, C};
-maybe_deliver_item(#c{delivered = Delivered} = C, {Seq, _NumItems, _Bin, _Meta}, true, _, _) ->
+maybe_deliver_item(#c{delivered = Delivered} = C, {Seq, _NumItems, _Bin, _Meta}, true) ->
     case Delivered of
         true ->
             Skipped = C#c.skips + 1,
@@ -756,22 +763,10 @@ maybe_deliver_item(#c{delivered = Delivered} = C, {Seq, _NumItems, _Bin, _Meta},
             {skipped, C#c{cseq = Seq}}
     end;
 
-%% IsFiltered = true
-maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, true, _) ->
-    {filtered, C};
-maybe_deliver_item(C, {Seq, _NumItems, _Bin, _Meta}, _, true, _) ->
-    {filtered, C#c{cseq = Seq, filtered = C#c.filtered + 1, delivered = true, skips=0}};
-
-%% IsAcked = true (so this would have been sent via repl_proxy / repl_migration)
-maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, _, true) ->
-    {acked, C};
-maybe_deliver_item(C, {Seq, _NumItems, _Bin, _Meta}, _, _, true) ->
-    {acked, C#c{cseq = Seq}};
-
 %% NotAcked, NotFiltered, NotRouted (Send)
-maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, _, _) ->
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _) ->
     {no_fun, C};
-maybe_deliver_item(C, QEntry, _, _, _) ->
+maybe_deliver_item(C, QEntry, _) ->
     {delivered, deliver_item(C, C#c.deliver, QEntry)}.
 
 
@@ -1043,13 +1038,8 @@ save_consumer(C, DeliverFun) ->
             C#c{delivery_funs = DeliveryFuns}
     end.
 
-get_all_delivery_funs(C) ->
-    case C#c.deliver of
-        undefined ->
-            C#c.delivery_funs;
-        Deliver ->
-            C#c.delivery_funs ++ [Deliver]
-    end.
+get_all_delivery_funs(#remote{active_consumers = Consumers}) ->
+  lists:foldl(fun(C, Acc) -> [C#consumer.delivery_fun | Acc] end, [], Consumers).
 
 
 
@@ -1061,7 +1051,7 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
 get_queue_max_bytes(#state{default_max_bytes = Default}) ->
     Default.
 
-get_consumer_max_bytes(_) ->
+get_remote_max_bytes(_) ->
     undefined.
 
 -else.
@@ -1075,13 +1065,13 @@ get_queue_max_bytes(#state{default_max_bytes = Default}) ->
         MaxBytes -> MaxBytes
     end.
 
-get_consumer_max_bytes(#c{name = Name}) ->
-    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
+get_remote_max_bytes(#remote{name = Name}) ->
+    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {remote_max_bytes, Name}).
 -endif.
 
 is_queue_empty(Name, Cs) ->
-    case lists:keytake(Name, #c.name, Cs) of
-        {value,  #c{consumer_qbytes = CBytes}, _Cs2} ->
+    case lists:keytake(Name, #remote.name, Cs) of
+        {value,  #remote{remote_qbytes = CBytes}, _Cs2} ->
             case CBytes == 0 of
                 true -> false;
                 false -> true

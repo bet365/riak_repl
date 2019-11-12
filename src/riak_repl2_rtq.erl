@@ -57,19 +57,13 @@
          terminate/2, code_change/3]).
 
 -record(state, {
-    qtab = ets:new(?MODULE, [protected, ordered_set]), % ETS table
-    qseq = 0,  % Last sequence number handed out
-    default_max_bytes = undefined, % maximum ETS table memory usage in bytes
-
-    % if the message q exceeds this, the rtq is overloaded
-    overload = ?DEFAULT_OVERLOAD :: pos_integer(),
-
-    % if the rtq is in overload mode, it does not recover until =<
-    recover = ?DEFAULT_RECOVER :: pos_integer(),
-
+    qtab = ets:new(?MODULE, [protected, ordered_set]),  % ETS table
+    qseq = 0,                                           % Last sequence number handed out
+    default_max_bytes = undefined,                      % maximum ETS table memory usage in bytes
+    overload = ?DEFAULT_OVERLOAD :: pos_integer(),      % if the message q exceeds this, the rtq is overloaded
+    recover = ?DEFAULT_RECOVER :: pos_integer(),        % if the rtq is in overload mode, it does not recover until =<
     overloaded = false :: boolean(),
     overload_drops = 0 :: non_neg_integer(),
-
     remotes = [],
     shutting_down=false,
     qsize_bytes = 0,
@@ -78,26 +72,25 @@
 
 % Consumers
 -record(remote, {
-    name,      % remote name
-    mode = normal, %% normal | recover_consumer
-    rseq = 0,  % last sequence sent
-    aseq = 0,  % last sequence acked
-    q_drops = 0, % number of dropped queue entries (not items)
+    name,               % remote name
+    mode = normal,      % normal | resend_dead_consumer
+    rseq = 0,           % last sequence sent
+    aseq = 0,           % last sequence acked (minimum value from all consumers)
+    q_drops = 0,        % number of dropped queue entries (not items)
     r_drops = 0,
     drops = 0,
-    errs = 0,  % delivery errors
-    active_consumers = [],
-    inactive_consumers = [],
-    recover_unregistered_consumers = [],
-    last_seen,  % a timestamp of when we received the last ack to measure latency
+    errs = 0,           % delivery errors
+    deliver_funs = [],
+    consumers = [],     % orddict all active conusmers
+    dead_consumers = [],% orddict dead consumers
+    last_seen,          % a timestamp of when we received the last ack to measure latency
     remote_qbytes = 0
 }).
 
 -record(consumer, {
     version = 1,
-    ctab,               % ets table per consumer/ per remote (mapping cseq -> rseq -> qseq) [DO WE NEED THIS?]
+    ctab,             % ets table per consumer/ per remote (mapping cseq -> rseq -> qseq)
     ref,
-    deliver_fun,
     cseq = 0,
     caseq = 0
 }).
@@ -196,14 +189,14 @@ push(NumItems, Bin) ->
 -type queue_entry() :: {pos_integer(), pos_integer(), binary(), orddict:orddict()}.
 -type not_reg_error() :: {'error', 'not_registered'}.
 -type deliver_fun() :: fun((queue_entry() | not_reg_error()) -> 'ok').
--spec pull(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
-pull(Name, DeliverFun) ->
-    gen_server:cast(?SERVER, {pull, Name, DeliverFun}).
+-spec pull(Name :: name(), Ref :: refernce(), DeliverFun :: deliver_fun()) -> 'ok'.
+pull(Name, Ref, DeliverFun) ->
+    gen_server:cast(?SERVER, {pull, Name, Ref, DeliverFun}).
 
 %% @doc Block the caller while the pull is done.
--spec pull_sync(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
-pull_sync(Name, Ref) ->
-    gen_server:call(?SERVER, {pull_with_ack, Name, Ref}, infinity).
+-spec pull_sync(Name :: name(), Ref:: referennce(), DeliverFun :: deliver_fun()) -> 'ok'.
+pull_sync(Name, Ref, DeliverFun) ->
+    gen_server:call(?SERVER, {pull_with_ack, Name, Ref, DeliverFun}, infinity).
 
 %% @doc Asynchronously acknowldge delivery of all objects with a sequence
 %% equal or lower to Seq for the remote.
@@ -393,11 +386,17 @@ handle_call({register_remote, Name}, _From, State = #state{qtab = QTab, qseq = Q
                 [R#remote{rseq = RSeq, drops = PrevDrops + Drops, q_drops = QPrevDrops + Drops} | Rs2];
 
             false ->
-                %% New registration, start from the beginning
-                %% loop the rtq, update remote q size, and add self to filter list if required
                 RSeq = MinSeq,
-                RegisteredRemote = register_new_remote(State, #remote{name = Name, aseq = RSeq, rseq = RSeq}, ets:first(QTab)),
-                [RegisteredRemote | Rs]
+                case Name of
+                    qm ->
+                        RegisteredRemote = #remote{name = Name, aseq = RSeq, rseq = RSeq, remote_qbytes = State#state.qsize_bytes},
+                        [RegisteredRemote | Rs];
+                    _ ->
+                        %% New registration, start from the beginning
+                        %% loop the rtq, update remote q size, and add self to filter list if required
+                        RegisteredRemote = register_new_remote(State, #remote{name = Name, aseq = RSeq, rseq = RSeq}, ets:first(QTab)),
+                        [RegisteredRemote | Rs]
+                end
         end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
@@ -419,7 +418,7 @@ handle_call({unregister_remote, Name}, _From, State) ->
 handle_call({register_consumer, Name, Fun, Ref, Version}, _From, #state{remotes = Rs} = State) ->
     case lists:keytake(Name, #remote.name, Rs) of
         {value, R, Rest} ->
-            AllCs = R#remote.active_consumers ++ R#remote.inactive_consumers ++ R#remote.recover_unregistered_consumers,
+            AllCs = R#remote.active_consumers ++ R#remote.inactive_consumers ++ R#remote.dead_consumers,
             case lists:keyfind(Ref, #consumer.ref, AllCs) of
                 true ->
                     {reply, ref_exists, State};
@@ -441,7 +440,7 @@ handle_call({unregister_consumer, Name, Ref}, _From, #state{remotes = Rs} = Stat
                     NewR = R#remote
                     {
                         active_consumers = RestC,
-                        recover_unregistered_consumers = R#remote.recover_unregistered_consumers ++ [C]
+                        dead_consumers = R#remote.dead_consumers ++ [C]
                     },
                     {reply, ok, State#state{remotes = [NewR | RestR]}};
                 false ->
@@ -450,7 +449,7 @@ handle_call({unregister_consumer, Name, Ref}, _From, #state{remotes = Rs} = Stat
                             NewR = R#remote
                             {
                                 inactive_consumers = RestC,
-                                recover_unregistered_consumers = R#remote.recover_unregistered_consumers ++ [C]
+                                dead_consumers = R#remote.dead_consumers ++ [C]
                             },
                             {reply, ok, State#state{remotes = [NewR | RestR]}};
                         false ->
@@ -490,8 +489,8 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
             {reply, {not_found, Seq}, State}
     end;
 
-handle_call({pull_with_ack, Name, Ref}, _From, State) ->
-    {reply, ok, pull(Name, Ref, State)};
+handle_call({pull_with_ack, Name, Ref, DeliverFun}, _From, State) ->
+    {reply, ok, pull(Name, Ref, DeliverFun, State)};
 
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
@@ -502,8 +501,8 @@ handle_call({push, NumItems, Bin, Meta}, _From, State) ->
     State2 = maybe_flip_overload(State),
     {reply, ok, push(NumItems, Bin, Meta, State2)};
 
-handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
-    {reply, ok, ack_seq(Name, Seq, Ts, State)}.
+handle_call({ack_sync, Name, Ref, Seq, Ts}, _From, State) ->
+    {reply, ok, ack_seq(Name, Seq, Ref, Ts, State)}.
 
 % ye previous cast. rtq_proxy may send us an old pattern.
 handle_cast({push, NumItems, Bin}, State) ->
@@ -523,11 +522,11 @@ handle_cast({report_drops, N}, State) ->
     State3 = maybe_flip_overload(State2),
     {noreply, State3};
 
-handle_cast({pull, Name, Ref}, State) ->
-     {noreply, pull(Name, Ref, State)};
+handle_cast({pull, Name, Ref, DeliverFun}, State) ->
+     {noreply, pull(Name, Ref, DeliverFun, State)};
 
-handle_cast({ack, Name, Seq, Ts}, State) ->
-       {noreply, ack_seq(Name, Seq, Ts, State)}.
+handle_cast({ack, Name, Ref, Seq, Ts}, State) ->
+       {noreply, ack_seq(Name, Ref, Seq, Ts, State)}.
 
 record_remote_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
     case OldLastSeen of
@@ -538,11 +537,12 @@ record_remote_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
             skip
     end.
 
-ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, remotes =  Rs}) ->
+ack_seq(Name, Ref, Seq, NewTs, State = #state{qtab = QTab, remotes =  Rs}) ->
     case lists:keytake(Name, #remote.name, Rs) of
         false ->
             State;
         {value, R, Rest} ->
+
             %% record remote latency
             record_remote_latency(Name, R#remote.last_seen, Seq, NewTs),
 
@@ -568,7 +568,7 @@ terminate(Reason, State=#state{remotes =  Rs}) ->
     flush_pending_pushes(),
     lists:foreach(
         fun(R) ->
-            AllC = R#remote.active_consumers ++ R#remote.inactive_consumers ++ R#remote.recover_unregistered_consumers,
+            AllC = R#remote.active_consumers ++ R#remote.inactive_consumers ++ R#remote.dead_consumers,
             lists:foreach(fun(C) -> deliver_error(C#consumer.deliver_fun, {terminate, Reason}) end, AllC)
         end, Rs),
     ok.
@@ -611,8 +611,10 @@ unregister_q(Name, State = #state{qtab = QTab, remotes =  Rs}) ->
         {value, R, Rs2} ->
             %% Remove R from Rs, let any pending process know
             %% and clean up the queue
-            AllC = R#remote.active_consumers ++ R#remote.inactive_consumers ++ R#remote.recover_unregistered_consumers,
-            lists:foreach(fun(C) -> deliver_error(C#consumer.deliver_fun, {error, unregistered}) end, AllC),
+            lists:foreach(
+                fun({_Ref, DeliverFun}) ->
+                    deliver_error(DeliverFun, {error, unregistered})
+                end, R#remote.deliver_funs),
             {NewState, _NewR} = cleanup(R, QTab, State#state.qseq, R#remote.aseq, State),
             {ok, NewState#state{remotes =  Rs2}};
         false ->
@@ -685,59 +687,52 @@ push(NumItems, Bin, Meta,
 
     QSeq2 = QSeq + 1,
     QEntry = {QSeq2, NumItems, Bin, Meta},
-
     {AllowedRemoteNames, FilteredRemoteNames} = allowed_filtered_remotes(Rs, Meta),
     QEntry2 = set_local_forwards_meta(AllowedRemoteNames, QEntry),
     QEntry3 = set_filtered_clusters_meta(FilteredRemoteNames, QEntry2),
-
-
-    %% we have to send to all remotes to update there state!
-    DeliverAndRs2 = [maybe_deliver_item(R, QEntry3) || R <- Rs],
-    {DeliverResults, Rs3} = lists:unzip(DeliverAndRs2),
-
-    %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
-    %% We do not want to add an object that all remotes will filter or skip to the queue
-    AllSkippedFilteredAcked = lists:all(fun
-                                         (skipped) -> true;
-                                         (_) -> false
-                                     end, DeliverResults),
-
-
+    QEntry4 = set_skip_meta(QEntry3),
     Routed = meta_get(routed_clusters, [], Meta),
     Acked = meta_get(acked_clusters, [], Meta),
     RemotesToUpdate = AllowedRemoteNames -- (Routed ++ Acked),
-    State2 = State#state{remotes =  Rs3, qseq = QSeq2},
-    State3 =
-        case AllSkippedFilteredAcked of
-            true ->
-                State2;
-            false ->
-                ets:insert(QTab, QEntry3),
+
+    NewState =
+        case RemotesToUpdate of
+            [] ->
+                State;
+            _ ->
+                %% we have to send to all remotes to update there state!
+                Rs2 = lists:foldl(
+                    fun(Remote, Acc) ->
+                        ShouldSkip = not lists:member(Remote#remote.name, RemotesToUpdate),
+                        {_, R} = maybe_deliver_item(Remote, QEntry4, ShouldSkip),
+                        [R | Acc]
+                    end, [], Rs),
+                State2 = State#state{remotes =  Rs2, qseq = QSeq2},
+                ets:insert(QTab, QEntry4),
                 Size = ets_obj_size(Bin, State2),
-                NewState = update_q_size(State2, Size),
-                update_remote_q_sizes(NewState, Size, RemotesToUpdate)
+                State3 = update_q_size(State2, Size),
+                update_remote_q_sizes(State3, Size, RemotesToUpdate)
         end,
-    trim_q(State3);
+    trim_q(NewState);
 push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
 
-pull(Name, Ref, State = #state{qtab = QTab, qseq = QSeq, remotes =  Rs}) ->
+pull(Name, Ref, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, remotes =  Rs}) ->
      RsNames = [R#remote.name || R <- Rs],
      UpdRs = case lists:keytake(Name, #remote.name, Rs) of
-                {value, R = #remote{active_consumers = AC}, Rs2} ->
-                    case lists:keytake(Ref, #consumer.ref, R#remote.inactive_consumers) of
-                        {value, C, Cs2} ->
-                            NewR = R#remote{active_consumers = AC ++ [C], inactive_consumers = Cs2},
-                            [maybe_pull(QTab, QSeq, NewR, RsNames) | Rs2];
+                {value, R = #remote{deliver_funs = DFs}, Rs2} ->
+                    case orddict:is_key(Ref, R#remote.consumers) of
+                        true ->
+                            [maybe_pull(QTab, QSeq, R#remote{deliver_funs = DFs ++ [{Ref, DeliverFun}]}, RsNames) | Rs2];
                         false ->
-                            lager:error("Consumer ~p pulled from RTQ, but was not registered", [Ref]),
-                            _ = deliver_error(Ref, consumer_not_registered),
+                            lager:error("Remote ~p pulled from RTQ, but was not registered", [Name]),
+                            _ = deliver_error(DeliverFun, consumer_not_registered),
                             Rs
                     end;
                 false ->
                     lager:error("Remote ~p pulled from RTQ, but was not registered", [Name]),
-                    _ = deliver_error(Ref, remote_not_registered),
+                    _ = deliver_error(DeliverFun, remote_not_registered),
                     Rs
             end,
     State#state{remotes =  UpdRs}.
@@ -753,13 +748,10 @@ maybe_pull(QTab, QSeq, R = #remote{mode = normal, rseq = RSeq}, RsNames) ->
                 [QEntry] ->
                     {RSeq2, _NumItems, _Bin, _Meta} = QEntry,
                     % if the item can't be delivered due to cascading rt, or filtering,
-                    % just keep trying.
-                    {Res, R2} = maybe_deliver_item(R, QEntry),
-                    case Res == skipped of
-                        true ->
-                            maybe_pull(QTab, QSeq, R2, RsNames);
-                        false ->
-                            R2
+                    % move on to the next sequence number.
+                    case maybe_deliver_item(R, QEntry) of
+                        {skipped, R2} -> maybe_pull(QTab, QSeq, R2, RsNames);
+                        {_, R3} -> R3
                     end
             end;
         false ->
@@ -768,9 +760,9 @@ maybe_pull(QTab, QSeq, R = #remote{mode = normal, rseq = RSeq}, RsNames) ->
 
 
 
-maybe_deliver_item(R=#remote{mode = recover_consumer}, _QEntry) ->
-    #remote{recover_unregistered_consumers = [DC | _], active_consumers = [C | Rest]} = R,
-    {no_fun, NewR};
+%%maybe_deliver_item(R=#remote{mode = recover_consumer}, _QEntry) ->
+%%    #remote{recover_unregistered_consumers = [DC | _], active_consumers = [C | Rest]} = R,
+%%    {no_fun, NewR};
 
 
 
@@ -778,46 +770,45 @@ maybe_deliver_item(#remote{mode = normal, name = Name} = R, {_Seq, _NumItems, _B
     Routed = meta_get(routed_clusters, [], Meta),
     Filtered = meta_get(filtered_clusters, [], Meta),
     Acked = meta_get(acked_clusters, [], Meta),
-    
     IsRouted = lists:member(Name, Routed),
     IsFiltered = lists:member(Name, Filtered),
     IsAcked = lists:member(Name, Acked),
     ShouldSkip = IsRouted or IsFiltered or IsAcked,
     maybe_deliver_item(R, QEntry, ShouldSkip).
 
+
+%% NotAcked, NotFiltered, NotRouted (Send)
+maybe_deliver_item(#remote{deliver_funs = []} = R, _QEntry, _) ->
+    {no_fun, R};
+
 %% Should Skip = true
 maybe_deliver_item(R = #remote{rseq = RSeq}, _QEntry, true) ->
     {skipped, R#remote{rseq = RSeq + 1}};
 
-%% NotAcked, NotFiltered, NotRouted (Send)
-maybe_deliver_item(#remote{active_consumers = []} = R, _QEntry, _) ->
-    {no_fun, R};
-maybe_deliver_item(R = #remote{active_consumers = [C|Rest]}, QEntry, _) ->
-    {delivered, deliver_item(R#remote{active_consumers = Rest}, C, QEntry)}.
+maybe_deliver_item(R = #remote{deliver_funs = [{Ref, DeliverFun}|Rest]}, QEntry, _) ->
+    {delivered, deliver_item(R#remote{deliver_funs = Rest}, Ref, DeliverFun, QEntry)}.
 
 
-deliver_item(R, C, {Seq, NumItems, Bin, Meta}) ->
+deliver_item(R, Ref, DeliverFun, {Seq, NumItems, Bin, Meta}) ->
 
-    #remote
-    {
-        inactive_consumers = INAC,
-        recover_unregistered_consumers = RUC
-    } = R,
-
+    #remote{consumers = Consumers, dead_consumers = DeadConsumers} = R,
     try
+        C = orddict:fetch(Ref, Consumers),
         Seq = R#remote.rseq + 1, % bit of paranoia, remove after EQC
         CSeq = C#consumer.cseq + 1,
         C2 = C#consumer{cseq = CSeq},
         QEntry2 = {CSeq, NumItems, Bin, Meta},
-        QEntry3 = set_skip_meta(QEntry2),
-        ok = C#consumer.deliver_fun(QEntry3),
+        ok = DeliverFun(QEntry2),
+
         %% add sequence number too consumer ets table
         ets:insert(C#consumer.ctab, {CSeq, Seq}),
+        NewConsumers = update_consumer(Ref, C2, Consumers),
+        NewR = R#remote{rseq = Seq, consumers = NewConsumers},
         case Seq rem app_helper:get_env(riak_repl, rtq_latency_interval, 1000) of
             0 ->
-                R#remote{rseq = Seq, inactive_consumers = [C2|INAC], last_seen = {Seq, os:timestamp()}};
+                NewR#remote{last_seen = {Seq, os:timestamp()}};
             _ ->
-                R#remote{rseq = Seq, inactive_consumers = [C2|INAC]}
+                NewR
         end
     catch
         Type:Error ->
@@ -827,7 +818,7 @@ deliver_item(R, C, {Seq, NumItems, Bin, Meta}) ->
             riak_repl_stats:rt_source_errors(),
             %% do not advance head so it will be delivered again
             %% TODO make function for dead consumers (find ets:first, set cseq to this! change the mode)
-            R#remote{mode = recover_consumer, errs = R#remote.errs + 1, recover_unregistered_consumers = RUC ++ [C]}
+            R#remote{mode = recover_dead_consumer, errs = R#remote.errs + 1, dead_consumers = orddict:store(Ref, C, DeadConsumers)}
     end.
 
 %% Deliver an error if a delivery function is registered.
@@ -836,6 +827,9 @@ deliver_error(DeliverFun, Reason) when is_function(DeliverFun)->
     ok;
 deliver_error(_NotAFun, _Reason) ->
     ok.
+
+update_consumer(Ref, NewConsumer, Consumers) ->
+    orddict:update(Ref, fun(_) -> NewConsumer end, Consumers).
 
 % if nothing has been delivered, the sink assumes nothing was skipped
 % fulfill that expectation.

@@ -288,6 +288,8 @@ unpack_key(K) ->
 
 %% Hash an object, making sure the vclock is in sorted order
 %% as it varies depending on whether it has been pruned or not
+hash_object(RObj) ->
+    hash_object(RObj, 0).
 hash_object(RObj, 0) ->
     Vclock = riak_object:vclock(RObj),
     UpdObj = riak_object:set_vclock(RObj, lists:sort(Vclock)),
@@ -428,7 +430,7 @@ keylist_fold({B,Key}=K, V, {MPid, Count, Total, FilterEnabled, FilteredBucketsLi
 keylist_fold({B,Key}=K, V, {MPid, Count}) ->
     try
         RObj = riak_object:from_binary(B,Key,V),
-        H = hash_object(RObj, legacy),
+        H = hash_object(RObj),
         Bin = term_to_binary({pack_key(K), H}),
         %% write key/value hash to file
         riak_core_gen_server:cast(MPid, {keylist, Bin}),
@@ -447,7 +449,7 @@ keylist_fold({B,Key}=K, V, {MPid, Count}) ->
 should_we_filter(Enabled, B, BucketsList) ->
     Enabled andalso lists:member(B, BucketsList).
 
-check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}, Filtered) ->
+check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter, ObjectHashVersion}, Filtered) ->
     Total2 = case Filtered of
                  true -> Total1;
                  false -> Total1 +1
@@ -457,7 +459,7 @@ check_keylist_ack({Count, MPid, Total1, FilterEnabled, FilteredBucketsList, Full
         100 ->
             %% send keylist_ack to "self" every 100 key/value hashes
             ok = riak_core_gen_server:call(MPid, keylist_ack, infinity),
-            {MPid, 0, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter};
+            {MPid, 0, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter, ObjectHashVersion};
         _ ->
-            {MPid, Count+1, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter}
+            {MPid, Count+1, Total2, FilterEnabled, FilteredBucketsList, FullsyncObjectFilter, ObjectHashVersion}
     end.

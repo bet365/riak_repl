@@ -21,7 +21,7 @@
          terminate/2, code_change/3]).
 
 %% HOFs
--export([keylist_fold/3]).
+-export([keylist_fold/3, diff_keys/3]).
 
 -include("riak_repl.hrl").
 
@@ -63,7 +63,7 @@ stop(Pid) ->
 %% a {Ref, {error, Reason}} event on failures
 make_keylist(Pid, Partition, Filename, FilterEnabled, FilterConfig, FullsyncObjectFilter, ObjectHashVersion) ->
     riak_core_gen_server:call(Pid, {make_keylist, Partition, Filename, FilterEnabled, FilterConfig, FullsyncObjectFilter, ObjectHashVersion}, ?LONG_TIMEOUT).
-   
+
 %% Computes the difference between two keylist sorted files.
 %% Returns {ok, Ref} or {error, Reason}
 %% Differences are sent as {Ref, {merkle_diff, {Bkey, Vclock}}}
@@ -153,7 +153,7 @@ handle_call({make_keylist, Partition, Filename, FilterEnabled, FilterConfig, Ful
                     end
             end,
             FolderPid = spawn_link(Worker),
-            NewState = State#state{ref = Ref, 
+            NewState = State#state{ref = Ref,
                                    folder_pid = FolderPid,
                                    filename = Filename,
                                    kl_fp = FP},
@@ -190,7 +190,7 @@ handle_call({diff, Partition, RemoteFilename, LocalFilename, Count, NeedVClocks}
                                                     need_vclocks = NeedVClocks,
                                                     preflist = {Partition, OwnerNode}}),
                     lager:info("Partition ~p: ~p remote / ~p local: ~p missing, ~p differences.",
-                                        [Partition, 
+                                        [Partition,
                                         erlang:get(remote_reads),
                                         erlang:get(local_reads),
                                         DiffState#diff_state.missing,

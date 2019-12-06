@@ -181,7 +181,7 @@ handle_call({diff, Partition, RemoteFilename, LocalFilename, Count, NeedVClocks}
             OwnerNode = riak_core_ring:index_owner(Ring, Partition),
             case lists:member(OwnerNode, riak_core_node_watcher:nodes(riak_kv)) of
                 true ->
-                    DiffState = diff_keys(itr_new(RemoteFile, remote_reads),
+                    DiffState = ?MODULE:diff_keys(itr_new(RemoteFile, remote_reads),
                                         itr_new(LocalFile, local_reads),
                                         #diff_state{fsm = State#state.owner_fsm,
                                                     count=Count,

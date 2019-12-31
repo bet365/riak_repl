@@ -229,9 +229,10 @@ resume_fullsync([]) ->
 %% Repl2 commands
 %%
 rtq_stats() ->
-    case erlang:whereis(riak_repl2_rtq) of
-        Pid when is_pid(Pid) ->
-            [{realtime_queue_stats, riak_repl2_rtq:status()}];
+    case {erlang:whereis(riak_repl2_rtq_1), erlang:whereis(riak_repl2_rtq_2)} of
+        {Pid1, Pid2} when is_pid(Pid1) and is_pid(Pid2) ->
+            [{realtime_queue_stats_1, riak_repl2_rtq:status(1)},
+             {realtime_queue_stats_2, riak_repl2_rtq:status(2)}];
         _ -> []
     end.
 

@@ -21,8 +21,11 @@ init([]) ->
         [{riak_repl2_rtsource_conn_data_mgr, {riak_repl2_rtsource_conn_data_mgr, start_link, []},
         permanent, 50000, worker, [riak_repl2_rtsource_conn_data_mgr]},
 
-        {riak_repl2_rtq, {riak_repl2_rtq, start_link, []},
-          transient, 50000, worker, [riak_repl2_rtq]},
+        {riak_repl2_rtq, {riak_repl2_rtq, start_link, [1]},
+          transient, 50000, worker, [riak_repl2_rtq_1]},
+
+        {riak_repl2_rtq, {riak_repl2_rtq, start_link, [2]},
+            transient, 50000, worker, [riak_repl2_rtq_2]},
 
          {riak_repl2_rtq_overload_counter, {riak_repl2_rtq_overload_counter, start_link, []},
           permanent, 50000, worker, [riak_repl2_rtq_overload_counter]},
@@ -31,3 +34,4 @@ init([]) ->
           permanent, infinity, supervisor, [riak_repl2_rtsource_conn_sup]}],
 
     {ok, {{rest_for_one, 9, 10}, Processes}}.
+

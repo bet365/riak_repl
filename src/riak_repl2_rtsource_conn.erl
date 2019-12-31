@@ -79,6 +79,7 @@
 -record(state, {remote,    % remote name
                 address,   % {IP, Port}
                 primary,
+                rtq = 1,
                 transport, % transport module
                 socket,    % socket to use with transport
                 peername,  % cached when socket becomes active
@@ -118,12 +119,12 @@ legacy_status(Pid) ->
 legacy_status(Pid, Timeout) ->
     gen_server:call(Pid, legacy_status, Timeout).
 
-connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) ->
+connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, {Primary, N}) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
         gen_server:call(RtSourcePid,
-          {connected, Socket, Transport, IPPort, Proto, Primary},
+          {connected, Socket, Transport, IPPort, Proto, Primary, N},
           ?LONG_TIMEOUT)
     catch
         _:Reason ->
@@ -210,7 +211,7 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
          {strategy, realtime},
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
-handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
+handle_call({connected, Socket, Transport, EndPoint, Proto, Primary, N}, _From,
             State = #state{remote = Remote}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
@@ -219,7 +220,7 @@ handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             lager:debug("RT source connection negotiated ~p wire format from proto ~p", [Ver, Proto]),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, N),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             lager:debug("Keeping stats for " ++ SocketTag),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source,

@@ -76,7 +76,7 @@ started() ->
 ensure_rt(WantEnabled0, WantStarted0) ->
     WantEnabled = lists:usort(WantEnabled0),
     WantStarted = lists:usort(WantStarted0),
-    Status = riak_repl2_rtq:status(),
+    Status = riak_repl2_rtq:status(1),
     CStatus = proplists:get_value(consumers, Status, []),
     Enabled = lists:sort([Remote || {Remote, _Stats} <- CStatus]),
     Connections = riak_repl2_rtsource_conn_sup:enabled(),
@@ -205,7 +205,8 @@ handle_call(status, _From, State = #state{sinks = SinkPids}) ->
              end || Pid <- SinkPids],
     Status = [{enabled, enabled()},
               {started, started()},
-              {q,       riak_repl2_rtq:status()},
+              {q1,       riak_repl2_rtq:status(1)},
+              {q2,       riak_repl2_rtq:status(2)},
               {sources, Sources},
               {sinks, Sinks}],
     {reply, Status, State};

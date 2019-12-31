@@ -498,7 +498,7 @@ setup() ->
     riak_repl_test_util:kill_and_wait(riak_repl2_rt),
     {ok, _RT} = riak_repl2_rt:start_link(),
     riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
-    {ok, _} = riak_repl2_rtq:start_link(),
+    {ok, _} = riak_repl2_rtq:start_link(1),
     application:set_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 1000),
 
     catch(meck:unload(riak_core_connection_mgr)),

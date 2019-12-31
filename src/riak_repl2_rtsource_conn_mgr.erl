@@ -136,11 +136,11 @@ init([Remote]) ->
     end.
 
 %%%=====================================================================================================================
-handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _From,
+handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, N}}, _From,
     State = #state{remote = Remote, endpoints = E, version = V}) ->
 
     lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
-    case riak_repl2_rtsource_conn:start_link(Remote) of
+    case riak_repl2_rtsource_conn:start_link(Remote, N) of
         {ok, RtSourcePid} ->
             case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) of
                 ok ->

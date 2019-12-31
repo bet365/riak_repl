@@ -42,7 +42,7 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) ->
-    case riak_repl2_rtq:all_queues_empty() of
+    case riak_repl2_rtq:all_queues_empty(1) of
         true ->
             gen_server:reply(State#state.caller, ok),
             lager:info("Queue empty, no replication queue migration required");
@@ -60,7 +60,7 @@ handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) -
                             WireVer = riak_repl_util:peer_wire_format(Peer),
                             lager:info("Migrating replication queue data to ~p with wire version ~p",
                                        [Peer, WireVer]),
-                            drain_queue(riak_repl2_rtq:is_empty(qm), Peer, WireVer),
+                            drain_queue(riak_repl2_rtq:is_empty(qm, 1), Peer, WireVer),
                             lager:info("Done migrating replication queue"),
                             ok
                     end,
@@ -93,7 +93,7 @@ drain_queue(false, Peer, PeerWireVer) ->
                     end,
                     gen_server:cast({riak_repl2_rtq,Peer}, CastObj),
                     %% Note - the next line is casting, not calling.
-                    riak_repl2_rtq:ack(qm, Seq)
+                    riak_repl2_rtq:ack(qm, Seq, 1)
                 catch
                     _:_ ->
                         % probably too much spam in the logs for this warning
@@ -102,8 +102,8 @@ drain_queue(false, Peer, PeerWireVer) ->
                         riak_repl_stats:objects_dropped_no_clients(),
                         riak_repl_stats:rt_source_errors()
                 end,
-             ok end),
-    drain_queue(riak_repl2_rtq:is_empty(qm), Peer, PeerWireVer);
+             ok end, 1),
+    drain_queue(riak_repl2_rtq:is_empty(qm, 1), Peer, PeerWireVer);
 
 drain_queue(true, _Peer, _Ver) ->
    done.

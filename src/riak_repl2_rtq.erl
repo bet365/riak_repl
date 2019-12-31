@@ -19,35 +19,35 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/0,
-         start_link/1,
+-export([start_link/1,
+         start_link/2,
          start_test/0,
          register/1,
          unregister/1,
-         set_max_bytes/1,
+         set_max_bytes/2,
+         push/4,
          push/3,
-         push/2,
-         pull/2,
-         pull_sync/2,
-         ack/2,
-         ack_sync/2,
-         status/0,
-         dumpq/0,
-         summarize/0,
-         evict/1,
+         pull/3,
+         pull_sync/3,
+         ack/3,
+         ack_sync/3,
+         status/1,
+         dumpq/1,
+         summarize/1,
          evict/2,
-         is_empty/1,
-         all_queues_empty/0,
+         evict/3,
+         is_empty/2,
+         all_queues_empty/1,
          shutdown/0,
-         stop/0,
-         is_running/0,
+         stop/1,
+         is_running/1,
          update_filtered_bucket_state/1,
          update_filtered_buckets_list/1]).
 % private api
--export([report_drops/1]).
+-export([report_drops/2]).
 
--define(overload_ets, rtq_overload_ets).
--define(SERVER, ?MODULE).
+-define(overload_ets(X), overload_ets_name(X)).
+-define(SERVER, rtq_name(X)).
 -define(DEFAULT_OVERLOAD, 2000).
 -define(DEFAULT_RECOVER, 1000).
 -define(DEFAULT_RTQ_LATENCY_SLIDING_WINDOW, 300).
@@ -98,31 +98,38 @@
 -type name() :: term().
 -type seq() :: non_neg_integer().
 
+overload_ets_name(Id) ->
+    IdBin = list_to_binary(integer_to_list(Id)),
+    binary_to_atom(<<"riak_repl2_rtq_", IdBin/binary>>, latin1).
+rtq_name(Id) ->
+    IdBin = list_to_binary(integer_to_list(Id)),
+    binary_to_atom(<<"riak_repl2_rtq_", IdBin/binary>>, latin1).
+
 %% API
 %% @doc Start linked, registered to module name.
--spec start_link() -> {ok, pid()}.
-start_link() ->
+%%-spec start_link() -> {ok, pid()}.
+start_link(X) ->
     Overload = app_helper:get_env(riak_repl, rtq_overload_threshold, ?DEFAULT_OVERLOAD),
     Recover = app_helper:get_env(riak_repl, rtq_overload_recover, ?DEFAULT_RECOVER),
     Opts = [{overload_threshold, Overload}, {overload_recover, Recover}],
-    start_link(Opts).
+    start_link(Opts, X).
 
--type overload_threshold_option() :: {'overload_threshold', pos_integer()}.
--type overload_recover_option() :: {'overload_recover', pos_integer()}.
--type start_option() :: overload_threshold_option() | overload_recover_option().
--type start_options() :: [start_option()].
+%%-type overload_threshold_option() :: {'overload_threshold', pos_integer()}.
+%%-type overload_recover_option() :: {'overload_recover', pos_integer()}.
+%%-type start_option() :: overload_threshold_option() | overload_recover_option().
+%%-type start_options() :: [start_option()].
 %% @doc Start linked, registers to module name, with given options. This makes
 %% testing some options a bit easier as it removes a dependance on app_helper.
--spec start_link(Options :: start_options()) -> {'ok', pid()}.
-start_link(Options) ->
+%%-spec start_link(Options :: start_options()) -> {'ok', pid()}.
+start_link(Options, X) ->
     case ets:info(?overload_ets) of
         undefined ->
-            ?overload_ets = ets:new(?overload_ets, [named_table, public, {read_concurrency, true}]),
+            ?overload_ets(X) = ets:new(?overload_ets(X), [named_table, public, {read_concurrency, true}]),
             ets:insert(?overload_ets, {overloaded, false});
         _ ->
             ok
     end,
-    gen_server:start_link({local, ?SERVER}, ?MODULE, Options, []).
+    gen_server:start_link({local, ?SERVER(X)}, ?MODULE, Options, []).
 
 %% @doc Test helper, starts unregistered and unlinked.
 -spec start_test() -> {ok, pid()}.
@@ -132,35 +139,37 @@ start_test() ->
 %% @doc Register a consumer with the given name. The Name of the consumer is
 %% the name of the remote cluster by convention. Returns the oldest unack'ed
 %% sequence number.
--spec register(Name :: name()) -> {'ok', number()}.
+%%-spec register(Name :: name()) -> {'ok', number()}.
 register(Name) ->
-    gen_server:call(?SERVER, {register, Name}, infinity).
+    gen_server:call(?SERVER(1), {register, Name}, infinity),
+    gen_server:call(?SERVER(2), {register, Name}, infinity).
 
 %% @doc Removes a consumer.
--spec unregister(Name :: name()) -> 'ok' | {'error', 'not_registered'}.
+%%-spec unregister(Name :: name()) -> 'ok' | {'error', 'not_registered'}.
 unregister(Name) ->
-    gen_server:call(?SERVER, {unregister, Name}, infinity).
+    gen_server:call(?SERVER(1), {unregister, Name}, infinity),
+    gen_server:call(?SERVER(2), {unregister, Name}, infinity).
 
 %% @doc True if the given consumer has no items to consume.
--spec is_empty(Name :: name()) -> boolean().
-is_empty(Name) ->
-    gen_server:call(?SERVER, {is_empty, Name}, infinity).
+%%-spec is_empty(Name :: name()) -> boolean().
+is_empty(Name, X) ->
+    gen_server:call(?SERVER(X), {is_empty, Name}, infinity).
 
 %% @doc True if no consumer has items to consume.
--spec all_queues_empty() -> boolean().
-all_queues_empty() ->
-    gen_server:call(?SERVER, all_queues_empty, infinity).
+%%-spec all_queues_empty() -> boolean().
+all_queues_empty(X) ->
+    gen_server:call(?SERVER(X), all_queues_empty, infinity).
 
 %% @doc Set the maximum number of bytes to use - could take a while to return
 %% on a big queue. The maximum is for the backend data structure used itself,
 %% not just the raw size of the objects. This was chosen to keep a situation
 %% where overhead of stored objects would cause more memory to be used than
 %% expected just looking at MaxBytes.
--spec set_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
-set_max_bytes(MaxBytes) ->
+%%-spec set_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
+set_max_bytes(MaxBytes, X) ->
     % TODO if it always returns 'ok' it should likely be a cast, eg:
     % why are we blocking the caller while it trims the queue?
-    gen_server:call(?SERVER, {set_max_bytes, MaxBytes}, infinity).
+    gen_server:call(?SERVER(X), {set_max_bytes, MaxBytes}, infinity).
 
 %% @doc Push an item onto the queue. Bin should be the list of objects to push
 %% run through term_to_binary, while NumItems is the length of that list
@@ -170,49 +179,49 @@ set_max_bytes(MaxBytes) ->
 %% It is a list of the remotes this cluster forwards to. It is intended to be
 %% used by consumers to alter the `routed_clusters' key before being sent to
 %% the sink.
--spec push(NumItems :: pos_integer(), Bin :: binary(), Meta :: orddict:orddict()) -> 'ok'.
-push(NumItems, Bin, Meta) ->
-    case should_drop() of
+%%-spec push(NumItems :: pos_integer(), Bin :: binary(), Meta :: orddict:orddict()) -> 'ok'.
+push(NumItems, Bin, Meta, X) ->
+    case should_drop(X) of
         true ->
             lager:debug("rtq overloaded"),
             riak_repl2_rtq_overload_counter:drop();
         false ->
-             gen_server:cast(?SERVER, {push, NumItems, Bin, Meta})
+             gen_server:cast(?SERVER(X), {push, NumItems, Bin, Meta})
     end.
 
-should_drop() ->
-    [{overloaded, Val}] = ets:lookup(?overload_ets, overloaded),
+should_drop(X) ->
+    [{overloaded, Val}] = ets:lookup(?overload_ets(X), overloaded),
     Val.
 
 %% @doc Like `push/3', only Meta is `orddict:new/0'.
--spec push(NumItems :: pos_integer(), Bin :: binary()) -> 'ok'.
-push(NumItems, Bin) ->
-    push(NumItems, Bin, []).
+%%-spec push(NumItems :: pos_integer(), Bin :: binary()) -> 'ok'.
+push(NumItems, Bin, X) ->
+    push(NumItems, Bin, [], X).
 
 %% @doc Using the given DeliverFun, send an item to the consumer Name
 %% asynchonously.
--type queue_entry() :: {pos_integer(), pos_integer(), binary(), orddict:orddict()}.
--type not_reg_error() :: {'error', 'not_registered'}.
--type deliver_fun() :: fun((queue_entry() | not_reg_error()) -> 'ok').
--spec pull(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
-pull(Name, DeliverFun) ->
-    gen_server:cast(?SERVER, {pull, Name, DeliverFun}).
+%%-type queue_entry() :: {pos_integer(), pos_integer(), binary(), orddict:orddict()}.
+%%-type not_reg_error() :: {'error', 'not_registered'}.
+%%-type deliver_fun() :: fun((queue_entry() | not_reg_error()) -> 'ok').
+%%-spec pull(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
+pull(Name, DeliverFun, X) ->
+    gen_server:cast(?SERVER(X), {pull, Name, DeliverFun}).
 
 %% @doc Block the caller while the pull is done.
--spec pull_sync(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
-pull_sync(Name, DeliverFun) ->
-    gen_server:call(?SERVER, {pull_with_ack, Name, DeliverFun}, infinity).
+%%-spec pull_sync(Name :: name(), DeliverFun :: deliver_fun()) -> 'ok'.
+pull_sync(Name, DeliverFun, X) ->
+    gen_server:call(?SERVER(X), {pull_with_ack, Name, DeliverFun}, infinity).
 
 %% @doc Asynchronously acknowldge delivery of all objects with a sequence
 %% equal or lower to Seq for the consumer.
--spec ack(Name :: name(), Seq :: pos_integer()) -> 'ok'.
-ack(Name, Seq) ->
-    gen_server:cast(?SERVER, {ack, Name, Seq, os:timestamp()}).
+%%-spec ack(Name :: name(), Seq :: pos_integer()) -> 'ok'.
+ack(Name, Seq, X) ->
+    gen_server:cast(?SERVER(X), {ack, Name, Seq, os:timestamp()}).
 
 %% @doc Same as `ack/2', but blocks the caller.
--spec ack_sync(Name :: name(), Seq :: pos_integer()) ->'ok'.
-ack_sync(Name, Seq) ->
-    gen_server:call(?SERVER, {ack_sync, Name, Seq, os:timestamp()}, infinity).
+%%-spec ack_sync(Name :: name(), Seq :: pos_integer()) ->'ok'.
+ack_sync(Name, Seq, X) ->
+    gen_server:call(?SERVER(X), {ack_sync, Name, Seq, os:timestamp()}, infinity).
 
 %% @doc The status of the queue.
 %% <dl>
@@ -230,9 +239,9 @@ ack_sync(Name, Seq) ->
 %% <dt>`drops'</dt><dd>Dropped entries due to `max_bytes'</dd>
 %% <dt>`errs'</dt><dd>Number of non-ok returns from deliver fun</dd>
 %% </dl>
--spec status() -> [any()].
-status() ->
-    Status = gen_server:call(?SERVER, status, infinity),
+%%-spec status() -> [any()].
+status(X) ->
+    Status = gen_server:call(?SERVER(X), status, infinity),
     % I'm having the calling process do derived stats because
     % I don't want to block the rtq from processing objects.
     MaxBytes = proplists:get_value(max_bytes, Status),
@@ -242,20 +251,20 @@ status() ->
 
 %% @doc return the data store as a list.
 -spec dumpq() -> [any()].
-dumpq() ->
-    gen_server:call(?SERVER, dumpq, infinity).
+dumpq(X) ->
+    gen_server:call(?SERVER(X), dumpq, infinity).
 
 %% @doc Return summary data for the objects currently in the queue.
 %% The return value is a list of tuples of the form {SequenceNum, Key, Size}.
--spec summarize() -> [{seq(), riak_object:key(), non_neg_integer()}].
-summarize() ->
-    gen_server:call(?SERVER, summarize, infinity).
+%%-spec summarize() -> [{seq(), riak_object:key(), non_neg_integer()}].
+summarize(X) ->
+    gen_server:call(?SERVER(X), summarize, infinity).
 
 %% @doc If an object with the given Seq number is currently in the queue,
 %% evict it and return ok.
--spec evict(Seq :: seq()) -> 'ok'.
-evict(Seq) ->
-    gen_server:call(?SERVER, {evict, Seq}, infinity).
+%%-spec evict(Seq :: seq()) -> 'ok'.
+evict(Seq, X) ->
+    gen_server:call(?SERVER(X), {evict, Seq}, infinity).
 
 %% @doc If an object with the given Seq number is currently in the queue and it
 %% also matches the given Key, then evict it and return ok. This is a safer
@@ -265,29 +274,30 @@ evict(Seq) ->
 %% given `Seq' number, then {not_found, Seq} is returned, whereas if the
 %% object with the given `Seq' number is present but does not match the
 %% provided `Key', then {wrong_key, Seq, Key} is returned.
--spec evict(Seq :: seq(), Key :: riak_object:key()) ->
-    'ok' | {'not_found', integer()} | {'wrong_key', integer(), riak_object:key()}.
-evict(Seq, Key) ->
-    gen_server:call(?SERVER, {evict, Seq, Key}, infinity).
+%%-spec evict(Seq :: seq(), Key :: riak_object:key()) ->
+%%    'ok' | {'not_found', integer()} | {'wrong_key', integer(), riak_object:key()}.
+evict(Seq, Key, X) ->
+    gen_server:call(?SERVER(X), {evict, Seq, Key}, infinity).
 
 %% @doc Signal that this node is doing down, and so a proxy process needs to
 %% start to avoid dropping, or aborting unacked results.
--spec shutdown() -> 'ok'.
+%%-spec shutdown() -> 'ok'.
 shutdown() ->
-    gen_server:call(?SERVER, shutting_down, infinity).
+    gen_server:call(?SERVER(1), shutting_down, infinity),
+    gen_server:call(?SERVER(2), shutting_down, infinity).
 
-stop() ->
-    gen_server:call(?SERVER, stop, infinity).
+stop(X) ->
+    gen_server:call(?SERVER(X), stop, infinity).
 
 %% @doc Will explode if the server is not started, but will tell you if it's
 %% in shutdown.
--spec is_running() -> boolean().
-is_running() ->
-    gen_server:call(?SERVER, is_running, infinity).
+%%-spec is_running() -> boolean().
+is_running(X) ->
+    gen_server:call(?SERVER(X), is_running, infinity).
 
 %% @private
-report_drops(N) ->
-    gen_server:cast(?SERVER, {report_drops, N}).
+report_drops(N, X) ->
+    gen_server:cast(?SERVER(X), {report_drops, N}).
 
 %% Internals
 %% @private
@@ -502,7 +512,7 @@ terminate(Reason, State=#state{cs = Cs}) ->
   lager:info("rtq terminating due to: ~p
   State: ~p", [Reason, State]),
     %% when started from tests, we may not be registered
-    catch(erlang:unregister(?SERVER)),
+    catch(erlang:unregister(?SERVER(X))),
     flush_pending_pushes(),
     DList = [get_all_delivery_funs(C) || C <- Cs],
     _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
@@ -596,7 +606,7 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
                 [] ->
                     {DeliverStatus, C};
                 _ ->
-                    _ = [gen_server:cast(?SERVER, {pull, Name, DeliverFun}) || DeliverFun <- DeliveryFuns],
+                    _ = [gen_server:cast(?SERVER(X), {pull, Name, DeliverFun}) || DeliverFun <- DeliveryFuns],
                     {DeliverStatus, C#c{delivery_funs = []}}
             end;
         _ ->
@@ -942,10 +952,10 @@ trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
     end.
 
 update_filtered_bucket_state(Enabled) ->
-    gen_server:call(?SERVER, {filtered_buckets, update_bucket_filtering_state, Enabled}).
+    gen_server:call(?SERVER(X), {filtered_buckets, update_bucket_filtering_state, Enabled}).
 
 update_filtered_buckets_list(FilteringConfig) ->
-    gen_server:call(?SERVER, {filtered_buckets, update_buckets, FilteringConfig}).
+    gen_server:call(?SERVER(X), {filtered_buckets, update_buckets, FilteringConfig}).
 
 save_consumer(C, DeliverFun) ->
     case C#c.deliver of

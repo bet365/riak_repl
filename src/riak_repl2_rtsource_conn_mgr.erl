@@ -45,8 +45,10 @@
     max_delay,
     source_nodes,
     sink_nodes,
-    remove_endpoint,
-    endpoints
+    remove_endpoint_1,
+    remove_endpoint_2,
+    endpoints_1,
+    endpoints_2
 }).
 
 %%%===================================================================
@@ -99,7 +101,8 @@ init([Remote]) ->
     process_flag(trap_exit, true),
 
     _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
-    E = dict:new(),
+    E1 = dict:new(),
+    E2 = dict:new(),
     MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
     M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
     RebalanceTimer = app_helper:get_env(riak_repl, realtime_rebalance_on_failure, 5),
@@ -110,8 +113,9 @@ init([Remote]) ->
         legacy ->
             case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, legacy) of
                 {ok, Ref} ->
-                    {ok, #state{version = legacy, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = [], sink_nodes = []}};
+                    {ok, #state{version = legacy, remote = Remote, connection_ref = Ref, endpoints_1 = E1, endpoints_2 = E2,
+                        rebalance_delay_fun = M, rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs,
+                        source_nodes = [], sink_nodes = []}};
                 {error, Reason}->
                     lager:warning("Error connecting to remote, verions: legacy"),
                     {stop, Reason}
@@ -127,8 +131,9 @@ init([Remote]) ->
                                                        {X,Y}
                                                end,
 
-                    {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes}};
+                    {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints_1 = E1, endpoints_2 = E2,
+                        rebalance_delay_fun = M, rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs,
+                        source_nodes = SourceNodes, sink_nodes = SinkNodes}};
                 {error, Reason}->
                     lager:warning("Error connecting to remote, verions: v1"),
                     {stop, Reason}
@@ -136,25 +141,26 @@ init([Remote]) ->
     end.
 
 %%%=====================================================================================================================
-handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, N}}, _From,
-    State = #state{remote = Remote, endpoints = E, version = V}) ->
+handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, 1}}, _From,
+    State = #state{remote = Remote, endpoints_1 = E, version = V}) ->
 
     lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
-    case riak_repl2_rtsource_conn:start_link(Remote, N) of
+    lager:info("ADDING CONN FOR REMOTE: ~p, ~p ~p ", [Remote, Primary, 1]),
+    case riak_repl2_rtsource_conn:start_link(Remote) of
         {ok, RtSourcePid} ->
-            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) of
+            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, {Primary, 1}) of
                 ok ->
 
                     % check remove_endpoint
-                    NewState = case State#state.remove_endpoint of
+                    NewState = case State#state.remove_endpoint_1 of
                                    undefined ->
                                        State;
                                    RC ->
                                        E2 = remove_connections([RC], E, Remote, V),
-                                       State#state{endpoints = E2, remove_endpoint = undefined}
+                                       State#state{endpoints_1 = E2, remove_endpoint_1 = undefined}
                                end,
 
-                    case dict:find({IPPort, Primary}, NewState#state.endpoints) of
+                    case dict:find({IPPort, Primary}, NewState#state.endpoints_1) of
                         {ok, OldRtSourcePid} ->
                             exit(OldRtSourcePid, {shutdown, rebalance, {IPPort,Primary}}),
                             lager:info("duplicate connections found, removing the old one ~p", [{IPPort,Primary}]);
@@ -163,7 +169,7 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, N}},
                     end,
 
                     %% Save {EndPoint, Pid}; Pid will come from the supervisor starting a child
-                    NewEndpoints = dict:store({IPPort, Primary}, RtSourcePid, NewState#state.endpoints),
+                    NewEndpoints = dict:store({IPPort, Primary}, RtSourcePid, NewState#state.endpoints_1),
 
                     case V of
                         legacy ->
@@ -175,7 +181,55 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, N}},
                             riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), dict:fetch_keys(NewEndpoints))
                     end,
 
-                    {reply, ok, NewState#state{endpoints = NewEndpoints}};
+                    {reply, ok, NewState#state{endpoints_1 = NewEndpoints}};
+
+                Error ->
+                    lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
+                    {reply, Error, State}
+            end;
+        ER ->
+            {reply, ER, State}
+    end;
+handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, 2}}, _From,
+    State = #state{remote = Remote, endpoints_2 = E, version = V}) ->
+
+    lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
+    lager:info("ADDING CONN FOR REMOTE: ~p, ~p ~p ", [Remote, Primary, 2]),
+    case riak_repl2_rtsource_conn:start_link(Remote) of
+        {ok, RtSourcePid} ->
+            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, {Primary, 2}) of
+                ok ->
+
+                    % check remove_endpoint
+                    NewState = case State#state.remove_endpoint_2 of
+                                   undefined ->
+                                       State;
+                                   RC ->
+                                       E2 = remove_connections([RC], E, Remote, V),
+                                       State#state{endpoints_2 = E2, remove_endpoint_2 = undefined}
+                               end,
+
+                    case dict:find({IPPort, Primary}, NewState#state.endpoints_2) of
+                        {ok, OldRtSourcePid} ->
+                            exit(OldRtSourcePid, {shutdown, rebalance, {IPPort,Primary}}),
+                            lager:info("duplicate connections found, removing the old one ~p", [{IPPort,Primary}]);
+                        error ->
+                            ok
+                    end,
+
+                    %% Save {EndPoint, Pid}; Pid will come from the supervisor starting a child
+                    NewEndpoints = dict:store({IPPort, Primary}, RtSourcePid, NewState#state.endpoints_2),
+
+                    case V of
+                        legacy ->
+                            lager:info("Adding remote connection, however not sending to data_mgr as we are running legacy code base"),
+                            ok;
+                        v1 ->
+                            % save to ring
+                            lager:info("SECOND CONN, NOT ADDING TO DATA MGR", [dict:fetch_keys(NewEndpoints)])
+                    end,
+
+                    {reply, ok, NewState#state{endpoints_2 = NewEndpoints}};
 
                 Error ->
                     lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
@@ -185,19 +239,23 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props, {Primary, N}},
             {reply, ER, State}
     end;
 
-handle_call(all_status, _From, State=#state{endpoints = E}) ->
-    AllKeys = dict:fetch_keys(E),
+handle_call(all_status, _From, State=#state{endpoints_1 = E1, endpoints_2 = E2}) ->
+    AllKeys1 = dict:fetch_keys(E1),
+    AllKeys2 = dict:fetch_keys(E2),
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
-    {reply, lists:flatten(collect_status_data(AllKeys, Timeout, [], E)), State};
+    R1 = lists:flatten(collect_status_data(AllKeys1, Timeout, [], E1)),
+    R2 = lists:flatten(collect_status_data(AllKeys2, Timeout, [], E2)),
+    {reply, R1 ++ R2, State};
 
-handle_call(get_rtsource_conn_pids, _From, State = #state{endpoints = E}) ->
-    Result = lists:foldl(fun({_,Pid}, Acc) -> Acc ++ [Pid] end, [], dict:to_list(E)),
-    {reply, Result, State};
+handle_call(get_rtsource_conn_pids, _From, State = #state{endpoints_1 = E1, endpoints_2 = E2}) ->
+    R1 = lists:foldl(fun({_,Pid}, Acc) -> Acc ++ [Pid] end, [], dict:to_list(E1)),
+    R2 = lists:foldl(fun({_,Pid}, Acc) -> Acc ++ [Pid] end, [], dict:to_list(E2)),
+    {reply, R1 ++ R2, State};
 
 handle_call(stop, _From, State) ->
     {stop, shutdown, ok, State};
 
-handle_call(get_endpoints, _From, State=#state{endpoints = E}) ->
+handle_call(get_endpoints, _From, State=#state{endpoints_1 = E}) ->
     {reply, E, State};
 
 handle_call(Request, _From, State) ->
@@ -207,7 +265,7 @@ handle_call(Request, _From, State) ->
 %%%=====================================================================================================================
 
 %% Connection manager failed to make connection
-handle_cast({connect_failed, Reason}, State = #state{remote = Remote, endpoints = E}) ->
+handle_cast({connect_failed, Reason}, State = #state{remote = Remote, endpoints_1 = E}) ->
     lager:warning("Realtime replication connection to site ~p failed - ~p\n", [Remote, Reason]),
     NewState =
         case dict:fetch_keys(E) of
@@ -234,11 +292,33 @@ handle_cast(Request, State) ->
 
 %%%=====================================================================================================================
 
-handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote, version = Version}) ->
-    NewState = case lists:keyfind(Pid, 2, dict:to_list(E)) of
-                   {Key, Pid} ->
-                       NewEndpoints = dict:erase(Key, E),
-                       State2 = State#state{endpoints = NewEndpoints},
+handle_info({'EXIT', Pid, Reason}, State = #state{endpoints_1 = E1, endpoints_2 = E2, remote = Remote, version = Version}) ->
+
+    Res = case lists:keyfind(Pid, 2, dict:to_list(E1)) of
+        {Key1, Pid} ->
+            {Key1, Pid, 1};
+        _ ->
+            case lists:keyfind(Pid, 2, dict:to_list(E2)) of
+                {Key2, Pid} ->
+                    {Key2, Pid, 2};
+                _ ->
+                    false
+
+            end
+    end,
+
+    NewState = case Res of
+                   {Key, Pid, 1} ->
+                       NewEndpoints1 = dict:erase(Key, E1),
+                       NewEndpoints2 = dict:erase(Key, E2),
+                       case dict:fetch(Key, E2) of
+                           {ok, E2Pid} ->
+                               exit(E2Pid, rebalance);
+                           _ ->
+                               ok
+                       end,
+
+                       State2 = State#state{endpoints_1 = NewEndpoints1, endpoints_2 = NewEndpoints2},
                        {IPPort, Primary} = Key,
 
                        case Version of
@@ -261,7 +341,39 @@ handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote
                                lager:warning("riak_repl2_rtsource_conn terminated due to reason ~p, Endpoint: ~p", [OtherError, Key])
                        end,
 
-                       case dict:fetch_keys(NewEndpoints) of
+                       case dict:fetch_keys(NewEndpoints1) of
+                           [] ->
+                               cancel_timer(State2#state.rb_timeout_tref),
+                               RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
+                               State2#state{rb_timeout_tref = RbTimeoutTref};
+                           _ ->
+                               State2
+                       end;
+                   {Key, Pid, 2} ->
+                       NewEndpoints1 = dict:erase(Key, E1),
+                       NewEndpoints2 = dict:erase(Key, E2),
+                       case dict:fetch(Key, E1) of
+                           {ok, E1Pid} ->
+                               exit(E1Pid, rebalance);
+                           _ ->
+                               ok
+                       end,
+                       State2 = State#state{endpoints_1 = NewEndpoints1, endpoints_2 = NewEndpoints2},
+
+                       case Reason of
+                           normal ->
+                               lager:info("riak_repl2_rtsource_conn terminated due to reason nomral, Endpoint: ~p", [Key]);
+                           {shutdown, routine} ->
+                               lager:info("riak_repl2_rtsource_conn terminated due to reason routine shutdown, Endpoint: ~p", [Key]);
+                           {shutdown, heartbeat_timeout} ->
+                               lager:info("riak_repl2_rtsource_conn terminated due to reason heartbeat timeout, Endpoint: ~p", [Key]);
+                           {shutdown, Error} ->
+                               lager:info("riak_repl2_rtsource_conn terminated due to reason ~p, Endpoint: ~p", [Error, Key]);
+                           OtherError ->
+                               lager:warning("riak_repl2_rtsource_conn terminated due to reason ~p, Endpoint: ~p", [OtherError, Key])
+                       end,
+
+                       case dict:fetch_keys(NewEndpoints1) of
                            [] ->
                                cancel_timer(State2#state.rb_timeout_tref),
                                RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
@@ -299,10 +411,11 @@ handle_info(Info, State) ->
 
 %%%=====================================================================================================================
 
-terminate(Reason, _State=#state{remote = Remote, endpoints = E}) ->
+terminate(Reason, _State=#state{remote = Remote, endpoints_1 = E1, endpoints_2 = E2}) ->
     lager:info("rtrsource conn mgr terminating, Reason: ~p", [Reason]),
     riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-    [catch riak_repl2_rtsource_conn:stop(Pid) || {{{_IP, _Port},_Primary},Pid} <- dict:to_list(E)],
+    [catch riak_repl2_rtsource_conn:stop(Pid) || {{{_IP, _Port},_Primary},Pid} <- dict:to_list(E1)],
+    [catch riak_repl2_rtsource_conn:stop(Pid) || {{{_IP, _Port},_Primary},Pid} <- dict:to_list(E2)],
     ok.
 
 %%%=====================================================================================================================
@@ -329,7 +442,7 @@ maybe_rebalance(State, now) ->
 
                 inconsistent_data ->
                     lager:info("rebalancing triggered, but an inconsistent data was found in realtime connections on data mgr, will rebalance in 5 seconds"),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, State#state.remote, node(), dict:fetch_keys(State#state.endpoints)),
+                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, State#state.remote, node(), dict:fetch_keys(State#state.endpoints_1)),
                     cancel_timer(State#state.rb_timeout_tref),
                     RbTimeoutTref = erlang:send_after(State#state.rebalance_timer, self(), rebalance_now),
                     State#state{rb_timeout_tref = RbTimeoutTref};
@@ -364,7 +477,7 @@ maybe_rebalance(State, now) ->
                     "drop nodes ~p ~n"
                     "connect nodes ~p", [DropNodes, ConnectToNodes]),
                     {_RemoveAllConnections, NewState1} = check_and_drop_connections(State, DropNodes, ConnectedSinkNodes),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState1#state.remote, node(), dict:fetch_keys(NewState1#state.endpoints)),
+                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState1#state.remote, node(), dict:fetch_keys(NewState1#state.endpoints_1)),
                     NewState1#state{sink_nodes = NewSink, source_nodes = NewSource};
 
                 {true, {nodes_up_and_down, DropNodes, ConnectToNodes, Primary, Secondary, ConnectedSinkNodes}} ->
@@ -373,7 +486,7 @@ maybe_rebalance(State, now) ->
                     "connect nodes ~p", [DropNodes, ConnectToNodes]),
                     {RemoveAllConnections, NewState1} = check_and_drop_connections(State, DropNodes, ConnectedSinkNodes),
                     NewState2 = check_remove_endpoint(NewState1, ConnectToNodes),
-                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState2#state.remote, node(), dict:fetch_keys(NewState2#state.endpoints)),
+                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, NewState2#state.remote, node(), dict:fetch_keys(NewState2#state.endpoints_1)),
                     case RemoveAllConnections of
                         true ->
                             rebalance_connect(NewState2#state{sink_nodes = NewSink, source_nodes = NewSource}, Primary++Secondary);
@@ -416,7 +529,7 @@ should_rebalance(State=#state{sink_nodes = OldSink, source_nodes = OldSource, re
             end
     end.
 
-check_data_mgr_conn_mgr_data_consistency(RealtimeConnections, #state{endpoints = Endpoints}) ->
+check_data_mgr_conn_mgr_data_consistency(RealtimeConnections, #state{endpoints_1 = Endpoints}) ->
     case dict:find(node(), RealtimeConnections) of
         {ok, Conns} ->
             lists:sort(Conns) == lists:sort(dict:fetch_keys(Endpoints));
@@ -526,7 +639,7 @@ invert_dictionary_helper_builder(Source, [{Sink,Primary}|Rest], Dict) ->
 
 
 
-rebalance(#state{endpoints = Endpoints, remote=Remote}) ->
+rebalance(#state{endpoints_1 = Endpoints, remote=Remote}) ->
     case riak_core_cluster_mgr:get_ipaddrs_of_cluster(Remote, split) of
         {ok, []} ->
             rebalance_needed_empty_list_returned;
@@ -537,23 +650,27 @@ rebalance(#state{endpoints = Endpoints, remote=Remote}) ->
     end.
 
 
-check_remove_endpoint(State=#state{remove_endpoint = RE}, ConnectToNodes) ->
+check_remove_endpoint(State=#state{remove_endpoint_1 = RE}, ConnectToNodes) ->
     case lists:member(RE, ConnectToNodes) of
         true ->
-            State#state{remove_endpoint = undefined};
+            State#state{remove_endpoint_1 = undefined, remove_endpoint_2 = undefined};
         false ->
             State
     end.
 
 
-check_and_drop_connections(State=#state{endpoints = E, remote = R, version = V}, DropNodes=[X|Xs], ConnectedSinkNodes) ->
+check_and_drop_connections(State=#state{endpoints_1 = E1, endpoints_2 = E2, remote = R, version = V}, DropNodes=[X|Xs], ConnectedSinkNodes) ->
     case ConnectedSinkNodes -- DropNodes of
         [] ->
-            NewEndpoints = remove_connections(Xs, E, R, V),
-            {true, State#state{endpoints = NewEndpoints, remove_endpoint = X}};
+            NewEndpoints1 = remove_connections(Xs, E1, R, V),
+            NewEndpoints2 = remove_connections(Xs, E2, R, V),
+            {true, State#state{endpoints_1 = NewEndpoints1, endpoints_2 = NewEndpoints2,
+                remove_endpoint_1 = X, remove_endpoint_2 = X}};
         _ ->
-            NewEndpoints = remove_connections(DropNodes, E, R, V),
-            {false, State#state{endpoints = NewEndpoints, remove_endpoint = undefined}}
+            NewEndpoints1 = remove_connections(DropNodes, E1, R, V),
+            NewEndpoints2 = remove_connections(DropNodes, E2, R, V),
+            {false, State#state{endpoints_1 = NewEndpoints1, endpoints_2 = NewEndpoints2,
+                remove_endpoint_1 = undefined, remove_endpoint_2 = undefined}}
     end.
 
 remove_connections([], E, _, _) ->
@@ -659,7 +776,7 @@ maybe_rebalance_legacy(State, now) ->
             reconnect_legacy(State, UsefulAddrs)
     end.
 
-should_rebalance_legacy(#state{endpoints = E, remote=Remote}) ->
+should_rebalance_legacy(#state{endpoints_1 = E, remote=Remote}) ->
     ConnectedAddr = case dict:fetch_keys(E) of
                         [] ->
                             [];
@@ -688,7 +805,7 @@ should_rebalance_legacy(#state{endpoints = E, remote=Remote}) ->
             end
     end.
 
-reconnect_legacy(State=#state{endpoints=Endpoints, remote=Remote, version = Version}, BetterAddrs) ->
+reconnect_legacy(State=#state{endpoints_1=Endpoints, remote=Remote, version = Version}, BetterAddrs) ->
     lager:info("(legacy) trying reconnect to one of: ~p", [BetterAddrs]),
 
     % remove current connection
@@ -699,10 +816,10 @@ reconnect_legacy(State=#state{endpoints=Endpoints, remote=Remote, version = Vers
     case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, BetterAddrs}) of
         {ok, Ref} ->
             lager:debug("(legacy) connecting ref ~p", [Ref]),
-            State#state{connection_ref = Ref, endpoints = NewEndpoints};
+            State#state{connection_ref = Ref, endpoints_1 = NewEndpoints};
         {error, Reason}->
             lager:warning("(legacy) error connecting to remote ~p (ignoring as we're reconnecting)", [Reason]),
-            State#state{endpoints = NewEndpoints}
+            State#state{endpoints_1 = NewEndpoints}
     end.
 
 same_ipaddr({{IP,Port},_}, {{IP,Port},_}) ->

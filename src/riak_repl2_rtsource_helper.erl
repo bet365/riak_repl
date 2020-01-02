@@ -8,7 +8,7 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/4,
+-export([start_link/5,
     stop/1,
     v1_ack/2,
     status/1, status/2, send_heartbeat/1]).
@@ -29,11 +29,12 @@
                 sent_seq,   % last sequence sent
                 v1_offset = 0,
                 v1_seq_map = [],
-                objects = 0 % number of objects sent - really number of pulls as could be multiobj
+                objects = 0, % number of objects sent - really number of pulls as could be multiobj
+                rtq = 1
 }).
 
-start_link(Remote, Transport, Socket, Version) ->
-    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version], []).
+start_link(Remote, Transport, Socket, Version, N) ->
+    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, N], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -54,11 +55,11 @@ send_heartbeat(Pid) ->
     %% as it is responsible for checking heartbeat
     gen_server:cast(Pid, send_heartbeat).
 
-init([Remote, Transport, Socket, Version]) ->
+init([Remote, Transport, Socket, Version, N]) ->
     Me = self(),
     Deliver = fun(Result) -> gen_server:call(Me, {pull, Result}, infinity) end,
     State = #state{remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, deliver_fun = Deliver},
+        socket = Socket, deliver_fun = Deliver, rtq = N},
     async_pull(State),
     {ok, State}.
 
@@ -86,12 +87,12 @@ handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
           end),
     {noreply, State};
 
-handle_cast({v1_ack, Seq}, State = #state{v1_seq_map = Map}) ->
+handle_cast({v1_ack, Seq}, State = #state{v1_seq_map = Map, rtq = RTQ}) ->
     case orddict:find(Seq, Map) of
         error ->
             ok;
         {ok, RealSeq} ->
-            riak_repl2_rtq:ack(State#state.remote, RealSeq)
+        riak_repl2_rtq:ack(State#state.remote, RealSeq, RTQ)
     end,
     Map2 = orddict:erase(Seq, Map),
     {noreply, State#state{v1_seq_map = Map2}};
@@ -113,8 +114,8 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 %% Trigger an async pull from the realtime queue
-async_pull(_State=#state{remote = Remote, deliver_fun = Deliver}) ->
-    riak_repl2_rtq:pull(Remote, Deliver).
+async_pull(_State=#state{remote = Remote, deliver_fun = Deliver, rtq = RTQ}) ->
+    riak_repl2_rtq:pull(Remote, Deliver, RTQ).
 
 maybe_send(Transport, Socket, QEntry, State) ->
     {_Seq, _NumObjects, _BinObjs, Meta} = QEntry,

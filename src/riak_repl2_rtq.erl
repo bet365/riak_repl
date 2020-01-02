@@ -40,14 +40,12 @@
          all_queues_empty/1,
          shutdown/0,
          stop/1,
-         is_running/1,
-         update_filtered_bucket_state/1,
-         update_filtered_buckets_list/1]).
+         is_running/1]).
 % private api
 -export([report_drops/2]).
 
 -define(overload_ets(X), overload_ets_name(X)).
--define(SERVER, rtq_name(X)).
+-define(SERVER(X), rtq_name(X)).
 -define(DEFAULT_OVERLOAD, 2000).
 -define(DEFAULT_RECOVER, 1000).
 -define(DEFAULT_RTQ_LATENCY_SLIDING_WINDOW, 300).
@@ -74,7 +72,8 @@
                 qsize_bytes = 0,
                 word_size=erlang:system_info(wordsize),
                 filtered_buckets_enabled = false, % is bucket filtering enabled?
-                filtered_buckets = []
+                filtered_buckets = [],
+                rtq = 1
                }).
 
 % Consumers
@@ -95,8 +94,8 @@
             last_seen  % a timestamp of when we received the last ack to measure latency
            }).
 
--type name() :: term().
--type seq() :: non_neg_integer().
+%%-type name() :: term().
+%%-type seq() :: non_neg_integer().
 
 overload_ets_name(Id) ->
     IdBin = list_to_binary(integer_to_list(Id)),
@@ -117,22 +116,22 @@ start_link(X) ->
 %%-type overload_threshold_option() :: {'overload_threshold', pos_integer()}.
 %%-type overload_recover_option() :: {'overload_recover', pos_integer()}.
 %%-type start_option() :: overload_threshold_option() | overload_recover_option().
-%%-type start_options() :: [start_option()].
+%%-type start_options() :: [start_option()].q
 %% @doc Start linked, registers to module name, with given options. This makes
 %% testing some options a bit easier as it removes a dependance on app_helper.
 %%-spec start_link(Options :: start_options()) -> {'ok', pid()}.
 start_link(Options, X) ->
-    case ets:info(?overload_ets) of
+    case ets:info(?overload_ets(X)) of
         undefined ->
-            ?overload_ets(X) = ets:new(?overload_ets(X), [named_table, public, {read_concurrency, true}]),
-            ets:insert(?overload_ets, {overloaded, false});
+            _ = ets:new(?overload_ets(X), [named_table, public, {read_concurrency, true}]),
+            ets:insert(?overload_ets(X), {overloaded, false});
         _ ->
             ok
     end,
-    gen_server:start_link({local, ?SERVER(X)}, ?MODULE, Options, []).
+    gen_server:start_link({local, ?SERVER(X)}, ?MODULE, {Options, X}, []).
 
 %% @doc Test helper, starts unregistered and unlinked.
--spec start_test() -> {ok, pid()}.
+%%-spec start_test() -> {ok, pid()}.
 start_test() ->
     gen_server:start(?MODULE, [], []).
 
@@ -184,7 +183,7 @@ push(NumItems, Bin, Meta, X) ->
     case should_drop(X) of
         true ->
             lager:debug("rtq overloaded"),
-            riak_repl2_rtq_overload_counter:drop();
+            riak_repl2_rtq_overload_counter:drop(X);
         false ->
              gen_server:cast(?SERVER(X), {push, NumItems, Bin, Meta})
     end.
@@ -250,7 +249,7 @@ status(X) ->
     [{percent_bytes_used, PercentBytes} | Status].
 
 %% @doc return the data store as a list.
--spec dumpq() -> [any()].
+%%-spec dumpq() -> [any()].
 dumpq(X) ->
     gen_server:call(?SERVER(X), dumpq, infinity).
 
@@ -301,12 +300,12 @@ report_drops(N, X) ->
 
 %% Internals
 %% @private
-init(Options) ->
+init({Options, X}) ->
     %% Default maximum realtime queue size to 100Mb
     MaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{max_bytes = MaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+    {ok, #state{max_bytes = MaxBytes, overload = Overloaded, recover = Recover, rtq = X}}. % lots of initialization done by defaults
 
 %% @private
 handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
@@ -430,7 +429,7 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
     end;
 
 handle_call({pull_with_ack, Name, DeliverFun}, _From, State) ->
-    {reply, ok, pull(Name, DeliverFun, State)};
+    {reply, ok, pull_helper(Name, DeliverFun, State)};
 
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
@@ -461,7 +460,7 @@ handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{cs=[]}) ->
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta}, State) ->
     State2 = maybe_flip_overload(State),
-    {noreply, push(NumItems, Bin, Meta, State2)};
+    {noreply, push_helper(NumItems, Bin, Meta, State2)};
 
 %% @private
 handle_cast({report_drops, N}, State) ->
@@ -472,7 +471,7 @@ handle_cast({report_drops, N}, State) ->
     {noreply, State3};
 
 handle_cast({pull, Name, DeliverFun}, State) ->
-     {noreply, pull(Name, DeliverFun, State)};
+     {noreply, pull_helper(Name, DeliverFun, State)};
 
 handle_cast({ack, Name, Seq, Ts}, State) ->
        {noreply, ack_seq(Name, Seq, Ts, State)}.
@@ -508,7 +507,7 @@ handle_info(_Msg, State) ->
     {noreply, State}.
 
 %% @private
-terminate(Reason, State=#state{cs = Cs}) ->
+terminate(Reason, State=#state{cs = Cs, rtq = X}) ->
   lager:info("rtq terminating due to: ~p
   State: ~p", [Reason, State]),
     %% when started from tests, we may not be registered
@@ -523,18 +522,18 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 maybe_flip_overload(State) ->
-    #state{overloaded = Overloaded, overload = Overload, recover = Recover} = State,
+    #state{overloaded = Overloaded, overload = Overload, recover = Recover, rtq = X} = State,
     {message_queue_len, MsgQLen} = erlang:process_info(self(), message_queue_len),
     if
         Overloaded andalso MsgQLen =< Recover ->
             lager:info("Recovered from overloaded condition"),
-            ets:insert(?overload_ets, {overloaded, false}),
+            ets:insert(?overload_ets(X), {overloaded, false}),
             State#state{overloaded = false};
         (not Overloaded) andalso MsgQLen > Overload ->
             lager:warning("Realtime queue mailbox size of ~p is greater than ~p indicating overload; objects will be dropped until size is less than or equal to ~p", [MsgQLen, Overload, Recover]),
             % flip the rt_dirty flag on
             riak_repl_stats:rt_source_errors(),
-            ets:insert(?overload_ets, {overloaded, true}),
+            ets:insert(?overload_ets(X), {overloaded, true}),
             State#state{overloaded = true};
         true ->
             State
@@ -606,14 +605,14 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
                 [] ->
                     {DeliverStatus, C};
                 _ ->
-                    _ = [gen_server:cast(?SERVER(X), {pull, Name, DeliverFun}) || DeliverFun <- DeliveryFuns],
+                    _ = [gen_server:cast(self(), {pull, Name, DeliverFun}) || DeliverFun <- DeliveryFuns],
                     {DeliverStatus, C#c{delivery_funs = []}}
             end;
         _ ->
             {DeliverStatus, C}
     end.
 
-push(NumItems, Bin, Meta, State = #state{qtab = QTab,
+push_helper(NumItems, Bin, Meta, State = #state{qtab = QTab,
                                          qseq = QSeq,
                                          cs = Cs,
                                          shutting_down = false,
@@ -660,16 +659,16 @@ push(NumItems, Bin, Meta, State = #state{qtab = QTab,
             update_q_size(State, Size)
     end,
     trim_q(State2#state{qseq = QSeq2, cs = Cs3});
-push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
+push_helper(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
 
-pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs, filtered_buckets_enabled = FEnabled, filtered_buckets = FilterBuckets}) ->
+pull_helper(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs, filtered_buckets_enabled = FEnabled, filtered_buckets = FilterBuckets}) ->
      CsNames = [C#c.name || C <- Cs],
      UpdCs = case lists:keytake(Name, #c.name, Cs) of
                 {value, C, Cs2} ->
                     [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun, FEnabled, FilterBuckets) | Cs2];
-                false ->
+                 false ->
                     lager:error("Consumer ~p pulled from RTQ, but was not registered", [Name]),
                     _ = deliver_error(DeliverFun, not_registered),
                     Cs
@@ -951,11 +950,11 @@ trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
             end
     end.
 
-update_filtered_bucket_state(Enabled) ->
-    gen_server:call(?SERVER(X), {filtered_buckets, update_bucket_filtering_state, Enabled}).
-
-update_filtered_buckets_list(FilteringConfig) ->
-    gen_server:call(?SERVER(X), {filtered_buckets, update_buckets, FilteringConfig}).
+%%update_filtered_bucket_state(Enabled) ->
+%%    gen_server:call(?SERVER(X), {filtered_buckets, update_bucket_filtering_state, Enabled}).
+%%
+%%update_filtered_buckets_list(FilteringConfig) ->
+%%    gen_server:call(?SERVER(X), {filtered_buckets, update_buckets, FilteringConfig}).
 
 save_consumer(C, DeliverFun) ->
     case C#c.deliver of

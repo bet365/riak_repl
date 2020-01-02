@@ -119,12 +119,12 @@ legacy_status(Pid) ->
 legacy_status(Pid, Timeout) ->
     gen_server:call(Pid, legacy_status, Timeout).
 
-connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, {Primary, N}) ->
+connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
         gen_server:call(RtSourcePid,
-          {connected, Socket, Transport, IPPort, Proto, Primary, N},
+          {connected, Socket, Transport, IPPort, Proto, Primary},
           ?LONG_TIMEOUT)
     catch
         _:Reason ->
@@ -204,14 +204,18 @@ handle_call(status, _From, State =
 handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
     SocketStats = riak_core_tcp_mon:socket_status(State#state.socket),
     Socket = riak_core_tcp_mon:format_socket_stats(SocketStats, []),
-    RTQStats = [{realtime_queue_stats, riak_repl2_rtq:status()}],
+    RTQStats =
+        [
+            {realtime_queue_stats_1, riak_repl2_rtq:status(1)},
+            {realtime_queue_stats_2, riak_repl2_rtq:status(2)}
+        ],
     Status =
         [{node, node()},
          {site, Remote},
          {strategy, realtime},
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
-handle_call({connected, Socket, Transport, EndPoint, Proto, Primary, N}, _From,
+handle_call({connected, Socket, Transport, EndPoint, Proto, {Primary, N}}, _From,
             State = #state{remote = Remote}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
@@ -232,6 +236,7 @@ handle_call({connected, Socket, Transport, EndPoint, Proto, Primary, N}, _From,
                                  peername = peername(Transport, Socket),
                                  helper_pid = HelperPid,
                                  ver = Ver,
+                                 rtq = N,
                                  primary = Primary},
             {ok, Peername} = inet:sockname(Socket),
             lager:info("Established realtime connection to site ~p address ~s, [data socket: ~p]",
@@ -329,7 +334,8 @@ cancel_timer(TRef)      -> _ = erlang:cancel_timer(TRef).
 
 recv(TcpBin, State = #state{remote = Name,
                             hb_sent_q = HBSentQ,
-                            hb_timeout_tref = HBTRef}) ->
+                            hb_timeout_tref = HBTRef,
+                            rtq = RTQ}) ->
     %% hb_timeout_tref might be undefined if we have are getting
     %% acks/heartbeats back-to-back and we haven't sent a heartbeat yet.
     {realtime, {ProtoMajor, _}, {ProtoMajor, _}} = State#state.proto,
@@ -339,7 +345,7 @@ recv(TcpBin, State = #state{remote = Name,
         {ok, {ack, Seq}, Cont} when ProtoMajor >= 2 ->
             %% TODO: report this better per-remote
             riak_repl_stats:objects_sent(),
-            ok = riak_repl2_rtq:ack(Name, Seq),
+            ok = riak_repl2_rtq:ack(Name, Seq, RTQ),
             %% reset heartbeat timer, since we've seen activity from the peer
             case HBTRef of
                 undefined ->

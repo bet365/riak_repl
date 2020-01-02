@@ -53,7 +53,9 @@ init([]) ->
     %% trap exit so we can have terminate() called
     process_flag(trap_exit, true),
     Nodes = riak_repl_util:get_peer_repl_nodes(),
-    Refs = [erlang:monitor(process, {riak_repl2_rtq, Node}) || Node <- Nodes],
+    Refs1 = [erlang:monitor(process, {riak_repl2_rtq_1, Node}) || Node <- Nodes],
+    Refs2 = [erlang:monitor(process, {riak_repl2_rtq_2, Node}) || Node <- Nodes],
+    Refs = Refs1 ++ Refs2,
     %% cache the supported wire format of peer nodes to avoid rcp calls later.
     Versions = get_peer_wire_versions(Nodes),
     Metas = get_peer_meta_support(Nodes),
@@ -80,15 +82,18 @@ handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
     BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
     case meta_support(Node, State#state.meta_support) of
         true ->
-            gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
+            gen_server:cast({riak_repl2_rtq_1, Node}, {push, NumItems, BinObjs, Meta});
         false ->
-            gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs})
+            gen_server:cast({riak_repl2_rtq_1, Node}, {push, NumItems, BinObjs})
     end,
     {noreply, State#state{nodes=Nodes ++ [Node]}};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'DOWN', _Ref, _, {riak_repl2_rtq, Node}, _}, State) ->
+handle_info({'DOWN', _Ref, _, {riak_repl2_rtq_1, Node}, _}, State) ->
+    lager:info("rtq proxy target ~p is down", [Node]),
+    {noreply, State#state{nodes=State#state.nodes -- [Node]}};
+handle_info({'DOWN', _Ref, _, {riak_repl2_rtq_2, Node}, _}, State) ->
     lager:info("rtq proxy target ~p is down", [Node]),
     {noreply, State#state{nodes=State#state.nodes -- [Node]}};
 handle_info(_Info, State) ->

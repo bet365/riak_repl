@@ -583,11 +583,11 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
             lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
             lager:debug("Attempting riak_core_connection:sync_connect/2"),
 
+            riak_core_connection:sync_connect(Addr, {Primary, 2}, Protocol),
             case riak_core_connection:sync_connect(Addr, {Primary, 1}, Protocol) of
                 ok ->
                     case {NextAddrPrimary, Primary} of
                         {true, true} ->
-                            riak_core_connection:sync_connect(Addr, {Primary, 2}, Protocol),
                             connection_helper(Ref, Protocol, Strategy, Addrs, true);
                         {true, false} ->
                             % This should never happen!

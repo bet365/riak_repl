@@ -91,7 +91,7 @@ drain_queue(false, Peer, PeerWireVer) ->
                         w1 ->
                             {push, NumItem, BinObjs, Meta}
                     end,
-                    gen_server:cast({riak_repl2_rtq,Peer}, CastObj),
+                    gen_server:cast({riak_repl2_rtq_1,Peer}, CastObj),
                     %% Note - the next line is casting, not calling.
                     riak_repl2_rtq:ack(qm, Seq, 1)
                 catch

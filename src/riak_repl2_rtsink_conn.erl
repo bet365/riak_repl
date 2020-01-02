@@ -314,7 +314,8 @@ maybe_push(Binary, Meta, ObjectFilteringRules) ->
           List = riak_repl_util:from_wire(Binary),
           Meta2 = orddict:erase(skip_count, Meta),
           Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
-          riak_repl2_rtq:push(length(List), Binary, Meta3)
+          Hash  = erlang:phash2(Binary, 2) + 1,
+          riak_repl2_rtq:push(length(List), Binary, Meta3, Hash)
     end.
 
 add_object_filtering_blacklist_to_meta(Meta, []) ->

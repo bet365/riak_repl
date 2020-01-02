@@ -101,7 +101,9 @@ get_stats() ->
     RTQ =
         [
             {realtime_queue_stats_1, riak_repl2_rtq:status(1)},
-            {realtime_queue_stats_2, riak_repl2_rtq:status(2)}
+            {realtime_queue_stats_2, riak_repl2_rtq:status(2)},
+            {realtime_queue_stats_3, riak_repl2_rtq:status(3)},
+            {realtime_queue_stats_4, riak_repl2_rtq:status(4)}
         ],
     PGStats = riak_repl2_pg:status(),
 

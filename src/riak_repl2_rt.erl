@@ -176,7 +176,7 @@ postcommit(RObj) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    Hash  = erlang:phash2(BinObjs, 2) + 1,
+                    Hash  = erlang:phash2(BinObjs, 4) + 1,
                     riak_repl2_rtq:push(length(Objects), BinObjs, Meta, Hash);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...
@@ -208,6 +208,8 @@ handle_call(status, _From, State = #state{sinks = SinkPids}) ->
               {started, started()},
               {q1,       riak_repl2_rtq:status(1)},
               {q2,       riak_repl2_rtq:status(2)},
+              {q3,       riak_repl2_rtq:status(3)},
+              {q4,       riak_repl2_rtq:status(4)},
               {sources, Sources},
               {sinks, Sinks}],
     {reply, Status, State};

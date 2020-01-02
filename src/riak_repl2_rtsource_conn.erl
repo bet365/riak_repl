@@ -59,10 +59,17 @@
 -define(DEFAULT_HBINTERVAL, 15).
 -define(DEFAULT_HBTIMEOUT, 15).
 
--define(TCP_OPTIONS,  [{keepalive, true},
-                       {nodelay, true},
-                       {packet, 0},
-                       {active, false}]).
+-define(TCP_OPTIONS,
+    [
+        {keepalive, true},
+        {nodelay, true},
+        {packet, 0},
+        {active, false},
+        {sndbuf,786432},
+        {recbuf,1572864},
+        {buffer,786432}
+]
+).
 
 %% nodes running 1.3.1 have a bug in the service_mgr module.
 %% this bug prevents it from being able to negotiate a version list longer

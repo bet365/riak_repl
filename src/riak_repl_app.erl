@@ -364,7 +364,9 @@ prep_stop(_State) ->
         end,
         %% stop it cleanly, don't just kill it
         riak_repl2_rtq:stop(1),
-        riak_repl2_rtq:stop(2)
+        riak_repl2_rtq:stop(2),
+        riak_repl2_rtq:stop(3),
+        riak_repl2_rtq:stop(4)
        catch
         Type:Reason ->
             lager:error("Stopping application riak_api - ~p:~p.\n", [Type, Reason])

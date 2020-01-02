@@ -69,6 +69,9 @@ sync_register_service() ->
     ProtoPrefs = {realtime,[{3,0}, {2,0}, {1,4}, {1,1}, {1,0}]},
     TcpOptions = [{keepalive, true}, % find out if connection is dead, this end doesn't send
                   {packet, 0},
+                  {sndbuf,786432},
+                  {recbuf,1572864},
+                  {buffer,786432},
                   {nodelay, true}],
     HostSpec = {ProtoPrefs, {TcpOptions, ?MODULE, start_service, undefined}},
     riak_core_service_mgr:sync_register_service(HostSpec, {round_robin, undefined}).
@@ -314,7 +317,7 @@ maybe_push(Binary, Meta, ObjectFilteringRules) ->
           List = riak_repl_util:from_wire(Binary),
           Meta2 = orddict:erase(skip_count, Meta),
           Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
-          Hash  = erlang:phash2(Binary, 2) + 1,
+          Hash  = erlang:phash2(Binary, 4) + 1,
           riak_repl2_rtq:push(length(List), Binary, Meta3, Hash)
     end.
 

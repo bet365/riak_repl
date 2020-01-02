@@ -10,6 +10,8 @@
     % number of drops since last report
     drops_1 = 0 :: non_neg_integer(),
     drops_2 = 0 :: non_neg_integer(),
+    drops_3 = 0 :: non_neg_integer(),
+    drops_4 = 0 :: non_neg_integer(),
     % how often (in milliseconds) to report drops to rtq.
     interval :: pos_integer(),
     % timer reference for interval
@@ -68,6 +70,8 @@ handle_info(report_drops, State) ->
     lager:debug("reporting drops_2: ~p", [State#state.drops_2]),
     riak_repl2_rtq:report_drops(State#state.drops_1, 1),
     riak_repl2_rtq:report_drops(State#state.drops_2, 2),
+    riak_repl2_rtq:report_drops(State#state.drops_2, 3),
+    riak_repl2_rtq:report_drops(State#state.drops_2, 4),
     {noreply, State#state{drops_1 = 0, drops_2 = 0, timer = undefined}};
 
 handle_info(_Msg, State) ->
@@ -81,9 +85,11 @@ code_change(_Vsn, State, _Extra) ->
 
 %% internal
 
-dropped(X, #state{drops_1 = N1, drops_2 = N2} = State) ->
+dropped(X, #state{drops_1 = N1, drops_2 = N2, drops_3 = N3, drops_4 = N4} = State) ->
     case X of
         1 -> State#state{drops_1 = N1+1};
         2 -> State#state{drops_2 = N2+1};
+        3 -> State#state{drops_2 = N3+1};
+        4 -> State#state{drops_2 = N4+1};
         _ -> State
     end.

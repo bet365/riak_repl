@@ -231,8 +231,12 @@ resume_fullsync([]) ->
 rtq_stats() ->
     case {erlang:whereis(riak_repl2_rtq_1), erlang:whereis(riak_repl2_rtq_2)} of
         {Pid1, Pid2} when is_pid(Pid1) and is_pid(Pid2) ->
-            [{realtime_queue_stats_1, riak_repl2_rtq:status(1)},
-             {realtime_queue_stats_2, riak_repl2_rtq:status(2)}];
+            [
+                {realtime_queue_stats_1, riak_repl2_rtq:status(1)},
+                {realtime_queue_stats_2, riak_repl2_rtq:status(2)},
+                {realtime_queue_stats_3, riak_repl2_rtq:status(3)},
+                {realtime_queue_stats_4, riak_repl2_rtq:status(4)}
+            ];
         _ -> []
     end.
 

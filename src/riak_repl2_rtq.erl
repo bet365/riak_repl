@@ -141,13 +141,17 @@ start_test() ->
 %%-spec register(Name :: name()) -> {'ok', number()}.
 register(Name) ->
     gen_server:call(?SERVER(1), {register, Name}, infinity),
-    gen_server:call(?SERVER(2), {register, Name}, infinity).
+    gen_server:call(?SERVER(2), {register, Name}, infinity),
+    gen_server:call(?SERVER(3), {register, Name}, infinity),
+    gen_server:call(?SERVER(4), {register, Name}, infinity).
 
 %% @doc Removes a consumer.
 %%-spec unregister(Name :: name()) -> 'ok' | {'error', 'not_registered'}.
 unregister(Name) ->
     gen_server:call(?SERVER(1), {unregister, Name}, infinity),
-    gen_server:call(?SERVER(2), {unregister, Name}, infinity).
+    gen_server:call(?SERVER(2), {unregister, Name}, infinity),
+    gen_server:call(?SERVER(3), {unregister, Name}, infinity),
+    gen_server:call(?SERVER(4), {unregister, Name}, infinity).
 
 %% @doc True if the given consumer has no items to consume.
 %%-spec is_empty(Name :: name()) -> boolean().
@@ -283,7 +287,9 @@ evict(Seq, Key, X) ->
 %%-spec shutdown() -> 'ok'.
 shutdown() ->
     gen_server:call(?SERVER(1), shutting_down, infinity),
-    gen_server:call(?SERVER(2), shutting_down, infinity).
+    gen_server:call(?SERVER(2), shutting_down, infinity),
+    gen_server:call(?SERVER(3), shutting_down, infinity),
+    gen_server:call(?SERVER(4), shutting_down, infinity).
 
 stop(X) ->
     gen_server:call(?SERVER(X), stop, infinity).

@@ -51,7 +51,8 @@
                 active = true,    %% If socket is set active
                 deactivated = 0,  %% Count of times deactivated
                 source_drops = 0, %% Count of upstream drops
-                helper,           %% Helper PID
+                helpers = orddict:new(),           %% Helper PID
+                helper_concurrency = 0,
                 hb_last,          %% os:timestamp last heartbeat message received
                 seq_ref,          %% Sequence reference for completed/acked
                 expect_seq = undefined,%% Next expected sequence number
@@ -69,9 +70,6 @@ sync_register_service() ->
     ProtoPrefs = {realtime,[{3,0}, {2,0}, {1,4}, {1,1}, {1,0}]},
     TcpOptions = [{keepalive, true}, % find out if connection is dead, this end doesn't send
                   {packet, 0},
-                  {sndbuf,786432},
-                  {recbuf,1572864},
-                  {buffer,786432},
                   {nodelay, true}],
     HostSpec = {ProtoPrefs, {TcpOptions, ?MODULE, start_service, undefined}},
     riak_core_service_mgr:sync_register_service(HostSpec, {round_robin, undefined}).
@@ -119,16 +117,21 @@ init([OkProto, Remote]) ->
     {ok, Proto} = OkProto,
     Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
     lager:debug("RT sink connection negotiated ~p wire format from proto ~p", [Ver, Proto]),
-    {ok, Helper} = riak_repl2_rtsink_helper:start_link(self()),
+    HelperConcurrency = app_helper:get_env(riak_repl, rtsink_helper_conc, 10),
+    Helpers = lists:foldl(
+        fun(N, Acc) ->
+            {ok, Helper} = riak_repl2_rtsink_helper:start_link(self()),
+            orddict:store(N, Helper, Acc)
+        end, orddict:new(), lists:seq(1, HelperConcurrency)),
     riak_repl2_rt:register_sink(self()),
     MaxPending = app_helper:get_env(riak_repl, rtsink_max_pending, 100),
     Report = app_helper:get_env(riak_repl, bucket_type_drop_report_interval, ?DEFAULT_INTERVAL_MILLIS),
 
     {ok, #state{remote = Remote, proto = Proto, max_pending = MaxPending,
-                helper = Helper, ver = Ver, bt_drops = dict:new(), bt_interval = Report}}.
+                helpers = Helpers, helper_concurrency = HelperConcurrency, ver = Ver, bt_drops = dict:new(), bt_interval = Report}}.
 
 handle_call(status, _From, State = #state{remote = Remote,
-                                          transport = T, socket = _S, helper = Helper,
+                                          transport = T, socket = _S, helpers = Helpers,
                                           hb_last = HBLast,
                                           active = Active, deactivated = Deactivated,
                                           source_drops = SourceDrops,
@@ -148,8 +151,8 @@ handle_call(status, _From, State = #state{remote = Remote,
                riak_core_tcp_mon:format_socket_stats(SocketStats,[])},
               {hb_last, HBLast},
               %%{peer, peername(State)},
-              {helper, riak_repl_util:safe_pid_to_list(Helper)},
-              {helper_msgq_len, riak_repl_util:safe_get_msg_q_len(Helper)},
+              {helpers, orddict:fold(fun(K, V, Acc) -> [{K, riak_repl_util:safe_pid_to_list(V)}| Acc] end, [], Helpers)},
+              {helper_msgq_len, orddict:fold(fun(K, V, Acc) -> [{K, riak_repl_util:safe_get_msg_q_len(V)}| Acc] end, [], Helpers)},
               {active, Active},
               {deactivated, Deactivated},
               {source_drops, SourceDrops},
@@ -265,7 +268,7 @@ handle_info(report_bt_drops, State=#state{bt_drops = DropDict}) ->
 
 terminate(_Reason, State) ->
     %% TODO: Consider trying to do something graceful with poolboy?
-    catch riak_repl2_rtsink_helper:stop(State#state.helper),
+    orddict:fold(fun(_K, V, Acc) -> catch riak_repl2_rtsink_helper:stop(V), Acc end, [], State#state.helpers),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -332,7 +335,8 @@ add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
 
 %% Note match on Seq
 do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
-                                              helper = Helper,
+                                              helpers = Helpers,
+                                              helper_concurrency = HelperConcurrency,
                                               seq_ref = Ref,
                                               expect_seq = Seq,
                                               acked_seq = AckedSeq,
@@ -342,6 +346,8 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
         {DoneFun, BinObjs, Meta} ->
             case riak_repl_bucket_type_util:bucket_props_match(Meta) of
                 true ->
+                    Hash  = erlang:phash2(BinObjs, HelperConcurrency) + 1,
+                    Helper = orddict:fetch(Hash, Helpers),
                     riak_repl2_rtsink_helper:write_objects(Helper, BinObjs, DoneFun, Ver);
                 false ->
                     BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
@@ -354,6 +360,8 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
             end;
         {DoneFun, BinObjs} ->
             %% this is for backwards compatibility with Repl version before metadata support (> 1.4)
+            Hash  = erlang:phash2(BinObjs, HelperConcurrency) + 1,
+            Helper = orddict:fetch(Hash, Helpers),
             riak_repl2_rtsink_helper:write_objects(Helper, BinObjs, DoneFun, Ver)
     end,
     State2 = case AckedSeq of

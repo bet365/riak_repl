@@ -60,14 +60,10 @@
 -define(DEFAULT_HBTIMEOUT, 15).
 
 -define(TCP_OPTIONS,
-    [
-        {keepalive, true},
+        [{keepalive, true},
         {nodelay, true},
         {packet, 0},
-        {active, false},
-        {sndbuf,786432},
-        {recbuf,1572864},
-        {buffer,786432}
+        {active, false}
 ]
 ).
 

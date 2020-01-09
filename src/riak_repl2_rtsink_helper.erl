@@ -12,6 +12,7 @@
 %% API
 -export([start_link/1,
          stop/1,
+         poolboy_status/1,
          write_objects/4]).
 
 %% gen_server callbacks
@@ -24,8 +25,10 @@
 
 -behavior(gen_server).
 
--record(state, {parent           %% Parent process
-               }).
+-record(state, {
+    parent, %% Parent process
+    poolboy_pid
+}).
 
 start_link(Parent) ->
     gen_server:start_link(?MODULE, [Parent], []).
@@ -33,18 +36,41 @@ start_link(Parent) ->
 stop(Pid) ->
     gen_server:call(Pid, stop, infinity).
 
+poolboy_status(Pid) ->
+    gen_server:call(Pid, poolboy_status, infinity).
+
 write_objects(Pid, BinObjs, DoneFun, Ver) ->
     gen_server:cast(Pid, {write_objects, BinObjs, DoneFun, Ver}).
 
 %% Callbacks
 init([Parent]) ->
-    {ok, #state{parent = Parent}}.
+    MinPool = app_helper:get_env(riak_repl, rtsink_min_workers, 5),
+    MaxPool = app_helper:get_env(riak_repl, rtsink_max_workers, 100),
+    PoolArgs =
+        [
+            {worker_module, riak_repl_fullsync_worker},
+            {worker_args, []},
+            {size, MinPool}, {max_overflow, MaxPool}
+        ],
+
+    {ok, Pool} = poolboy:start_link(PoolArgs),
+    {ok, #state{parent = Parent, poolboy_pid = Pool}}.
+
+handle_call(poolboy_status, _From, #state{poolboy_pid = Pool} = State) ->
+    {PoolboyState, PoolboyQueueLength, PoolboyOverflow, PoolboyMonitorsActive}
+        = poolboy:status(Pool),
+    Status =
+        [{poolboy_state, PoolboyState},
+        {poolboy_queue_length, PoolboyQueueLength},
+        {poolboy_overflow, PoolboyOverflow},
+        {poolboy_monitors_active, PoolboyMonitorsActive}],
+    {reply, Status, State};
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
-handle_cast({write_objects, BinObjs, DoneFun, Ver}, State) ->
-    do_write_objects(BinObjs, DoneFun, Ver),
+handle_cast({write_objects, BinObjs, DoneFun, Ver}, #state{poolboy_pid = Pool} = State) ->
+    do_write_objects(BinObjs, DoneFun, Ver, Pool),
     {noreply, State};
 handle_cast({unmonitor, Ref}, State) ->
     demonitor(Ref),
@@ -66,10 +92,9 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% Receive TCP data - decode framing and dispatch
-do_write_objects(BinObjs, DoneFun, Ver) ->
-    Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
+do_write_objects(BinObjs, DoneFun, Ver, Pool) ->
+    Worker = poolboy:checkout(Pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),
     WrapperFun = fun(ObjectFilteringRules) -> DoneFun(ObjectFilteringRules), gen_server:cast(Me, {unmonitor, MRef}) end,
-    ok = riak_repl_fullsync_worker:do_binputs(Worker, BinObjs, WrapperFun,
-                                              riak_repl2_rtsink_pool, Ver).
+    ok = riak_repl_fullsync_worker:do_binputs(Worker, BinObjs, WrapperFun, Pool, Ver).

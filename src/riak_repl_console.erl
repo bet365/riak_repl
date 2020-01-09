@@ -246,7 +246,8 @@ rtq_stats() ->
                 {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
             end, 0, RTQ0),
         PercentBytesUsed = PercentBytesUsed1 / N,
-        RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}]
+        RTQ1 = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+        [{realtime_queue_stats, RTQ1}]
     catch _:_ ->
         []
     end.

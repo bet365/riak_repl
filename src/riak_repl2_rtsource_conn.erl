@@ -222,7 +222,8 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
             {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
         end, 0, RTQ0),
     PercentBytesUsed = PercentBytesUsed1 / N,
-    RTQStats = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+    RTQ1 = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+    RTQStats = [{realtime_queue_stats, RTQ1}],
 
     Status =
         [{node, node()},

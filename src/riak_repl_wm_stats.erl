@@ -116,7 +116,8 @@ get_stats() ->
             {_, X} = lists:keyfind(bytes, 1, StatusX), B ++ X
         end, 0, RTQ0),
     PercentBytesUsed = PercentBytesUsed1 / N,
-    RTQ = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+    RTQ1 = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+    RTQ = [{realtime_queue_stats, RTQ1}],
 
 
     PGStats = riak_repl2_pg:status(),

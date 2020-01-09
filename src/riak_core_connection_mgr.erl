@@ -583,9 +583,15 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
             lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
             lager:debug("Attempting riak_core_connection:sync_connect/2"),
 
-            riak_core_connection:sync_connect(Addr, {Primary, 4}, Protocol),
-            riak_core_connection:sync_connect(Addr, {Primary, 3}, Protocol),
-            riak_core_connection:sync_connect(Addr, {Primary, 2}, Protocol),
+            case element(1, element(1, Protocol)) of
+                realtime ->
+                    riak_core_connection:sync_connect(Addr, {Primary, 4}, Protocol),
+                    riak_core_connection:sync_connect(Addr, {Primary, 3}, Protocol),
+                    riak_core_connection:sync_connect(Addr, {Primary, 2}, Protocol);
+                _ ->
+                    ok
+
+            end,
             case riak_core_connection:sync_connect(Addr, {Primary, 1}, Protocol) of
                 ok ->
                     case {NextAddrPrimary, Primary} of

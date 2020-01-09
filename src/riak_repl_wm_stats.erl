@@ -98,15 +98,28 @@ get_stats() ->
     Clients = riak_repl_console:client_stats(),
     Coord = riak_repl_console:coordinator_stats(),
     CoordSrv = riak_repl_console:coordinator_srv_stats(),
-    RTQ =
-        [
-            {realtime_queue_stats_1, riak_repl2_rtq:status(1)},
-            {realtime_queue_stats_2, riak_repl2_rtq:status(2)},
-            {realtime_queue_stats_3, riak_repl2_rtq:status(3)},
-            {realtime_queue_stats_4, riak_repl2_rtq:status(4)}
-        ],
-    PGStats = riak_repl2_pg:status(),
 
+
+
+    N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    RTQ0 =
+        lists:foldl(
+            fun(X, Acc) ->
+                [{riak_repl2_rtq:rtq_name(X), riak_repl2_rtq:status(X)} | Acc]
+            end, [], lists:seq(1, N)),
+    PercentBytesUsed1 = lists:foldl(
+        fun(StatusX, PBU) ->
+            {_, X} = lists:keyfind(percent_bytes_used, 1, StatusX), PBU ++ X
+        end, 0, RTQ0),
+    BytesUsed = lists:foldl(
+        fun(StatusX, B) ->
+            {_, X} = lists:keyfind(bytes, 1, StatusX), B ++ X
+        end, 0, RTQ0),
+    PercentBytesUsed = PercentBytesUsed1 / N,
+    RTQ = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+
+
+    PGStats = riak_repl2_pg:status(),
     Most = lists:append([RTRemotesStatus, FSRemotesStatus, Stats1, CMStats,
       LeaderStats, Servers, Clients, Coord, CoordSrv, RTQ]),
     KbpsSums = riak_repl_console:extract_rt_fs_send_recv_kbps(Most),

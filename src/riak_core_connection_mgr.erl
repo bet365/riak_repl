@@ -582,7 +582,7 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
         true ->
             lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
             lager:debug("Attempting riak_core_connection:sync_connect/2"),
-            Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, 4) -1,
+            Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)) -1,
 
             case riak_core_connection:sync_connect(Addr, {Primary, 1}, Protocol) of
                 ok ->

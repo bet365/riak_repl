@@ -8,10 +8,7 @@
 
 -record(state, {
     % number of drops since last report
-    drops_1 = 0 :: non_neg_integer(),
-    drops_2 = 0 :: non_neg_integer(),
-    drops_3 = 0 :: non_neg_integer(),
-    drops_4 = 0 :: non_neg_integer(),
+    drops = orddict:new(),
     % how often (in milliseconds) to report drops to rtq.
     interval :: pos_integer(),
     % timer reference for interval
@@ -47,7 +44,13 @@ drop(X) ->
 %% @private
 init(Options) ->
     Report = proplists:get_value(report_interval, Options, ?DEFAULT_INTERVAL),
-    {ok, #state{interval = Report}}.
+    Drops0 = orddict:new(),
+    Drops = lists:foldl(
+        fun(N, Dict) ->
+            orddict:store(N, 0, Dict)
+        end,
+        Drops0, lists:seq(1, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)))),
+    {ok, #state{drops = Drops, interval = Report}}.
 
 handle_call(_Msg, _From, State) ->
     {reply, {error, badcall}, State}.
@@ -65,14 +68,10 @@ handle_cast(stop, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(report_drops, State) ->
-    lager:debug("reporting drops_1: ~p", [State#state.drops_1]),
-    lager:debug("reporting drops_2: ~p", [State#state.drops_2]),
-    riak_repl2_rtq:report_drops(State#state.drops_1, 1),
-    riak_repl2_rtq:report_drops(State#state.drops_2, 2),
-    riak_repl2_rtq:report_drops(State#state.drops_2, 3),
-    riak_repl2_rtq:report_drops(State#state.drops_2, 4),
-    {noreply, State#state{drops_1 = 0, drops_2 = 0, timer = undefined}};
+handle_info(report_drops, State = #state{drops = Drops}) ->
+    orddict:fold(fun(K, V, ok) -> riak_repl2_rtq:report_drops(V, K), ok end, ok, Drops),
+    NewDrops = orddict:map(fun(_, _) -> 0 end, Drops),
+    {noreply, State#state{drops = NewDrops, timer = undefined}};
 
 handle_info(_Msg, State) ->
     {noreply, State}.
@@ -85,11 +84,5 @@ code_change(_Vsn, State, _Extra) ->
 
 %% internal
 
-dropped(X, #state{drops_1 = N1, drops_2 = N2, drops_3 = N3, drops_4 = N4} = State) ->
-    case X of
-        1 -> State#state{drops_1 = N1+1};
-        2 -> State#state{drops_2 = N2+1};
-        3 -> State#state{drops_2 = N3+1};
-        4 -> State#state{drops_2 = N4+1};
-        _ -> State
-    end.
+dropped(X, #state{drops = D} = State) ->
+    State#state{drops = orddict:update(X, fun(V) -> V+1 end, D)}.

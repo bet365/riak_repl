@@ -103,7 +103,7 @@ init([Remote]) ->
     M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
     RebalanceTimer = app_helper:get_env(riak_repl, realtime_rebalance_on_failure, 5),
 
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, 4),
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
     List1 = lists:foldl(fun(N, Acc) -> [{N, dict:new()} | Acc] end, [], lists:seq(1, Concurrency)),
     List2 = lists:foldl(fun(N, Acc) -> [{N, undefined} | Acc] end, [], lists:seq(1, Concurrency)),
 

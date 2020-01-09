@@ -176,7 +176,7 @@ postcommit(RObj) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    Hash  = erlang:phash2(BinObjs, app_helper:get_env(riak_repl, rtq_concurrency, 4)) + 1,
+                    Hash  = erlang:phash2(BinObjs, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers))) + 1,
                     riak_repl2_rtq:push(length(Objects), BinObjs, Meta, Hash);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...
@@ -204,14 +204,27 @@ handle_call(status, _From, State = #state{sinks = SinkPids}) ->
                  _:_ ->
                      {will_be_remote_name, Pid, unavailable}
              end || Pid <- SinkPids],
-    Status = [{enabled, enabled()},
+    Status0 = [{enabled, enabled()},
               {started, started()},
-              {q1,       riak_repl2_rtq:status(1)},
-              {q2,       riak_repl2_rtq:status(2)},
-              {q3,       riak_repl2_rtq:status(3)},
-              {q4,       riak_repl2_rtq:status(4)},
               {sources, Sources},
               {sinks, Sinks}],
+    N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    RTQ0 =
+        lists:foldl(
+            fun(X, Acc) ->
+                [{riak_repl2_rtq:rtq_name(X), riak_repl2_rtq:status(X)} | Acc]
+            end, [], lists:seq(1, N)),
+    PercentBytesUsed1 = lists:foldl(
+        fun({_,StatusX}, PBU) ->
+            {_, X} = lists:keyfind(percent_bytes_used, 1, StatusX), PBU + X
+        end, 0, RTQ0),
+    BytesUsed = lists:foldl(
+        fun({_,StatusX}, B) ->
+            {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
+        end, 0, RTQ0),
+    PercentBytesUsed = PercentBytesUsed1 / N,
+    RTQ = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
+    Status = Status0 ++ RTQ,
     {reply, Status, State};
 handle_call({register_sink, SinkPid}, _From, State = #state{sinks = Sinks}) ->
     Sinks2 = [SinkPid | Sinks],

@@ -39,10 +39,10 @@
          is_empty/2,
          all_queues_empty/1,
          shutdown/0,
-         stop/1,
+         stop/0,
          is_running/1]).
 % private api
--export([report_drops/2]).
+-export([rtq_name/1, report_drops/2]).
 
 -define(overload_ets(X), overload_ets_name(X)).
 -define(SERVER(X), rtq_name(X)).
@@ -140,18 +140,22 @@ start_test() ->
 %% sequence number.
 %%-spec register(Name :: name()) -> {'ok', number()}.
 register(Name) ->
-    gen_server:call(?SERVER(1), {register, Name}, infinity),
-    gen_server:call(?SERVER(2), {register, Name}, infinity),
-    gen_server:call(?SERVER(3), {register, Name}, infinity),
-    gen_server:call(?SERVER(4), {register, Name}, infinity).
+    lists:foreach(
+        fun(X) ->
+            gen_server:call(?SERVER(X), {register, Name}, infinity)
+        end,
+        lists:seq(1, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)))),
+    ok.
 
 %% @doc Removes a consumer.
 %%-spec unregister(Name :: name()) -> 'ok' | {'error', 'not_registered'}.
 unregister(Name) ->
-    gen_server:call(?SERVER(1), {unregister, Name}, infinity),
-    gen_server:call(?SERVER(2), {unregister, Name}, infinity),
-    gen_server:call(?SERVER(3), {unregister, Name}, infinity),
-    gen_server:call(?SERVER(4), {unregister, Name}, infinity).
+    lists:foreach(
+        fun(X) ->
+            gen_server:call(?SERVER(X), {unregister, Name}, infinity)
+        end,
+        lists:seq(1, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)))),
+    ok.
 
 %% @doc True if the given consumer has no items to consume.
 %%-spec is_empty(Name :: name()) -> boolean().
@@ -286,13 +290,20 @@ evict(Seq, Key, X) ->
 %% start to avoid dropping, or aborting unacked results.
 %%-spec shutdown() -> 'ok'.
 shutdown() ->
-    gen_server:call(?SERVER(1), shutting_down, infinity),
-    gen_server:call(?SERVER(2), shutting_down, infinity),
-    gen_server:call(?SERVER(3), shutting_down, infinity),
-    gen_server:call(?SERVER(4), shutting_down, infinity).
+    lists:foreach(
+        fun(X) ->
+            gen_server:call(?SERVER(X), shutting_down, infinity)
+        end,
+        lists:seq(1, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)))),
+    ok.
 
-stop(X) ->
-    gen_server:call(?SERVER(X), stop, infinity).
+stop() ->
+    lists:foreach(
+        fun(X) ->
+            gen_server:call(?SERVER(X), stop, infinity)
+        end,
+        lists:seq(1, app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)))),
+    ok.
 
 %% @doc Will explode if the server is not started, but will tell you if it's
 %% in shutdown.

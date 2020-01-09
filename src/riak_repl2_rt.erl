@@ -176,7 +176,7 @@ postcommit(RObj) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    Hash  = erlang:phash2(BinObjs, 4) + 1,
+                    Hash  = erlang:phash2(BinObjs, app_helper:get_env(riak_repl, rtq_concurrency, 4)) + 1,
                     riak_repl2_rtq:push(length(Objects), BinObjs, Meta, Hash);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...

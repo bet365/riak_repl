@@ -582,16 +582,8 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
         true ->
             lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
             lager:debug("Attempting riak_core_connection:sync_connect/2"),
+            Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, 4) -1,
 
-            case element(1, element(1, Protocol)) of
-                realtime ->
-                    riak_core_connection:sync_connect(Addr, {Primary, 4}, Protocol),
-                    riak_core_connection:sync_connect(Addr, {Primary, 3}, Protocol),
-                    riak_core_connection:sync_connect(Addr, {Primary, 2}, Protocol);
-                _ ->
-                    ok
-
-            end,
             case riak_core_connection:sync_connect(Addr, {Primary, 1}, Protocol) of
                 ok ->
                     case {NextAddrPrimary, Primary} of
@@ -605,6 +597,17 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
                             ok;
                         {false, false} ->
                             % We have connected to a secondary connection stop
+                            ok
+                    end,
+
+                    case {Concurrency > 0, element(1, element(1, Protocol))} of
+                        {true, realtime} ->
+                            lists:foreach(
+                                fun(N) ->
+                                    riak_core_connection:sync_connect(Addr, {Primary, N+1}, Protocol)
+                                end,
+                                lists:seq(1, Concurrency));
+                        _ ->
                             ok
                     end;
 

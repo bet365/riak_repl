@@ -33,6 +33,9 @@ init([]) ->
         {riak_repl2_rtq_4, {riak_repl2_rtq, start_link, [4]},
             transient, 50000, worker, [riak_repl2_rtq_4]},
 
+%%        {riak_repl2_rtq_sup, {riak_repl2_rtq_sup, start_link, []},
+%%            permanent, infinity, supervisor, [riak_repl2_rtq_sup]},
+
          {riak_repl2_rtq_overload_counter, {riak_repl2_rtq_overload_counter, start_link, []},
           permanent, 50000, worker, [riak_repl2_rtq_overload_counter]},
 

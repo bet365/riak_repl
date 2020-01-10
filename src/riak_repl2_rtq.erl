@@ -31,6 +31,7 @@
          pull_sync/3,
          ack/3,
          ack_sync/3,
+         status/0,
          status/1,
          dumpq/1,
          summarize/1,
@@ -247,14 +248,40 @@ ack_sync(Name, Seq, X) ->
 %% <dt>`errs'</dt><dd>Number of non-ok returns from deliver fun</dd>
 %% </dl>
 %%-spec status() -> [any()].
+status() ->
+    try
+        N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+        AllStats =
+            lists:foldl(
+                fun(X, Acc) ->
+                    Status = riak_repl2_rtq:status(X),
+                    orddict:to_list(merge_status(orddict:from_list(Status), orddict:from_list(Acc)))
+                end, riak_repl2_rtq:status(1), lists:seq(2, N)),
+
+        % I'm having the calling process do derived stats because
+        % I don't want to block the rtq from processing objects.
+        MaxBytes = proplists:get_value(max_bytes, AllStats),
+        CurrentBytes = proplists:get_value(bytes, AllStats),
+        PercentBytes = round( (CurrentBytes / MaxBytes) * 100000 ) / 1000,
+        [{percent_bytes_used, PercentBytes} | AllStats]
+    catch _:_ ->
+        []
+    end.
+
+
+merge_status(Status1, Status2) ->
+    orddict:merge(fun status_merge_fun/3, Status1, Status2).
+status_merge_fun(consumers, V1, V2) ->
+    orddict:merge(fun consumer_merge_fun/3, orddict:from_list(V1), orddict:from_list(V2));
+status_merge_fun(_, V1, V2) ->
+    V1 + V2.
+consumer_merge_fun(_, V1, V2) ->
+    merge_status(orddict:from_list(V1), orddict:from_list(V2)).
+
+
+
 status(X) ->
-    Status = gen_server:call(?SERVER(X), status, infinity),
-    % I'm having the calling process do derived stats because
-    % I don't want to block the rtq from processing objects.
-    MaxBytes = proplists:get_value(max_bytes, Status),
-    CurrentBytes = proplists:get_value(bytes, Status),
-    PercentBytes = round( (CurrentBytes / MaxBytes) * 100000 ) / 1000,
-    [{percent_bytes_used, PercentBytes} | Status].
+    gen_server:call(?SERVER(X), status, infinity).
 
 %% @doc return the data store as a list.
 %%-spec dumpq() -> [any()].
@@ -326,7 +353,7 @@ init({Options, X}) ->
 
 %% @private
 handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
-                                          qseq = QSeq, cs = Cs}) ->
+                                          qseq = QSeq, cs = Cs, rtq = RTQ}) ->
     Consumers =
         [{Name, [{pending, QSeq - CSeq},  % items to be send
                  {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
@@ -336,22 +363,29 @@ handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
          || #c{name = Name, aseq = ASeq, cseq = CSeq,
                drops = Drops, errs = Errs, skips = Skips, filtered = Filters} <- Cs],
 
-    ConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
-                                    MetricName = {latency, ConsumerName},
-                                    case folsom_metrics:metric_exists(MetricName) of
-                                        true ->
-                                            Acc ++ [{ConsumerName, folsom_metrics:get_histogram_statistics(MetricName)}];
-                                        false ->
-                                            Acc
-                                    end
-                                end, [], [ C#c.name || C <- Cs ]),
-
-    Status =
+    Status0 =
         [{bytes, qbytes(QTab, State)},
-         {max_bytes, MaxBytes},
-         {consumers, Consumers},
-         {overload_drops, State#state.overload_drops},
-         {consumer_latency, ConsumerStats}],
+            {max_bytes, MaxBytes},
+            {consumers, Consumers},
+            {overload_drops, State#state.overload_drops}],
+
+    Status = case RTQ == 1 of
+                 true ->
+                    Status0 ++
+                    [{consumer_latency, lists:foldl(
+                        fun(ConsumerName, Acc) ->
+                            MetricName = {latency, ConsumerName},
+                            case folsom_metrics:metric_exists(MetricName) of
+                                true ->
+                                    Acc ++ [{ConsumerName, folsom_metrics:get_histogram_statistics(MetricName)}];
+                                false ->
+                                    Acc
+                            end
+                        end, [], [ C#c.name || C <- Cs ])}];
+                 false ->
+                        Status0
+             end,
+
     {reply, Status, State};
 
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->

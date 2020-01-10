@@ -76,7 +76,7 @@ started() ->
 ensure_rt(WantEnabled0, WantStarted0) ->
     WantEnabled = lists:usort(WantEnabled0),
     WantStarted = lists:usort(WantStarted0),
-    Status = riak_repl2_rtq:status(1),
+    Status = riak_repl2_rtq:status(),
     CStatus = proplists:get_value(consumers, Status, []),
     Enabled = lists:sort([Remote || {Remote, _Stats} <- CStatus]),
     Connections = riak_repl2_rtsource_conn_sup:enabled(),
@@ -204,27 +204,11 @@ handle_call(status, _From, State = #state{sinks = SinkPids}) ->
                  _:_ ->
                      {will_be_remote_name, Pid, unavailable}
              end || Pid <- SinkPids],
-    Status0 = [{enabled, enabled()},
+    Status = [{enabled, enabled()},
               {started, started()},
+              {q, riak_repl2_rtq:status()},
               {sources, Sources},
               {sinks, Sinks}],
-    N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
-    RTQ0 =
-        lists:foldl(
-            fun(X, Acc) ->
-                [{riak_repl2_rtq:rtq_name(X), riak_repl2_rtq:status(X)} | Acc]
-            end, [], lists:seq(1, N)),
-    PercentBytesUsed1 = lists:foldl(
-        fun({_,StatusX}, PBU) ->
-            {_, X} = lists:keyfind(percent_bytes_used, 1, StatusX), PBU + X
-        end, 0, RTQ0),
-    BytesUsed = lists:foldl(
-        fun({_,StatusX}, B) ->
-            {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
-        end, 0, RTQ0),
-    PercentBytesUsed = PercentBytesUsed1 / N,
-    RTQ = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
-    Status = Status0 ++ RTQ,
     {reply, Status, State};
 handle_call({register_sink, SinkPid}, _From, State = #state{sinks = Sinks}) ->
     Sinks2 = [SinkPid | Sinks],

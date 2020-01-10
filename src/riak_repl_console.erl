@@ -229,27 +229,10 @@ resume_fullsync([]) ->
 %% Repl2 commands
 %%
 rtq_stats() ->
-
-    try
-        N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
-        RTQ0 =
-            lists:foldl(
-                fun(X, Acc) ->
-                    [{riak_repl2_rtq:rtq_name(X), riak_repl2_rtq:status(X)} | Acc]
-                end, [], lists:seq(1, N)),
-        PercentBytesUsed1 = lists:foldl(
-            fun({_,StatusX}, PBU) ->
-                {_, X} = lists:keyfind(percent_bytes_used, 1, StatusX), PBU + X
-            end, 0, RTQ0),
-        BytesUsed = lists:foldl(
-            fun({_,StatusX}, B) ->
-                {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
-            end, 0, RTQ0),
-        PercentBytesUsed = PercentBytesUsed1 / N,
-        RTQ1 = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
-        [{realtime_queue_stats, RTQ1}]
-    catch _:_ ->
-        []
+    case erlang:whereis(riak_repl2_rtq_sup) of
+        Pid when is_pid(Pid) ->
+            [{realtime_queue_stats, riak_repl2_rtq:status()}];
+        _ -> []
     end.
 
 cluster_mgr_stats() ->

@@ -207,23 +207,7 @@ handle_call(status, _From, State =
 handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
     SocketStats = riak_core_tcp_mon:socket_status(State#state.socket),
     Socket = riak_core_tcp_mon:format_socket_stats(SocketStats, []),
-    N = 1,
-    RTQ0 =
-        lists:foldl(
-            fun(X, Acc) ->
-                [{riak_repl2_rtq:rtq_name(X), riak_repl2_rtq:status(X)} | Acc]
-            end, [], lists:seq(1, N)),
-    PercentBytesUsed1 = lists:foldl(
-        fun({_,StatusX}, PBU) ->
-            {_, X} = lists:keyfind(percent_bytes_used, 1, StatusX), PBU + X
-        end, 0, RTQ0),
-    BytesUsed = lists:foldl(
-        fun({_,StatusX}, B) ->
-            {_, X} = lists:keyfind(bytes, 1, StatusX), B + X
-        end, 0, RTQ0),
-    PercentBytesUsed = PercentBytesUsed1 / N,
-    RTQ1 = RTQ0 ++ [{riak_repl2_rtq, [{percent_bytes_used, PercentBytesUsed}, {bytes, BytesUsed}]}],
-    RTQStats = [{realtime_queue_stats, RTQ1}],
+    RTQStats = [{realtime_queue_stats, riak_repl2_rtq:status()}],
 
     Status =
         [{node, node()},

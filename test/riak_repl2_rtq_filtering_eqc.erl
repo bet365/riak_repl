@@ -2,8 +2,8 @@
 %% EQC test for RTQ
 %%
 
--module(riak_repl2_rtq_eqc).
--compile([export_all, nowarn_export_all]).
+-module(riak_repl2_rtq_filtering_eqc).
+-compile(export_all).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
@@ -27,13 +27,17 @@
                 tout_no_clients = [], % No clients available to pull
                 pcs=[a, b, c, d, e, f, g], %% potential client names
                 cs=[], %% connected clients
-                max_bytes=0}).
+                max_bytes=0,
+                num_filtered=0,
+                fpcs = [c, f]}). %% consumers that are in the filtered bucket config
 
 %% Test consumer record
 -record(tc, {name,       %% Name
              tout=[],    %% outstanding items in queue
              trec=[],    %% received items
              tack=[]}).    %% acked items
+
+-define(FILTERED_BUCKET, <<"eqc_filtered">>).
 
 % queued item, get it?
 -record(qed_item, {seq, num_items, item_list = [], meta = []}).
@@ -63,12 +67,27 @@ setup() ->
         fun() -> ok end),
     ok = meck:expect(riak_repl_stats, rt_sink_errors,
         fun() -> ok end),
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
+    folsom:start(),
+
     ok.
 
 cleanup(_) ->
     kill_and_wait(riak_repl2_rtq),
     application:unset_env(riak_repl, rtq_max_bytes),
     catch(meck:unload(riak_repl_stats)),
+    catch(meck:unload(riak_core_metadata)),
     meck:unload(),
     ok.
 
@@ -161,7 +180,6 @@ test_init({size, MaxBytes}) ->
     unlink(Pid),
     Pid.
 
-
 client_name(S) ->
     ?LET(Client, elements(S#state.cs), Client#tc.name).
 
@@ -174,8 +192,13 @@ command(S) ->
     frequency(lists:map(fun(Call={call, _, Fun, _}) -> {weight(Fun), Call} end,
         [{call, ?MODULE, push, [make_item(), S#state.rtq]}] ++
         [{call, ?MODULE, push, [make_item(), routed_clusters(S#state.cs), S#state.rtq]}] ++
+        [{call, ?MODULE, push_filtered, [make_item(), routed_clusters(S#state.cs), S#state.rtq]}] ++
         [{call, ?MODULE, reregister_consumer, [elements(S#state.pcs), S#state.rtq]} ||
           S#state.pcs /= []] ++
+        [{call, ?MODULE, add_filtered_consumer, [client_name(S)]} ||
+            S#state.cs /= []] ++
+        [{call, ?MODULE, remove_filtered_consumer, [client_name(S)]} ||
+            S#state.cs /= []] ++
         [{call, ?MODULE, replace_consumer, [client_name(S), S#state.rtq]} ||
           S#state.cs /= []] ++
         [{call, ?MODULE, pull, [client_name(S), S#state.rtq]} ||
@@ -187,7 +210,8 @@ command(S) ->
         []
     )).
 
-weight(push) -> 5;
+weight(push) -> 3;
+weight(push_filtered) -> 4;
 weight(new_consumer) -> 1;
 weight(rm_consumer) -> 1;
 weight(replace_consumer) -> 1;
@@ -212,9 +236,14 @@ precondition(S,{call,?MODULE,rm_consumer, [Name, _]}) ->
     lists:keymember(Name, #tc.name, S#state.cs);
 precondition(S,{call,?MODULE,replace_consumer, [Name, _]}) ->
     lists:keymember(Name, #tc.name, S#state.cs);
+precondition(S, {call, ?MODULE, add_filtered_consumer, [Name]}) ->
+    S#state.cs /= [] andalso lists:member(Name, S#state.pcs) andalso not lists:member(Name, S#state.fpcs);
+precondition(S, {call, ?MODULE, remove_filtered_consumer, [Name]}) ->
+    S#state.fpcs /= [] andalso S#state.cs /= [] andalso lists:member(Name, S#state.fpcs);
 precondition(_S,{call,_,_,_}) ->
     true.
 
+consumer_in_filter_config(Name, State) -> lists:member(Name, State#state.fpcs).
 
 postcondition(S,{call,?MODULE,pull,[Name, _]},R) ->
     C = get_client(Name, S),
@@ -228,9 +257,27 @@ postcondition(S,{call,?MODULE,pull,[Name, _]},R) ->
         {Seq, Size, Item} ->
             case RealTout of
                 [] ->
-                    {unexpected_item, C#tc.name, {Seq, Size, Item}};
-                [#qed_item{seq = Seq, num_items = Size, item_list = Item}|_] ->
-                    true;
+                    case consumer_in_filter_config(Name, S) of
+                        true ->
+                            true;
+                        false ->
+                            {unexpected_item, C#tc.name, {Seq, Size, Item}}
+                    end;
+                [#qed_item{seq = Seq, num_items = Size, item_list = Item, meta = Meta}|_] ->
+                    {ok, Bucket} = orddict:find(bucket_name, Meta),
+                    case consumer_in_filter_config(Name, S) of
+                        true ->
+                            case Bucket == ?FILTERED_BUCKET of
+                                true ->
+                                    %% you can't pull an item which was supposed to never reach you
+                                    false;
+                                false ->
+                                    true
+                            end;
+                        false ->
+                            % if you're not in the config you can pull an item fine
+                            true
+                    end;
                 _ ->
                     {not_match, C#tc.name, hd(Tout), {Seq, Size, Item}}
                    %H == {Seq, Size, Item} orelse {not_match, C#tc.name, H,
@@ -245,9 +292,17 @@ postcondition(S,{call,?MODULE,push,[_Item, Q]},_R) ->
                 ((S#state.max_bytes >= QBytes) == Acc)
         end, true, S#state.cs) orelse {queue_too_big, S#state.max_bytes,
                                        QBytes};
-postcondition(S,{call,?MODULE,push,[_Item,_RotuedClusters,Q]},_R) ->
+postcondition(S,{call,?MODULE,push,[_Item,_RoutedClusters,Q]},_R) ->
     % same postcondition as call/2, so no duplicate code here!
     postcondition(S,{call,?MODULE,push,[undefined, Q]},undefined);
+postcondition(S, {call, ?MODULE, push_filtered, [_Item, _RoutedClusters, Q]}, _R) ->
+    % push_filtered is a special case of push
+    % pass filtered pushes through to the same handler to check the queue size as usual
+    postcondition(S, {call, ?MODULE, push, [undefined, Q]}, undefined);
+postcondition(S, {call, ?MODULE, add_filtered_consumer, [Name]}, _R) ->
+    lists:member(Name, S#state.fpcs);
+postcondition(S, {call, ?MODULE, remove_filtered_consumer, [Name]}, _R) ->
+    not lists:member(Name, S#state.fpcs);
 postcondition(_S,{call,_,_,_},_R) ->
     true.
 
@@ -269,6 +324,10 @@ next_state(S,_V,{call, _, replace_consumer, [Name, _Q]}) ->
                           trec=[],
                           tout=MasterQ},
     update_client(NewClient, S);
+next_state(S, _V, {call, _, add_filtered_consumer, [Name]}) ->
+    S#state{fpcs = [Name | S#state.fpcs]};
+next_state(S, _V, {call, _, remove_filtered_consumer, [Name]}) ->
+    S#state{fpcs = S#state.fpcs -- [Name]};
 next_state(S0,V,{call, M, push, [Value, _Q]}) ->
     next_state(S0,V,{call,M,push,[Value,[],_Q]});
 next_state(S0, _V, {call, _, push, [Value, RoutedClusters, _Q]}) ->
@@ -286,6 +345,9 @@ next_state(S0, _V, {call, _, push, [Value, RoutedClusters, _Q]}) ->
             end, S#state.cs),
             trim(S#state{cs = Clients})
     end;
+next_state(S0, V, {call, M, push_filtered, [Value, RoutedClusters, _Q]}) ->
+    #state{num_filtered = Filtered} = S0,
+    next_state(S0#state{num_filtered = Filtered + 1}, V, {call, M, push, [Value, RoutedClusters, _Q]});
 next_state(S,_V,{call, _, pull, [Name, _Q]}) ->
     Client = get_client(Name, S),
     %lager:info("tout is ~p~n", [Client#tc.tout]),
@@ -359,6 +421,11 @@ push(List, RoutedClusters, _Q) ->
     Bin = term_to_binary(List),
     riak_repl2_rtq:push(NumItems, Bin, [{routed_clusters, RoutedClusters}, {bucket_name, <<"eqc_test">>}]).
 
+push_filtered(List, RoutedClusters, _Q) ->
+    NumItems = length(List),
+    Bin      = term_to_binary(List),
+    riak_repl2_rtq:push(NumItems, Bin, [{routed_clusters, RoutedClusters}, {bucket_name, ?FILTERED_BUCKET}]).
+
 new_consumer(Name, Q) ->
     lager:info("registering ~p to ~p~n", [Name, Q]),
     riak_repl2_rtq:register(Name).
@@ -366,11 +433,20 @@ new_consumer(Name, Q) ->
 reregister_consumer(Name, _Q) ->
     lager:info("unregistering ~p", [Name]),
     riak_repl2_rtq:unregister(Name),
-    riak_repl2_rtq:unregister(Name).
+    lager:info("registering ~p", [Name]),
+    riak_repl2_rtq:register(Name).
 
 replace_consumer(Name, _Q) ->
     lager:info("replacing ~p", [Name]),
     riak_repl2_rtq:register(Name).
+
+add_filtered_consumer(Name) ->
+    lager:info("add filtered consumer: ~p", [Name]),
+    riak_repl_console:add_filtered_bucket([?FILTERED_BUCKET, Name]).
+
+remove_filtered_consumer(Name) ->
+    lager:info("remove filtered consumer: ~p", [Name]),
+    riak_repl_console:remove_filtered_bucket([?FILTERED_BUCKET, Name]).
 
 get_rtq_bytes(_Q) ->
     Stats = riak_repl2_rtq:status(),

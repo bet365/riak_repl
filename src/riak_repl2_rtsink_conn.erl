@@ -19,11 +19,15 @@
 -export([sync_register_service/0,
          start_service/5]).
 
--export([start_link/2,
-         stop/1,
-         set_socket/3,
-         status/1, status/2,
-         legacy_status/1, legacy_status/2]).
+-export
+([
+  start_link/2,
+  stop/1,
+  set_socket/3,
+  status/1, status/2,
+  legacy_status/1, legacy_status/2,
+  get_peername/1
+]).
 
 %% Export for intercept use in testing
 -export([send_heartbeat/2]).
@@ -103,6 +107,9 @@ legacy_status(Pid) ->
 legacy_status(Pid, Timeout) ->
     gen_server:call(Pid, legacy_status, Timeout).
 
+get_peername(Pid) ->
+  gen_server:call(Pid, get_peername).
+
 %% Callbacks
 init([OkProto, Remote]) ->
     %% TODO: remove annoying 'ok' from service mgr proto
@@ -123,6 +130,10 @@ handle_call(status, _From, State = #state{remote = Remote,
                                           active = Active, deactivated = Deactivated,
                                           source_drops = SourceDrops,
                                           expect_seq = ExpSeq, acked_seq = AckedSeq}) ->
+
+    {PoolboyState, PoolboyQueueLength, PoolboyOverflow, PoolboyMonitorsActive}
+        = poolboy:status(riak_repl2_rtsink_pool),
+
     Pending = pending(State),
     SocketStats = riak_core_tcp_mon:socket_status(State#state.socket),
     Status = [{source, Remote},
@@ -141,7 +152,11 @@ handle_call(status, _From, State = #state{remote = Remote,
               {source_drops, SourceDrops},
               {expect_seq, ExpSeq},
               {acked_seq, AckedSeq},
-              {pending, Pending}],
+              {pending, Pending},
+              {poolboy_state, PoolboyState},
+              {poolboy_queue_length, PoolboyQueueLength},
+              {poolboy_overflow, PoolboyOverflow},
+              {poolboy_monitors_active, PoolboyMonitorsActive}],
     {reply, Status, State};
 handle_call(legacy_status, _From, State = #state{remote = Remote,
                                                  socket = Socket}) ->
@@ -160,6 +175,8 @@ handle_call({set_socket, Socket, Transport}, _From, State) ->
     Transport:setopts(Socket, [{active, once}]), % pick up errors in tcp_error msg
     lager:debug("Starting realtime connection service"),
     {reply, ok, State#state{socket=Socket, transport=Transport, peername = peername(Transport, Socket)}};
+handle_call(get_peername, _From, State=#state{peername = PeerName}) ->
+  {reply, PeerName, State};
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
@@ -275,19 +292,19 @@ recv(TcpBin, State = #state{transport = T, socket = S}) ->
     end.
 
 make_donefun({Binary, Meta}, Me, Ref, Seq) ->
-    Done = fun() ->
+    Done = fun(ObjectFilteringRules) ->
         Skips = orddict:fetch(skip_count, Meta),
         gen_server:cast(Me, {ack, Ref, Seq, Skips}),
-        maybe_push(Binary, Meta)
+        maybe_push(Binary, Meta, ObjectFilteringRules)
     end,
     {Done, Binary, Meta};
 make_donefun(Binary, Me, Ref, Seq) when is_binary(Binary) ->
-    Done = fun() ->
+    Done = fun(_ObjectFiltering) ->
         gen_server:cast(Me, {ack, Ref, Seq, 0})
     end,
     {Done, Binary}.
 
-maybe_push(Binary, Meta) ->
+maybe_push(Binary, Meta, ObjectFilteringRules) ->
     case app_helper:get_env(riak_repl, realtime_cascades, always) of
         never ->
             lager:debug("Skipping cascade due to app env setting"),
@@ -296,8 +313,18 @@ maybe_push(Binary, Meta) ->
           lager:debug("app env either set to always, or in default; doing cascade"),
           List = riak_repl_util:from_wire(Binary),
           Meta2 = orddict:erase(skip_count, Meta),
-          riak_repl2_rtq:push(length(List), Binary, Meta2)
+          Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
+          riak_repl2_rtq:push(length(List), Binary, Meta3)
     end.
+
+add_object_filtering_blacklist_to_meta(Meta, []) ->
+    lager:error("object filtering rules failed to return the default"),
+    Meta;
+add_object_filtering_blacklist_to_meta(Meta, [Rules]) ->
+    orddict:store(?BT_META_BLACKLIST, Rules, Meta);
+add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
+    lager:error("object filtering, repl binary has more than one object!"),
+    Meta.
 
 %% Note match on Seq
 do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
@@ -317,7 +344,9 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
                     lager:debug("Bucket type:~p is not equal on both the source and sink; not writing object.",
                                 [BucketType]),
                     gen_server:cast(Me, {drop, BucketType}),
-                    DoneFun()
+                    Objects = riak_repl_util:from_wire(Ver, BinObjs),
+                    ObjectFilteringRules = [riak_repl2_object_filter:get_realtime_blacklist(Obj) || Obj <- Objects],
+                    DoneFun(ObjectFilteringRules)
             end;
         {DoneFun, BinObjs} ->
             %% this is for backwards compatibility with Repl version before metadata support (> 1.4)
@@ -470,16 +499,74 @@ setup() ->
     {ok, _RT} = riak_repl2_rt:start_link(),
     riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
     {ok, _} = riak_repl2_rtq:start_link(),
+    application:set_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 1000),
+
+    catch(meck:unload(riak_core_connection_mgr)),
+    meck:new(riak_core_connection_mgr, [passthrough]),
+    meck:expect(riak_core_connection_mgr, disconnect,
+        fun(_Remote) ->
+            ok
+        end),
+
+    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
+    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, fun(active_nodes) -> [node()]
+                                                         end),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
+        fun(realtime_connections, _Remote) ->
+            dict:new()
+        end
+    ),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, 4,
+        fun(_, _, _, _) ->
+            ok
+        end
+    ),
+
+    catch(meck:unload(riak_core_cluster_mgr)),
+    meck:new(riak_core_cluster_mgr, [passthrough]),
+    meck:expect(riak_core_cluster_mgr, get_unshuffled_ipaddrs_of_cluster, fun(_Remote) -> [] end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_) -> {ok,[]} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, split) -> {ok, {[],[]}} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, _) -> {ok,[]} end ),
+
+    catch(meck:unload(riak_core_capability)),
+    meck:new(riak_core_capability, [passthrough]),
+    meck:expect(riak_core_capability, get, 2, fun(_, _) -> v1 end),
+
+    catch(meck:unload(riak_repl_util)),
+    meck:new(riak_repl_util, [passthrough]),
+    meck:expect(riak_repl_util, generate_socket_tag, fun(Prefix, _Transport, _Socket) ->
+        random:seed(now()),
+        Portnum = random:uniform(?PORT_RANGE),
+        lists:flatten(io_lib:format("~s_~p -> ~p:~p",[
+            Prefix,
+            Portnum,
+            ?LOOPBACK_TEST_PEER,
+            ?SINK_PORT]))
+                                                     end),
+
+    catch(meck:unload(riak_core_tcp_mon)),
+    meck:new(riak_core_tcp_mon, [passthrough]),
+    meck:expect(riak_core_tcp_mon, monitor, 3, fun(Socket, _Tag, Transport) ->
+        {reply, ok,  #state{transport=Transport, socket=Socket}}
+                                               end),
+
+    folsom:start(),
+
     ok.
 
 cleanup(_Ctx) ->
+    process_flag(trap_exit, false),
     riak_repl_test_util:kill_and_wait(riak_core_tcp_mon),
     riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
     riak_repl_test_util:kill_and_wait(riak_repl2_rt),
+    riak_repl_test_util:kill_and_wait(riak_repl2_rtsource_conn_mgr),
     riak_repl_test_util:stop_test_ring(),
     riak_repl_test_util:maybe_unload_mecks(
       [riak_core_service_mgr,
-       riak_core_connection_mgr,
+        riak_repl2_rtsource_conn_data_mgr,
+        riak_core_connection_mgr,
        riak_repl_util,
        riak_core_tcp_mon,
        gen_tcp]),
@@ -551,21 +638,18 @@ start_source() ->
     start_source(?VER1).
 
 start_source(NegotiatedVer) ->
-    catch(meck:unload(riak_core_connection_mgr)),
-    meck:new(riak_core_connection_mgr, [passthrough]),
-    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec) ->
+    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy) ->
         spawn_link(fun() ->
             {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
             {ok, Socket} = gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]),
             ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT},
-              ?PROTOCOL(NegotiatedVer), Pid, [])
+              ?PROTOCOL(NegotiatedVer), Pid, [], true)
         end),
         {ok, make_ref()}
     end),
-    meck:expect(riak_core_connection_mgr, disconnect, fun(_Remote) ->
-        ok
-    end),
-    {ok, SourcePid} = riak_repl2_rtsource_conn:start_link("sink_cluster"),
+
+
+    {ok, SourcePid} = riak_repl2_rtsource_conn_mgr:start_link("sink_cluster"),
     receive
         {sink_started, SinkPid} ->
             {ok, {SourcePid, SinkPid}}
@@ -585,7 +669,8 @@ start_sink() ->
 unload_mecks() ->
     riak_repl_test_util:maybe_unload_mecks([
         stateful, riak_core_ring_manager, riak_core_ring,
-        riak_repl2_rtsink_helper, gen_tcp, fake_source, riak_repl2_rtq]).
+        riak_repl2_rtsink_helper, gen_tcp, fake_source, riak_repl2_rtq,
+        riak_core_capability, riak_repl2_rtsource_conn_data_mgr]).
 
 
 -endif.

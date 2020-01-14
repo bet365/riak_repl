@@ -71,6 +71,7 @@
 %% TODO: add folsom window'd stats
 %% handle an EXIT from the helper process if it dies
 -record(ep, {addr,                                 %% endpoint {IP, Port}
+             primary :: boolean(),         %% is a primary connection
              nb_curr_connections = 0 :: counter(), %% number of current connections
              nb_success = 0 :: counter(),   %% total successfull connects on this ep
              nb_failures = 0 :: counter(),  %% total failed connects on this ep
@@ -122,7 +123,7 @@
          terminate/2, code_change/3]).
 
 %% internal functions
--export([connection_helper/4, increase_backoff/1]).
+-export([connection_helper/5, increase_backoff/1]).
 
 %%%===================================================================
 %%% API
@@ -261,7 +262,7 @@ handle_call(stop, _From, State) ->
     %% TODO do we need to cleanup helper pids here?
     {stop, normal, ok, State};
 
-handle_call({should_try_endpoint, Ref, Addr}, _From, State = #state{pending=Pending}) ->
+handle_call({should_try_endpoint, Ref, Addr, ConnectedToPrimary}, _From, State = #state{pending=Pending}) ->
     case lists:keyfind(Ref, #req.ref, Pending) of
         false ->
             %% This should never happen
@@ -274,8 +275,18 @@ handle_call({should_try_endpoint, Ref, Addr}, _From, State = #state{pending=Pend
                     _ ->
                         {true, connecting}
                 end,
+
+            Cur = Req#req.cur,
+            NewCur = case {Answer, ConnectedToPrimary} of
+                         {true, true} ->
+                             [Addr] ++ Cur;
+                         {true, false} ->
+                             [Addr];
+                         {false, _} ->
+                             [Addr]
+                     end,
             {reply, Answer, State#state{pending = lists:keystore(Ref, #req.ref, Pending,
-                                                                 Req#req{cur = Addr,
+                                                                 Req#req{cur = NewCur,
                                                                          state = ReqState})}}
     end;
 
@@ -295,6 +306,22 @@ handle_call({get_connection_errors, Addr}, _From, State = #state{endpoints=Endpo
 handle_call({filter_blacklisted_ipaddrs, Addrs}, _From, State=#state{ endpoints=Eps }) ->
     Answer = filter_blacklisted_endpoints(Addrs, Eps),
     {reply, Answer, State};
+
+handle_call({update_ref, Ref}, _From, State = #state{pending = Pending}) ->
+  case lists:keyfind(Ref, #req.ref, Pending) of
+    false ->
+      {reply, {error, fail}, State};
+    Req->
+        NewCur = case Req#req.cur of
+                     [] ->
+                         [];
+                     [_Head | Tail] ->
+                         Tail
+                 end,
+
+      {reply, ok, State#state{pending = lists:keystore(Ref, #req.ref, Pending,
+                                                     Req#req{cur = NewCur})}}
+  end;
 
 handle_call(_Unhandled, _From, State) ->
     lager:debug("Unhandled gen_server call: ~p", [_Unhandled]),
@@ -396,7 +423,7 @@ handle_info({'EXIT', From, Reason}, State = #state{pending = Pending}) ->
                 Reason -> % something bad happened to the connection, reuse the request
                     lager:debug("handle_info: EP failed on ~p for ~p. removed Ref ~p",
                                      [Cur, Reason, Ref]),
-                    State2 = fail_endpoint(Cur, Reason, ProtocolId, State),
+                    State2 = fail_endpoints(Cur, Reason, ProtocolId, State),
                     %% the connection helper will not retry. It's up the caller.
                     State3 = fail_request(Reason, Req, State2),
                     {noreply, State3}
@@ -415,11 +442,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Private
 %%%===================================================================
-
-identity_locator({IP,Port}, _Policy) ->
-    {ok, [{IP,Port}]};
-identity_locator([Ips], _Policy) ->
-    {ok, Ips}.
 
 %% close the pending connection and cancel the request
 disconnect_from_target(Target, State = #state{pending = Pending}) ->
@@ -475,7 +497,7 @@ schedule_retry(Interval, Ref, State = #state{pending = Pending}) ->
                     %% reschedule request to happen in the future
                     erlang:send_after(Interval, self(), {retry_req, Ref}),
                     State#state{pending = lists:keystore(Req#req.ref, #req.ref, Pending,
-                                                         Req#req{cur = undefined})}
+                                                         Req#req{cur = []})}
             end
     end.
 
@@ -494,13 +516,14 @@ start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strat
             lager:debug("Connection Manager located no endpoints for: ~p. Will retry.", [Target]),
             %% schedule a retry and exit
             schedule_retry(Interval, Ref, State);
-        {ok, EpAddrs } ->
-            lager:debug("Connection Manager located endpoints: ~p", [EpAddrs]),
-            AllEps = update_endpoints(EpAddrs, State#state.endpoints),
-            TryAddrs = filter_blacklisted_endpoints(EpAddrs, AllEps),
+        {ok, Addrs} ->
+            lager:debug("Connection Manager located endpoints: ~p", [Addrs]),
+            AllEps = update_endpoints(Addrs, State#state.endpoints),
+            TryAddrs = filter_blacklisted_endpoints(Addrs, AllEps),
+
             lager:debug("Connection Manager trying endpoints: ~p", [TryAddrs]),
             Pid = spawn_link(
-                    fun() -> exit(try connection_helper(Ref, ClientSpec, Strategy, TryAddrs)
+                    fun() -> exit(try connection_helper(Ref, ClientSpec, Strategy, TryAddrs, false)
                                   catch T:R -> {exception, {T, R}}
                                   end)
                     end),
@@ -508,7 +531,7 @@ start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strat
                         pending = lists:keystore(Ref, #req.ref, State#state.pending,
                                                  Req#req{pid = Pid,
                                                          state = connecting,
-                                                         cur = undefined})};
+                                                         cur = []})};
         {error, Reason} ->
             fail_request(Reason, Req, State)
     end.
@@ -537,32 +560,64 @@ string_of_ipport({IP,Port}) ->
 %% A spawned process that will walk down the list of endpoints and try them
 %% all until exhausting the list. This process is responsible for waiting for
 %% the backoff delay for each endpoint.
-connection_helper(Ref, _Protocol, _Strategy, []) ->
+connection_helper(Ref, _Protocol, _Strategy, [], _ConnectedToPrimary) ->
     %% exhausted the list of endpoints. let server start new helper process
     {error, endpoints_exhausted, Ref};
-connection_helper(Ref, Protocol, Strategy, [Addr|Addrs]) ->
+connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToPrimary) ->
     {{ProtocolId, _Foo},_Bar} = Protocol,
     %% delay by the backoff_delay for this endpoint.
     {ok, BackoffDelay} = gen_server:call(?SERVER, {get_endpoint_backoff, Addr}),
     lager:debug("Holding off ~p seconds before trying ~p at ~p",
                [(BackoffDelay/1000), ProtocolId, string_of_ipport(Addr)]),
     timer:sleep(BackoffDelay),
-    case gen_server:call(?SERVER, {should_try_endpoint, Ref, Addr}) of
+
+    NextAddrPrimary = case Addrs of
+                          [] ->
+                              false;
+                          [{_X, Y} | _Xs] ->
+                              Y
+                      end,
+
+    case gen_server:call(?SERVER, {should_try_endpoint, Ref, Addr, ConnectedToPrimary}) of
         true ->
             lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
             lager:debug("Attempting riak_core_connection:sync_connect/2"),
-            case riak_core_connection:sync_connect(Addr, Protocol) of
+
+            case riak_core_connection:sync_connect(Addr, Primary, Protocol) of
                 ok ->
-                    ok;
+                    case {NextAddrPrimary, Primary} of
+                        {true, true} ->
+                            connection_helper(Ref, Protocol, Strategy, Addrs, true);
+                        {true, false} ->
+                            % This should never happen!
+                            ok;
+                        {false, true} ->
+                            % We have connected to all possible primaries stop
+                            ok;
+                        {false, false} ->
+                            % We have connected to a secondary connection stop
+                            ok
+                    end;
+
                 {error, Reason} ->
                     %% notify connection manager this EP failed and try next one
+                    gen_server:call(?SERVER, {update_ref, Ref}),
                     gen_server:cast(?SERVER, {endpoint_failed, Addr, Reason, ProtocolId}),
-                    connection_helper(Ref, Protocol, Strategy, Addrs)
+
+
+                    case {ConnectedToPrimary, NextAddrPrimary} of
+                        {true, true} ->
+                            connection_helper(Ref, Protocol, Strategy, Addrs, true);
+                        {true, false} ->
+                            ok;
+                        {false, _} ->
+                            connection_helper(Ref, Protocol, Strategy, Addrs, false)
+                    end
             end;
         _ ->
             %% connection request has been cancelled
             lager:debug("Ignoring connection to: ~p at ~p because it was cancelled",
-                       [ProtocolId, string_of_ipport(Addr)]),
+                [ProtocolId, string_of_ipport(Addr)]),
             {ok, cancelled}
     end.
 
@@ -585,12 +640,18 @@ locate_endpoints({Type, Name}, Strategy, Locators) ->
 %% adjust a backoff timer so that we wait a while before
 %% trying this endpoint again.
 
+fail_endpoints([], _Reason, _ProtocolId, State) ->
+  State;
+fail_endpoints([Addr| Addrs], Reason, ProtocolId, State) ->
+  State1 = fail_endpoint(Addr, Reason, ProtocolId, State),
+  fail_endpoints(Addrs, Reason, ProtocolId, State1).
+
 -spec fail_endpoint(ip_addr(), term(), proto_id(), #state{}) -> #state{}.
 fail_endpoint(Addr, Reason, ProtocolId, State) ->
     %% update the stats module
     Err = reason_to_atom(Reason),
     Stat = {conn_error, Err},
-    riak_core_connection_mgr_stats:update(Stat, Addr, ProtocolId),
+    riak_core_connection_mgr_stats:update(Stat, [Addr], ProtocolId),
     %% update the endpoint
     Fun = fun(EP=#ep{backoff_delay = Backoff, failures = Failures}) ->
                   erlang:send_after(Backoff, self(), {backoff_timer, Addr}),
@@ -615,13 +676,17 @@ reason_to_atom(Reason) when is_atom(Reason) ->
 reason_to_atom(_Reason) ->
     unknown_reason.
 
-connect_endpoint(Addr, State) ->
-    update_endpoint(Addr, fun(EP) ->
+
+connect_endpoint([], State) ->
+  State;
+connect_endpoint([Addr|Addrs], State) ->
+    State1 = update_endpoint(Addr, fun(EP) ->
                                   EP#ep{is_black_listed = false,
                                         nb_success = EP#ep.nb_success + 1,
                                         next_try_secs = 0,
                                         backoff_delay = 0}
-                          end, State).
+                          end, State),
+  connect_endpoint(Addrs, State1).
 
 %% Return the current backoff delay for the named Address,
 %% or if we can't find that address in the endpoints - the
@@ -655,11 +720,15 @@ fail_request(Reason, #req{ref = Ref, spec = Spec},
 
 update_endpoints(Addrs, Endpoints) ->
     %% add addr to Endpoints if not already there
-    Fun = (fun(Addr, EPs) ->
+    Fun = (fun({Addr,P}, EPs) ->
                    case orddict:is_key(Addr, Endpoints) of
-                       true -> EPs;
+                       true ->
+                         % replace primary status if changed
+                         Old = orddict:fetch(Addr, Endpoints),
+                         EP = Old#ep{primary = P},
+                         orddict:store(Addr, EP, EPs);
                        false ->
-                           EP = #ep{addr=Addr},
+                           EP = #ep{addr=Addr, primary = P},
                            orddict:store(Addr, EP, EPs)
                    end
            end),
@@ -668,7 +737,7 @@ update_endpoints(Addrs, Endpoints) ->
 %% Return the addresses of non-blacklisted endpoints that are also
 %% members of the list EpAddrs.
 filter_blacklisted_endpoints(EpAddrs, AllEps) ->
-    PredicateFun = (fun(Addr) ->
+    PredicateFun = (fun({Addr, _Primary}) ->
                             case orddict:find(Addr, AllEps) of
                                 {ok, EP} ->
                                     EP#ep.is_black_listed == false;
@@ -679,6 +748,16 @@ filter_blacklisted_endpoints(EpAddrs, AllEps) ->
                     end),
     lists:filter(PredicateFun, EpAddrs).
 
+%% @doc Return the value for cm_cancellation_interval
+get_cancellation_interval() ->
+    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+
+
+identity_locator({IP,Port}, _Policy) ->
+  {ok, [{{IP,Port}, false}]};
+identity_locator([Ips], _Policy) ->
+  {ok, {Ips, false}}.
+
 %% @doc Return the ring.
 get_ring() ->
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
@@ -687,18 +766,33 @@ get_ring() ->
 %% @doc Locator to identify a cluster by name.
 cluster_by_name_locator(ClusterName, _Policy) ->
     Ring = get_ring(),
-    Addrs = riak_repl_ring:get_clusterIpAddrs(Ring, ClusterName),
+    OldAddrs = riak_repl_ring:get_clusterIpAddrs(Ring, ClusterName),
+    Addrs = [ {X, false} || X <- OldAddrs],
     lager:debug("located members for cluster ~p: ~p",
                 [ClusterName, Addrs]),
     {ok, Addrs}.
 
 %% @doc Locator to identify a cluster by ip address.
 cluster_by_addr_locator(Addr, _Policy) ->
-    {ok, [Addr]}.
+    {ok, [{Addr, false}]}.
 
-%% @doc Return the value for cm_cancellation_interval
-get_cancellation_interval() ->
-    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+fullsync_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+fullsync_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+realtime_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+realtime_locator(Name, legacy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name);
+realtime_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name).
+
+proxy_get_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+
+
 
 %% @doc Initialize the default set of locator functions.
 initialize_locators() ->
@@ -712,4 +806,13 @@ initialize_locators() ->
     WithClusterAddr = orddict:store(cluster_by_addr,
                                     fun cluster_by_addr_locator/2,
                                     WithClusterName),
-    WithClusterAddr.
+    WithFSRepl = orddict:store(fs_repl,
+                                    fun fullsync_locator/2,
+                                    WithClusterAddr),
+    WithRTRepl = orddict:store(rt_repl,
+                                    fun realtime_locator/2,
+                                    WithFSRepl),
+    WithProxyGet = orddict:store(proxy_get,
+                                    fun proxy_get_locator/2,
+                                    WithRTRepl),
+    WithProxyGet.

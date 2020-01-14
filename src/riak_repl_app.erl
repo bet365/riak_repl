@@ -10,7 +10,9 @@
          cluster_mgr_member_fun/1,
          cluster_mgr_all_member_fun/1,
          cluster_mgr_write_cluster_members_to_ring/2,
-         cluster_mgr_read_cluster_targets_from_ring/0]).
+         cluster_mgr_read_cluster_targets_from_ring/0,
+         cluster_mgr_read_filtered_bucket_config_from_ring/0,
+         cluster_mgr_write_filtered_bucket_config_to_ring/2]).
 
 -include("riak_core_cluster.hrl").
 -include("riak_core_connection.hrl").
@@ -59,6 +61,17 @@ start(_Type, _StartArgs) ->
         ],
         [consistent, datatype, n_val, allow_mult, last_write_wins]),
 
+    riak_core_capability:register(
+        {riak_repl, realtime_connections},
+        [v1, legacy],
+        legacy
+        ),
+    riak_core_capability:register(
+        {riak_repl2_object_filter, version},
+        [1.0, 0],
+        0
+    ),
+
     %% skip Riak CS blocks
     case riak_repl_util:proxy_get_active() of
         true ->
@@ -94,6 +107,11 @@ start(_Type, _StartArgs) ->
             %% cluster manager leader will follow repl leader
             riak_repl2_leader:register_notify_fun(
               fun riak_core_cluster_mgr:set_leader/2),
+
+            % rtsource supverisors -> rtsource_conn_mgr will follow the leader
+            riak_repl2_leader:register_notify_fun(
+                fun riak_repl2_rtsource_conn_data_mgr:set_leader/2
+            ),
 
             %% fullsync co-ordincation will follow leader
             riak_repl2_leader:register_notify_fun(
@@ -139,6 +157,7 @@ stop(_State) ->
 
 ensure_dirs() ->
     {ok, DataRoot} = application:get_env(riak_repl, data_root),
+    KeylistDataRoot = app_helper:get_env(riak_repl, keylist_data_root, DataRoot),
     LogDir = filename:join(DataRoot, "logs"),
     case filelib:ensure_dir(filename:join(LogDir, "empty")) of
         ok ->
@@ -149,9 +168,9 @@ ensure_dirs() ->
             riak:stop(lists:flatten(Msg))
     end,
     {ok, Incarnation} = application:get_env(riak_repl, incarnation),
-    WorkRoot = filename:join([DataRoot, "work"]),
-    _ = prune_old_workdirs(WorkRoot),
-    WorkDir = filename:join([WorkRoot, integer_to_list(Incarnation)]),
+    KeylistWorkRoot = filename:join([KeylistDataRoot, "work"]),
+    _ = prune_old_workdirs(KeylistWorkRoot),
+    WorkDir = filename:join([KeylistWorkRoot, integer_to_list(Incarnation)]),
     case filelib:ensure_dir(filename:join([WorkDir, "empty"])) of
         ok ->
             application:set_env(riak_repl, work_dir, WorkDir),
@@ -176,8 +195,8 @@ prune_old_workdirs(WorkRoot) ->
 %% Get the list of nodes of our ring
 %% This list includes all up-nodes, that host the riak_kv service
 cluster_mgr_member_fun({IP, Port}) ->
-    lists_shuffle([ {XIP,XPort} || {_Node,{XIP,XPort}} <- cluster_mgr_members({IP, Port}, riak_core_node_watcher:nodes(riak_kv)),
-                                 is_integer(XPort) ]).
+    [ {XIP,XPort} || {_Node,{XIP,XPort}} <- cluster_mgr_members({IP, Port}, riak_core_node_watcher:nodes(riak_kv)),
+                                 is_integer(XPort) ].
 
 %% this list includes *all* members of the ring (even those marked down).
 %% returns a list [ { node(), {IP, Port} | unreachable }, ... ]
@@ -254,18 +273,6 @@ maybe_retry_ip_rpc(Results, Nodes, BadNodes, Args) ->
     end,
     lists:map(MaybeRetry, Zipped).
 
-lists_shuffle([]) ->
-    [];
-
-lists_shuffle([E]) ->
-    [E];
-
-lists_shuffle(List) ->
-    Max = length(List),
-    Keyed = [{rand:uniform(Max), E} || E <- List],
-    Sorted = lists:sort(Keyed),
-    [N || {_, N} <- Sorted].
-
 %% TODO: check the config for a name. Don't overwrite one a user has set via cmd-line
 name_this_cluster() ->
     ClusterName = case riak_core_connection:symbolic_clustername() of
@@ -295,6 +302,15 @@ cluster_mgr_read_cluster_targets_from_ring() ->
     Clusters = riak_repl_ring:get_clusters(Ring),
     [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].
 
+cluster_mgr_write_filtered_bucket_config_to_ring(ClusterName, FilteredBucketConfig) ->
+    lager:debug("Saving filtered bucket config to the ring: ~p -> ~p", [ClusterName, FilteredBucketConfig]),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_filtered_bucket_config/1,
+        {ClusterName, FilteredBucketConfig}).
+
+cluster_mgr_read_filtered_bucket_config_from_ring() ->
+    Ring = get_ring(),
+    riak_repl_ring:get_filtered_bucket_config(Ring).
+
 %% Register a locator for cluster names. MUST do this BEFORE we
 %% register the save/restore functions because the restore function
 %% is going to immediately try and locate functions if the cluster
@@ -302,7 +318,8 @@ cluster_mgr_read_cluster_targets_from_ring() ->
 register_cluster_name_locator() ->
     Locator = fun(ClusterName, _Policy) ->
                       Ring = get_ring(),
-                      Addrs = riak_repl_ring:get_clusterIpAddrs(Ring, ClusterName),
+                      OldAddrs = riak_repl_ring:get_clusterIpAddrs(Ring, ClusterName),
+                      Addrs = [ {X, false} || X <- OldAddrs],
                       lager:debug("located members for cluster ~p: ~p", [ClusterName, Addrs]),
                       {ok,Addrs}
               end,
@@ -382,12 +399,3 @@ unmask_address(IP, Mask, Size) ->
         _ ->
             unmask_address(IP, Mask, Size - 1)
     end.
-
-
-%%%%%%%%%%%%%%%%
-%% Unit Tests %%
-%%%%%%%%%%%%%%%%
-
--ifdef(TEST).
-
--endif.

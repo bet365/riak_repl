@@ -9,9 +9,9 @@
 -behaviour(gen_server).
 %% API
 -export([start_link/4,
-         stop/1,
-         v1_ack/2,
-         status/1, status/2, send_heartbeat/1]).
+    stop/1,
+    v1_ack/2,
+    status/1, status/2, send_heartbeat/1]).
 
 -include("riak_repl.hrl").
 
@@ -19,7 +19,7 @@
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-         terminate/2, code_change/3]).
+    terminate/2, code_change/3]).
 
 -record(state, {remote,     % remote site name
                 transport,  % erlang module to use for transport
@@ -29,7 +29,8 @@
                 sent_seq,   % last sequence sent
                 v1_offset = 0,
                 v1_seq_map = [],
-                objects = 0}).   % number of objects sent - really number of pulls as could be multiobj
+                objects = 0 % number of objects sent - really number of pulls as could be multiobj
+}).
 
 start_link(Remote, Transport, Socket, Version) ->
     gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version], []).
@@ -54,11 +55,10 @@ send_heartbeat(Pid) ->
     gen_server:cast(Pid, send_heartbeat).
 
 init([Remote, Transport, Socket, Version]) ->
-    _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
     Me = self(),
     Deliver = fun(Result) -> gen_server:call(Me, {pull, Result}, infinity) end,
     State = #state{remote = Remote, transport = Transport, proto = Version,
-                   socket = Socket, deliver_fun = Deliver},
+        socket = Socket, deliver_fun = Deliver},
     async_pull(State),
     {ok, State}.
 
@@ -66,23 +66,23 @@ handle_call({pull, {error, Reason}}, _From, State) ->
     riak_repl_stats:rt_source_errors(),
     {stop, {queue_error, Reason}, ok, State};
 handle_call({pull, {Seq, NumObjects, _BinObjs, _Meta} = Entry}, From,
-            State = #state{transport = T, socket = S, objects = Objects}) ->
+    State = #state{transport = T, socket = S, objects = Objects}) ->
     %% unblock the rtq as fast as possible
     gen_server:reply(From, ok),
     State2 = maybe_send(T, S, Entry, State),
     async_pull(State2),
     {noreply, State2#state{sent_seq = Seq, objects = Objects + NumObjects}};
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
+    {stop, {shutdown, routine}, ok, State};
 handle_call(status, _From, State =
-                #state{sent_seq = SentSeq, objects = Objects}) ->
+    #state{sent_seq = SentSeq, objects = Objects}) ->
     {reply, [{sent_seq, SentSeq},
-             {objects, Objects}], State}.
+        {objects, Objects}], State}.
 
 handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
     spawn(fun() ->
-            HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
-            T:send(S, HBIOL)
+        HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
+        T:send(S, HBIOL)
           end),
     {noreply, State};
 
@@ -97,14 +97,15 @@ handle_cast({v1_ack, Seq}, State = #state{v1_seq_map = Map}) ->
     {noreply, State#state{v1_seq_map = Map2}};
 
 handle_cast(Msg, _State) ->
-    lager:info("Realtime source helper received unexpected cast - ~p\n", [Msg]).
+    lager:info("Realtime source helper received unexpected cast - ~p", [Msg]).
 
 
 handle_info(Msg, State) ->
-    lager:info("Realtime source helper received unexpected message - ~p\n", [Msg]),
+    lager:info("Realtime source helper received unexpected message - ~p", [Msg]),
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(Reason, _State) ->
+    lager:info("rtsource conn helper terminated due to ~p", [Reason]),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -112,7 +113,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 %% Trigger an async pull from the realtime queue
-async_pull(#state{remote = Remote, deliver_fun = Deliver}) ->
+async_pull(_State=#state{remote = Remote, deliver_fun = Deliver}) ->
     riak_repl2_rtq:pull(Remote, Deliver).
 
 maybe_send(Transport, Socket, QEntry, State) ->
@@ -174,4 +175,6 @@ merge_forwards_and_routed_meta({_, _, _, Meta} = QEntry, Remote) ->
     Meta2 = orddict:erase(local_forwards, Meta),
     Routed2 = lists:usort(Routed ++ LocalForwards ++ [Self]),
     Meta3 = orddict:store(routed_clusters, Routed2, Meta2),
-    setelement(4, QEntry, Meta3).
+    Meta4 = orddict:erase(?BT_META_BLACKLIST, Meta3),
+    setelement(4, QEntry, Meta4).
+

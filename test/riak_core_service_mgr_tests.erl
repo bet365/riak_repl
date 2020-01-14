@@ -29,7 +29,7 @@
 
 %% internal functions
 -export([testService/5,
-         connected/6, connect_failed/3
+         connected/7, connect_failed/3
         ]).
 
 %% my name and remote same because I need to talk to myself for testing
@@ -53,12 +53,13 @@ service_test_() ->
                StartedApps = riak_repl_test_util:maybe_start_lager(),
                riak_core_ring_events:start_link(),
                riak_core_ring_manager:start_link(test),
-               ok = application:start(ranch),
+               application:start(ranch),
                {ok, _Pid} = riak_core_service_mgr:start_link(?TEST_ADDR),
                StartedApps
        end,
        fun(Apps) ->
                process_flag(trap_exit, true),
+               true = is_process_alive(whereis(riak_core_ring_manager)),
                riak_core_ring_manager:stop(),
                catch exit(riak_core_ring_events, kill),
                application:stop(ranch),
@@ -108,7 +109,7 @@ service_test_() ->
                                                 %register_service_test_d(),
                                                  %% try to connect via a client that speaks our test protocol
                                                  ExpectedRevs = {expectedToPass, [{1,0}, {1,0}]},
-                                                 riak_core_connection:connect(?TEST_ADDR, {{testproto, [{1,0}]},
+                                                 riak_core_connection:connect(?TEST_ADDR, false, {{testproto, [{1,0}]},
                                                                                            {?TCP_OPTIONS, ?MODULE, ExpectedRevs}}),
                                                  %% allow client and server to connect and make assertions of success/failure
                                                  timer:sleep(1000),
@@ -121,7 +122,7 @@ service_test_() ->
                                                       %% there should be no services running now.
                                                       %% now start a client and confirm failure to connect
                                                       ExpectedArgs = expectedToFail,
-                                                      riak_core_connection:connect(?TEST_ADDR, {{testproto, [{1,0}]},
+                                                      riak_core_connection:connect(?TEST_ADDR, false, {{testproto, [{1,0}]},
                                                                                                 {?TCP_OPTIONS, ?MODULE, ExpectedArgs}}),
                                                       %% allow client and server to connect and make assertions of success/failure
                                                       timer:sleep(1000)
@@ -147,7 +148,7 @@ testService(_Socket, _Transport, {ok, {Proto, MyVer, RemoteVer}}, Args, _Props) 
     {ok, self()}.
 
 %% Client side protocol callbacks
-connected(_Socket, _Transport, {_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props) ->
+connected(_Socket, _Transport, {_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props, _Priamry) ->
     ?TRACE(?debugMsg("testClient started")),
     {_TestType, [ExpectedMyVer, ExpectedRemoteVer]} = Args,
     ?assertEqual(Proto, testproto),

@@ -12,8 +12,8 @@
 
 -export([clustername/1, clusters/1,clusterstats/1,
          connect/1, disconnect/1, connections/1,
-         realtime/1, fullsync/1, proxy_get/1
-        ]).
+         realtime/1, fullsync/1, proxy_get/1,
+         datamgr_stats/1]).
 -export([rt_remotes_status/0,
          fs_remotes_status/0]).
 
@@ -24,6 +24,7 @@
          server_stats/0,
          coordinator_stats/0,
          coordinator_srv_stats/0]).
+
 -export([modes/1, set_modes/1, get_modes/0,
          max_fssource_node/1,
          max_fssource_cluster/1,
@@ -36,8 +37,24 @@
          add_block_provider_redirect/1,
          show_block_provider_redirect/1,
          show_local_cluster_id/1,
-         delete_block_provider_redirect/1
-     ]).
+         delete_block_provider_redirect/1]).
+
+-export([add_filtered_bucket/1,
+         remove_filtered_bucket/1,
+         reset_filtered_buckets/1,
+         enable_bucket_filtering/1,
+         disable_bucket_filtering/1,
+         print_bucket_filtering_config/1,
+         remove_bucket_from_filtering/1]).
+
+-export([object_filtering_enable/1,
+         object_filtering_disable/1,
+         object_filtering_clear_config/1,
+         object_filtering_load_config/1,
+         object_filtering_check_config/1,
+         object_filtering_status_all/1,
+         object_filtering_status/1,
+         object_filtering_print_config/1]).
 
 add_listener(Params) ->
     lager:warning(?V2REPLDEP, []),
@@ -276,6 +293,7 @@ clustername([ClusterName]) ->
     ?LOG_USER_CMD("Set clustername to ~p", [ClusterName]),
     riak_core_ring_manager:ring_trans(fun riak_core_connection:set_symbolic_clustername/2,
                                       ClusterName),
+    riak_repl2_object_filter_console:set_clustername(ClusterName),
     ok.
 
 clusters([]) ->
@@ -333,6 +351,37 @@ connections([]) ->
     io:format("~-20s ~-20s ~-15s [Members]~n", ["Connection", "Cluster Name", "<Ctrl-Pid>"]),
     io:format("~-20s ~-20s ~-15s ---------~n", ["----------", "------------", "----------"]),
     _ = [showClusterConn(Conn) || Conn <- Conns],
+    ok.
+
+print_datamgr_conns({Remote, _Pid}) ->
+    ConnName = string_of_remote(Remote),
+
+    ConnDetails = riak_repl2_rtsource_conn_data_mgr:read(realtime_connections, ConnName),
+
+    %% A list of all the remotes the current node is connected to
+    RemoteConns = dict:fetch_keys(ConnDetails),
+
+    lists:map(fun(RemoteConnName) ->
+                % Fetching the key gives us a dict of Node => {IPPort, Primary}
+                RemoteConnDetails = dict:fetch(RemoteConnName, ConnDetails),
+                RemoteConnList    = dict:to_list(RemoteConnDetails),
+
+                lists:map(fun({RemoteNodeName, Conns}) ->
+                            [begin
+                                io:format("~-20s ~-20s ~-15s ~-5s", [RemoteConnName, RemoteNodeName, IP, Primary])
+                             end || {IP, Primary} <- Conns]
+                          end, RemoteConnList)
+              end, RemoteConns),
+    ok.
+
+datamgr_stats([]) ->
+    {ok, Conns} = riak_core_cluster_mgr:get_connections(),
+
+    io:format("~-20s ~-20s ~-12s ~-5s~n", ["Remote", "Node", "IP", "Primary"]),
+    io:format("~-20s ~-20s ~-25s ~-5s~n", ["----------", "------------", "---------------", "---------"]),
+
+    [ print_datamgr_conns(Conn) || Conn <- Conns],
+
     ok.
 
 connect([Address]) ->
@@ -911,7 +960,7 @@ coordinator_srv_stats() ->
 rt2_source_stats(Pid) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     State = try
-                riak_repl2_rtsource_conn:status(Pid, Timeout)
+                riak_repl2_rtsource_conn_mgr:get_all_status(Pid, Timeout)
             catch
                 _:_ ->
                     too_busy
@@ -1047,3 +1096,93 @@ simple_parse(Str) ->
     {ok, AbsForm} = erl_parse:parse_exprs(Tokens),
     {value, Value, _Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
     Value.
+
+
+%% ========================================================================================================= %%
+%% Bucket Filtering (legacy)
+%% ========================================================================================================= %%
+add_filtered_bucket([BucketName, ClusterName]) ->
+    lager:info("add filtered bucket: ~s, allowed to route to: ~p~n", [ClusterName, BucketName]),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:add_filtered_bucket/2,
+        {ClusterName, list_to_binary(BucketName)}),
+    ok.
+
+%% Remove an association for ClusterName against BucketName - Given bucket won't be replicated to that cluster
+remove_filtered_bucket([BucketName, ClusterName]) ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:remove_cluster_from_bucket_config/2,
+        {ClusterName, list_to_binary(BucketName)}),
+    ok.
+
+reset_filtered_buckets([]) ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:reset_filtered_buckets/2, []),
+    ok.
+
+enable_bucket_filtering([]) ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_bucket_filtering_state/2, true),
+    ok.
+
+disable_bucket_filtering([]) ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_bucket_filtering_state/2, false),
+    ok.
+
+remove_bucket_from_filtering([BucketName]) ->
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:remove_filtered_bucket/2, list_to_binary(BucketName)),
+    ok.
+
+print_bucket_filtering_config([]) ->
+    Ring = get_ring(),
+    IsEnabled = enable_flag_to_list(riak_repl_ring:get_bucket_filtering_state(Ring)),
+    BucketConfig = riak_repl_ring:get_filtered_bucket_config(Ring),
+
+    case BucketConfig of
+        [] ->
+            io:format("Enabled: ~s~n~n", [IsEnabled]),
+            io:format("Bucket filtering not configured~n");
+        _ ->
+            io:format("Filtered bucket config~n~n"),
+            io:format("Enabled: ~s~n~n", [IsEnabled]),
+            Sep = string:copies("-", 20),
+            io:format("~-20s ~-20s~n", ["Bucket", "To Cluster"]),
+            io:format("~-20s ~-20s~n", [Sep, Sep]),
+            [begin
+                 ClusterNamesJoined = string:join(ClusterNames, ", "),
+                 io:format("~-20s ~-20s~n", [Bucket, ClusterNamesJoined])
+             end || {Bucket, ClusterNames} <- BucketConfig]
+    end,
+    ok.
+
+enable_flag_to_list(B) when is_boolean(B) -> atom_to_list(B);
+enable_flag_to_list(_) -> "false".
+
+%% ========================================================================================================= %%
+%% Object Filtering (API for riak-repl calls)
+%% ========================================================================================================= %%
+object_filtering_enable([]) ->
+    riak_repl2_object_filter_console:enable();
+object_filtering_enable([Mode]) ->
+    riak_repl2_object_filter_console:enable(Mode).
+
+object_filtering_disable([]) ->
+    riak_repl2_object_filter_console:disable();
+object_filtering_disable([Mode]) ->
+    riak_repl2_object_filter_console:disable(Mode).
+
+object_filtering_clear_config([Mode]) ->
+    riak_repl2_object_filter_console:clear_config(Mode).
+
+object_filtering_load_config([Mode, ConfigPath]) ->
+    riak_repl2_object_filter_console:load_config(Mode, ConfigPath).
+
+object_filtering_check_config([ConfigPath]) ->
+    riak_repl2_object_filter_console:check_config(ConfigPath).
+
+object_filtering_status([]) ->
+    riak_repl2_object_filter_console:status().
+
+object_filtering_status_all([]) ->
+    riak_repl2_object_filter_console:status_all().
+
+object_filtering_print_config([Mode]) ->
+    riak_repl2_object_filter_console:get_config(Mode);
+object_filtering_print_config([Mode, Remote]) ->
+    riak_repl2_object_filter_console:get_config(Mode, Remote).

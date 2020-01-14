@@ -111,8 +111,9 @@
 %% ------------------------------------------------------------------
 
 -export([start_link/1, start_fullsync/1, stop_fullsync/1,
-    status/0, status/1, status/2, is_running/1,
-        node_dirty/1, node_dirty/2, node_clean/1, node_clean/2]).
+         status/0, status/1, status/2, is_running/1,
+         node_dirty/1, node_dirty/2, node_clean/1, node_clean/2,
+         register_remote_locator/0]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -125,7 +126,7 @@
 %% connection manager Function Exports
 %% ------------------------------------------------------------------
 
--export([connected/6,connect_failed/3]).
+-export([connected/7,connect_failed/3]).
 
 %% ------------------------------------------------------------------
 %% stat caching mechanism export
@@ -230,13 +231,21 @@ node_clean(Pid, Node) ->
     gen_server:call(Pid, {node_clean, Node}, infinity),
     lager:debug("Node ~p marked clean",[Node]).
 
+register_remote_locator() ->
+  Locator =
+    fun(_, {use_only, Addrs}) ->
+      {ok, Addrs};
+      (Name, _Policy) ->
+        riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name)
+    end,
+  ok = riak_core_connection_mgr:register_locator(fs_repl, Locator).
 
 %% ------------------------------------------------------------------
 %% connection manager callbacks
 %% ------------------------------------------------------------------
 
 %% @hidden
-connected(Socket, Transport, Endpoint, Proto, Pid, _Props) ->
+connected(Socket, Transport, Endpoint, Proto, Pid, _Props, _Primary) ->
     Transport:controlling_process(Socket, Pid),
     gen_server:cast(Pid, {connected, Socket, Transport, Endpoint, Proto}).
 
@@ -258,7 +267,7 @@ init(Cluster) ->
         {active, false}
     ],
     ClientSpec = {{fs_coordinate, [{1,0}]}, {TcpOptions, ?MODULE, self()}},
-    case riak_core_connection_mgr:connect({rt_repl, Cluster}, ClientSpec) of
+    case riak_core_connection_mgr:connect({fs_repl, Cluster}, ClientSpec) of
         {ok, Ref} ->
             _ = riak_repl_util:schedule_cluster_fullsync(Cluster),
             {ok, refresh_stats(#state{other_cluster = Cluster, connection_ref = Ref})};

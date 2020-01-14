@@ -40,7 +40,7 @@
 -behaviour(gen_fsm_compat).
 
 %% API
--export([start_link/6,
+-export([start_link/9,
         start_fullsync/1,
         start_fullsync/2,
         cancel_fullsync/1,
@@ -97,7 +97,11 @@
         generator_paused = false,
         pending_acks = 0,
         ver = w0,
-        proto
+        proto,
+        bucket_filtering_config = [],
+        bucket_filtering_enabled = false,
+        fullsync_object_filter = {disabled, 0, []},
+        object_hash_version = 0
     }).
 
 %% -define(TRACE(Stmt),Stmt).
@@ -114,8 +118,8 @@
 %% estimate of them.
 -define(KEY_LIST_THRESHOLD,(1024)).
 
-start_link(SiteName, Transport, Socket, WorkDir, Client, Proto) ->
-    gen_fsm_compat:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, Client, Proto], []).
+start_link(SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}, ObjectHashVersion) ->
+    gen_fsm_compat:start_link(?MODULE, [SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilteringEnabledOnBothSides, BucketConfig}, ObjectHashVersion], []).
 
 start_fullsync(Pid) ->
     gen_fsm_compat:send_event(Pid, start_fullsync).
@@ -132,7 +136,7 @@ pause_fullsync(Pid) ->
 resume_fullsync(Pid) ->
     gen_fsm_compat:send_event(Pid, resume_fullsync).
 
-init([SiteName, Transport, Socket, WorkDir, Client, Proto]) ->
+init([SiteName, Transport, Socket, WorkDir, Client, Proto, FullsyncObjectFilter, {FilterEnabled, BucketConfig}, ObjectHashVersion]) ->
     MinPool = app_helper:get_env(riak_repl, min_get_workers, 5),
     MaxPool = app_helper:get_env(riak_repl, max_get_workers, 100),
     VnodeGets = app_helper:get_env(riak_repl, vnode_gets, true),
@@ -141,8 +145,10 @@ init([SiteName, Transport, Socket, WorkDir, Client, Proto]) ->
             {worker_args, []},
             {size, MinPool}, {max_overflow, MaxPool}]),
     State = #state{sitename=SiteName, socket=Socket, transport=Transport,
-        work_dir=WorkDir, client=Client, pool=Pid, vnode_gets=VnodeGets,
-        diff_batch_size=DiffBatchSize, proto=Proto},
+                   work_dir=WorkDir, client=Client, pool=Pid, vnode_gets=VnodeGets,
+                   diff_batch_size=DiffBatchSize, proto=Proto, bucket_filtering_enabled = FilterEnabled,
+                   bucket_filtering_config=BucketConfig, fullsync_object_filter = FullsyncObjectFilter,
+                   object_hash_version = ObjectHashVersion},
     riak_repl_util:schedule_fullsync(),
     {ok, wait_for_partition, State}.
 
@@ -462,7 +468,8 @@ diff_bloom({Ref, {merkle_diff, {{B, K}, _VClock}}}, #state{diff_ref=Ref, bloom=B
 
 %% Sent by the fullsync_helper "streaming" difference generator when it's done.
 %% @plu server <- s:helper : diff_done
-diff_bloom({Ref, diff_done}, #state{diff_ref=Ref, partition=Partition, bloom=Bloom} = State) ->
+diff_bloom({Ref, diff_done}, #state{diff_ref=Ref, partition=Partition, bloom=Bloom,
+                                    bucket_filtering_enabled = FilterEnabled, bucket_filtering_config = FilterConfig, fullsync_object_filter = FullsyncObjectFilter} = State) ->
     lager:info("Full-sync with site ~p; fullsync difference generator for ~p complete (completed in ~p secs)",
                [State#state.sitename, State#state.partition,
                 riak_repl_util:elapsed_secs(State#state.partition_start)]),
@@ -491,7 +498,7 @@ diff_bloom({Ref, diff_done}, #state{diff_ref=Ref, partition=Partition, bloom=Blo
                                 fun ?MODULE:bloom_fold/3,
                                 {Self, BloomSpec,
                                  State#state.client, State#state.transport,
-                                 State#state.socket, DiffSize, DiffSize},
+                                 State#state.socket, DiffSize, DiffSize, FullsyncObjectFilter, {FilterEnabled, FilterConfig}},
                                 false,
                                 [{iterator_refresh, true}]),
                             {raw, FoldRef, self()},
@@ -675,10 +682,10 @@ command_verb(pause_fullsync) ->
 %% This folder will send batches of differences to the client. Each batch is "WinSz"
 %% riak objects. After a batch is sent, it will pause itself and wait to be resumed
 %% by receiving "bloom_resume".
-bloom_fold(BK, V, {MPid, {serialized, SBloom}, Client, Transport, Socket, NSent, WinSz}) ->
+bloom_fold(BK, V, {MPid, {serialized, SBloom}, Client, Transport, Socket, NSent, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}}) ->
     {ok, Bloom} = ebloom:deserialize(SBloom),
-    bloom_fold(BK, V, {MPid, Bloom, Client, Transport, Socket, NSent, WinSz});
-bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, 0, WinSz} = Acc) ->
+    bloom_fold(BK, V, {MPid, Bloom, Client, Transport, Socket, NSent, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}});
+bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, 0, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}} = Acc) ->
     Monitor = erlang:monitor(process, MPid),
     ?TRACE(lager:info("bloom_fold -> MPid(~p) : bloom_paused", [MPid])),
     gen_fsm_compat:send_event(MPid, {self(), bloom_paused}),
@@ -692,49 +699,70 @@ bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, 0, WinSz} = Acc) 
         bloom_resume ->
             ?TRACE(lager:info("bloom_fold <- MPid(~p) : bloom_resume", [MPid])),
             erlang:demonitor(Monitor, [flush]),
-            bloom_fold({B,K}, V, {MPid, Bloom, Client, Transport, Socket, WinSz, WinSz});
+            bloom_fold({B,K}, V, {MPid, Bloom, Client, Transport, Socket, WinSz, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}});
         {'DOWN', Monitor, process, MPid, _Reason} ->
             throw(receiver_down);
         _Other ->
             erlang:demonitor(Monitor, [flush]),
             ?TRACE(lager:info("bloom_fold <- ? : ~p", [_Other]))
     end;
-bloom_fold({{T, B}, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz}) ->
-    NSent = case ebloom:contains(Bloom, <<T/binary, B/binary, K/binary>>) of
+bloom_fold({{T, B}, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}}) ->
+    NSent = case (FilterEnabled andalso lists:member(B, FilterConfig)) of
+        false ->
+            case ebloom:contains(Bloom, <<T/binary, B/binary, K/binary>>) of
                 true ->
                     case (catch riak_object:from_binary({T,B},K,V)) of
                         {'EXIT', _} ->
-                            ok;
+                            NSent0 - 1;
                         RObj ->
-                            gen_fsm_compat:sync_send_event(MPid,
-                                                    {diff_obj, RObj},
-                                                    infinity)
-                    end,
-                    NSent0 - 1;
+                            case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
+                                true ->
+                                    NSent0;
+                                false ->
+                                    gen_fsm_compat:sync_send_event(MPid,
+                                        {diff_obj, RObj},
+                                        infinity),
+                                    NSent0 - 1
+                            end
+                    end;
                 false ->
-                    ok,
                     NSent0
-            end,
-    {MPid, Bloom, Client, Transport, Socket, NSent, WinSz};
-bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz}) ->
-    NSent = case ebloom:contains(Bloom, <<B/binary, K/binary>>) of
+            end;
+        true ->
+            % We should be filtering this key, value - do not do bloom check
+            NSent0
+    end,
+    {MPid, Bloom, Client, Transport, Socket, NSent, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}};
+bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}}) ->
+    NSent = case (FilterEnabled andalso lists:member(B, FilterConfig)) of
+                false ->
+                    case ebloom:contains(Bloom, <<B/binary, K/binary>>) of
+                        true ->
+                            case (catch riak_object:from_binary(B,K,V)) of
+                                {'EXIT', _} ->
+                                    NSent0 - 1;
+                                RObj ->
+                                    case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
+                                        true ->
+                                            NSent0;
+                                        false ->
+                                            gen_fsm:sync_send_event(MPid,
+                                                {diff_obj, RObj},
+                                                infinity),
+                                            NSent0 - 1
+                                    end
+                            end;
+                        false ->
+                            NSent0
+                    end;
                 true ->
-                    case (catch riak_object:from_binary(B,K,V)) of
-                        {'EXIT', _} ->
-                            ok;
-                        RObj ->
-                            gen_fsm_compat:sync_send_event(MPid,
-                                                    {diff_obj, RObj},
-                                                    infinity)
-                    end,
-                    NSent0 - 1;
-                false ->
-                    ok,
+                    % We should be filtering this key, value - do not do bloom check
                     NSent0
             end,
-    {MPid, Bloom, Client, Transport, Socket, NSent, WinSz}.
+    {MPid, Bloom, Client, Transport, Socket, NSent, WinSz, FullsyncObjectFilter, {FilterEnabled, FilterConfig}}.
 
-wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir}) ->
+wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir, bucket_filtering_enabled = FilterEnabled, object_hash_version = ObjectHashVersion,
+                                                      bucket_filtering_config = FilterConfig, fullsync_object_filter = FullsyncObjectFilter}) ->
     lager:info("Full-sync with site ~p; doing fullsync for ~p",
                [State#state.sitename, Partition]),
     lager:info("Full-sync with site ~p; building keylist for ~p",
@@ -745,7 +773,11 @@ wait_for_individual_partition(Partition, State=#state{work_dir=WorkDir}) ->
     {ok, KeyListPid} = riak_repl_fullsync_helper:start_link(self()),
     {ok, KeyListRef} = riak_repl_fullsync_helper:make_keylist(KeyListPid,
                                                               Partition,
-                                                              KeyListFn),
+                                                              KeyListFn,
+                                                              FilterEnabled,
+                                                              FilterConfig,
+                                                              FullsyncObjectFilter,
+                                                              ObjectHashVersion),
     {next_state, build_keylist, State#state{kl_pid=KeyListPid,
                                             kl_ref=KeyListRef, kl_fn=KeyListFn,
                                             partition=Partition,
@@ -816,7 +848,7 @@ kl_eof(#state{their_kl_fh=FH, num_diffs=NumKeys} = State) ->
         [State#state.sitename, State#state.partition,
             riak_repl_util:elapsed_secs(State#state.stage_start)]),
     ?TRACE(lager:info("Full-sync with site ~p; calculating ~p differences for ~p",
-                      [State#state.sitename, NumDKeys, State#state.partition])),
+                      [State#state.sitename, NumKeys, State#state.partition])),
     {ok, Pid} = riak_repl_fullsync_helper:start_link(self()),
 
     %% check capability of all nodes for bloom fold ability.

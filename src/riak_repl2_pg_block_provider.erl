@@ -9,7 +9,7 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/1, connected/6, connect_failed/3]).
+-export([start_link/1, connected/7, connect_failed/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -40,7 +40,7 @@ status(Pid, Timeout) ->
     gen_server:call(Pid, status, Timeout).
 
 %% connection manager callbacks
-connected(Socket, Transport, Endpoint, Proto, Pid, Props) ->
+connected(Socket, Transport, Endpoint, Proto, Pid, Props, _Primary) ->
     Transport:controlling_process(Socket, Pid),
     gen_server:call(Pid,
         {connected, Socket, Transport, Endpoint, Proto, Props}, ?LONG_TIMEOUT).

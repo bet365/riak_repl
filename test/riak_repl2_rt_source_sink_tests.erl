@@ -22,6 +22,39 @@
 }).
 
 setup() ->
+    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
+    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
+        fun(X) ->
+            case X of
+                active_nodes ->
+                    [node()];
+                {realtime_connections, _,_} ->
+                    dict:new();
+                {realtime_connections, _} ->
+                    dict:new()
+            end
+        end),
+
+    catch(meck:unload(riak_core_cluster_mgr)),
+    meck:new(riak_core_cluster_mgr, [passthrough]),
+    meck:expect(riak_core_cluster_mgr, get_unshuffled_ipaddrs_of_cluster, fun(_Remote) -> {ok,[]} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_) -> {ok,[]} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, split) -> {ok, {[],[]}} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, _) -> {ok,[]} end ),
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
+    folsom:start(),
     error_logger:tty(false),
     riak_repl_test_util:start_test_ring(),
     riak_repl_test_util:abstract_gen_tcp(),
@@ -64,7 +97,7 @@ connection_test_() ->
      ]}.
 
 v2_to_v2_comms(_State) ->
-    {spawn,
+    {inorder,
      [
     {"v2 to v2 communication",
      setup,
@@ -74,14 +107,16 @@ v2_to_v2_comms(_State) ->
              [
               {"everything started okay",
                fun() ->
-                       assert_living_pids([Source, Sink])
+                       [RT] = riak_repl2_rtsource_conn_mgr:get_rtsource_conn_pids(Source),
+                       H = riak_repl2_rtsource_conn:get_helper_pid(RT),
+                       assert_living_pids([Source, Sink, RT, H])
                end},
               {timeout, 120,
                {"sending objects",
                fun() ->
-%                       meck:new(riak_repl_fullsync_worker, [passthrough]),
+
                        catch(meck:unload(riak_repl_fullsync_worker)),
-                       meck:new(riak_repl_fullsync_worker),
+                       meck:new(riak_repl_fullsync_worker, [passthrough]),
 
                        Bin = <<"data data data">>,
                        Key = <<"key">>,
@@ -99,7 +134,7 @@ v2_to_v2_comms(_State) ->
                                    ok
                            end,
                        meck:expect(riak_repl_fullsync_worker, do_binputs, SyncWorkerFun),
-                       riak_repl2_rtq:push(1, term_to_binary([<<"der object">>]), []),
+                       riak_repl2_rtq:push(1, term_to_binary([<<"der object">>]), [{bucket_name, Bucket}]),
                        MeckOk = wait_for_continue(),
                        ?assertEqual(ok, MeckOk),
                        meck:unload(riak_repl_fullsync_worker)
@@ -108,7 +143,7 @@ v2_to_v2_comms(_State) ->
               {"assert done",
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
-                       DoneFun(),
+                       DoneFun([]),
                        ?assert(riak_repl2_rtq:all_queues_empty())
                end}
              ]
@@ -121,14 +156,26 @@ v2_to_v2_comms_setup() ->
     meck:expect(poolboy, checkout, fun(_ServName, _SomeBool, _Timeout) ->
                                            spawn(fun() -> ok end)
                                    end),
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     {Source, Sink}.
 
 v2_to_v2_comms_cleanup({Source, Sink}) ->
     meck:unload(poolboy),
+    catch(meck:unload(riak_core_metadata)),
     connection_test_teardown_pids(Source, Sink).
 
 v1_to_v1_comms(_State) ->
-    {spawn,
+    {inorder,
      [
     {"v1 to v1 communication",
      setup,
@@ -138,7 +185,9 @@ v1_to_v1_comms(_State) ->
              [
               {"everything started okay",
                fun() ->
-                       assert_living_pids([Source, Sink])
+                       [RT] = riak_repl2_rtsource_conn_mgr:get_rtsource_conn_pids(Source),
+                       H = riak_repl2_rtsource_conn:get_helper_pid(RT),
+                       assert_living_pids([Source, Sink, RT, H])
                end},
 
               {timeout, 60,
@@ -156,7 +205,7 @@ v1_to_v1_comms(_State) ->
                                    ok
                            end,
                        meck:expect(riak_repl_fullsync_worker, do_binputs, SyncWorkerFun),
-                       riak_repl2_rtq:push(1, term_to_binary([<<"der object">>])),
+                       riak_repl2_rtq:push(1, term_to_binary([<<"der object">>]), [{bucket_name, <<"eqc_test">>}]),
                        MeckOk = wait_for_continue(),
                        ?assertEqual(ok, MeckOk),
                        meck:unload(riak_repl_fullsync_worker)
@@ -166,7 +215,7 @@ v1_to_v1_comms(_State) ->
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
                        %%?assert(is_function(DoneFun)),
-                       DoneFun(),
+                       DoneFun([]),
                        ?assert(riak_repl2_rtq:all_queues_empty())
                end}
              ]
@@ -176,6 +225,18 @@ v1_to_v1_setup() ->
     {ok, _ListenPid} = start_sink(?VER1),
     {ok, {Source, Sink}} = start_source(?VER1),
     meck:new(poolboy, [passthrough]),
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2,
+        fun(B, K) ->
+            app_helper:get_env(B, K)
+        end),
+    meck:expect(riak_core_metadata, put, 3,
+        fun(B,K, V) ->
+            application:set_env(B, K, V)
+        end),
+
     meck:expect(poolboy, checkout, fun(_ServName, _SomeBool, _Timeout) ->
                                            spawn(fun() -> ok end)
                                    end),
@@ -183,6 +244,7 @@ v1_to_v1_setup() ->
 
 v1_to_v1_cleanup({Source, Sink}) ->
     meck:unload(poolboy),
+    catch(meck:unload(riak_core_metadata)),
     connection_test_teardown_pids(Source, Sink).
 
 assert_living_pids([]) ->
@@ -201,7 +263,8 @@ connection_test_teardown_pids(Source, Sink) ->
     %% unlink(Source),
     %% unlink(Sink),
     process_flag(trap_exit, true),
-    [kill_proc(P) || P <- [Source, Sink]],
+    kill_proc(Sink),
+    exit(Source, shutdown),
     process_flag(trap_exit, false),
     ok.
     %% riak_repl2_rtsource_conn:stop(Source),
@@ -275,17 +338,45 @@ start_source() ->
     start_source(?VER1).
 
 start_source(NegotiatedVer) ->
+
+    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
+    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, 1,
+        fun(active_nodes) ->
+            [node()]
+        end),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, 2,
+        fun(realtime_connections, _) ->
+            dict:new()
+        end),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, 3,
+        fun(realtime_connections, _,_) ->
+            dict:new()
+        end),
+
+    catch(meck:unload(riak_core_capability)),
+    meck:new(riak_core_capability, [passthrough]),
+    meck:expect(riak_core_capability, get, 1, fun(_) -> v1 end),
+    meck:expect(riak_core_capability, get, 2, fun(_, _) -> v1 end),
+
+    catch(meck:unload(riak_core_cluster_mgr)),
+    meck:new(riak_core_cluster_mgr, [passthrough]),
+    meck:expect(riak_core_cluster_mgr, get_unshuffled_ipaddrs_of_cluster, fun(_Remote) -> {ok,[]} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_) -> {ok,[]} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, split) -> {ok, {[],[]}} end ),
+    meck:expect(riak_core_cluster_mgr, get_ipaddrs_of_cluster, fun(_, _) -> {ok,[]} end ),
+
     catch(meck:unload(riak_core_connection_mgr)),
     meck:new(riak_core_connection_mgr, [passthrough]),
-    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec) ->
+    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy) ->
         spawn_link(fun() ->
             {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
             {ok, Socket} = gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]),
-            ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Pid, [])
+            ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Pid, [], false)
         end),
         {ok, make_ref()}
     end),
-    {ok, SourcePid} = riak_repl2_rtsource_conn:start_link("sink_cluster"),
+    {ok, SourcePid} = riak_repl2_rtsource_conn_mgr:start_link("sink_cluster"),
     %unlink(SourcePid),
     receive
         {sink_started, SinkPid} ->

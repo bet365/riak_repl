@@ -34,7 +34,7 @@ murdering_test_() ->
         application:start(ranch),
         application:set_env(riak_repl, data_root, "."),
         {ok, _Eventer} = riak_core_ring_events:start_link(),
-        {ok, _RingMgr} = riak_core_ring_manager:start_link(test),
+        riak_core_ring_manager:start_link(test),
         {ok, _ClientSup} = riak_repl_client_sup:start_link(),
         {ok, TopSup} = riak_repl_sup:start_link(),
         riak_repl2_leader:register_notify_fun(

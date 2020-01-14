@@ -67,7 +67,7 @@ abstract_connection_mgr(RemotePort) when is_integer(RemotePort) ->
     abstract_connection_mgr({"localhost", RemotePort});
 abstract_connection_mgr({RemoteHost, RemotePort} = RemoteName) ->
     riak_repl_test_util:reset_meck(riak_core_connection_mgr, [no_link, passthrough]),
-    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec) ->
+    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _) ->
         proc_lib:spawn_link(fun() ->
             %% ?debugFmt("connection_mgr connect for ~p", [ServiceAndRemote]),
             Version = stateful:version(),
@@ -75,10 +75,19 @@ abstract_connection_mgr({RemoteHost, RemotePort} = RemoteName) ->
              %% ?debugFmt("connection_mgr callback module: ~p", [Module]),
             {ok, Socket} = gen_tcp:connect(RemoteHost, RemotePort, [binary | TcpOpts]),
             %% ?debugFmt("connection_mgr calling connection callback for ~p", [Pid]),
-            ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Pid, [])
+            ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Pid, [], false)
         end),
         {ok, make_ref()}
     end).
+
+
+abstract_data_mgr() ->
+    riak_repl_test_util:reset_meck(riak_repl2_rtsource_conn_data_mgr, [no_link, passthrough]),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, fun(realtime_connections, _Remote, _Node, _IPPort, _Primary) ->
+        ok end),
+    meck:expect(riak_repl2_rtsource_conn_data_mgr, delete, fun(realtime_connections, _Remote, _Node) ->
+        ok end).
+
 
 start_rt() ->
     riak_repl_test_util:reset_meck(riak_repl2_rt, [no_link, passthrough]),

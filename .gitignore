@@ -12,6 +12,9 @@ tags
 dialyzer_unhandled_warnings
 dialyzer_warnings
 .rebar/
+*iml
+.idea/
+*coverdata
 _build/
 rebar.lock
 .DS_Store

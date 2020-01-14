@@ -3,7 +3,7 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/2, start_link/3, connected/6, connect_failed/3,
+-export([start_link/2, start_link/3, connected/7, connect_failed/3,
     start_fullsync/1, stop_fullsync/1, fullsync_complete/1,
     cluster_name/1, legacy_status/2, soft_link/1]).
 
@@ -31,7 +31,7 @@ start_link(Partition, IP, Owner) ->
     gen_server:start_link(?MODULE, [Partition, IP, Owner], []).
 
 %% connection manager callbacks
-connected(Socket, Transport, Endpoint, Proto, Pid, Props) ->
+connected(Socket, Transport, Endpoint, Proto, Pid, Props, _Primary) ->
     Transport:controlling_process(Socket, Pid),
     gen_server:call(Pid,
         {connected, Socket, Transport, Endpoint, Proto, Props}, ?LONG_TIMEOUT).
@@ -122,9 +122,28 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
     %% Strategy still depends on what the sink is capable of.
     {_Proto,{CommonMajor,_CMinor},{CommonMajor,_HMinor}} = Proto,
 
-    OurCaps = decide_our_caps(RequestedStrategy),
+    ObjectFilteringStatus = riak_repl2_object_filter:get_status(fullsync),
+    ObjectFilteringVersion = riak_repl2_object_filter:get_version(),
+    ObjectFilteringConfig = riak_repl2_object_filter:get_config(fullsync, Cluster, os:timestamp()),
+    ObjectFiltering = {object_filtering, {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig}},
+    OurCaps = decide_our_caps(RequestedStrategy, ObjectFiltering),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
+    ObjectHashVersion = decide_common_object_hash_version(OurCaps, TheirCaps),
+
+
+    FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
+%% ========================================================================================================= %%
+%% Bucket Filtering (legacy)
+%% ========================================================================================================= %%
+    BucketFilteringEnabledOnBothSides = compare_bucket_filtering_flags(OurCaps, TheirCaps),
+
+    %% This is the list of buckets that we need to do bucket filtering with
+    SharedBucketList = maybe_exchange_filtered_buckets(BucketFilteringEnabledOnBothSides, Cluster, Socket, Transport),
+
+    FullSyncBucketFilter = {BucketFilteringEnabledOnBothSides, SharedBucketList},
+%% ========================================================================================================= %%
+
     {_, ClientVer, _} = Proto,
 
     case Strategy of
@@ -136,7 +155,9 @@ handle_call({connected, Socket, Transport, _Endpoint, Proto, Props},
             Transport:setopts(Socket, [{active, once}]),
             {ok, FullsyncWorker} = riak_repl_keylist_server:start_link(Cluster,
                                                                        Transport, Socket,
-                                                                       WorkDir, Client, ClientVer),
+                                                                       WorkDir, Client, ClientVer,
+                                                                       FullsyncObjectFilter, FullSyncBucketFilter,
+                                                                       ObjectHashVersion),
             _ = riak_repl_keylist_server:start_fullsync(FullsyncWorker, [Partition]),
             {reply, ok, State#state{transport=Transport, socket=Socket, cluster=Cluster,
                                     fullsync_worker=FullsyncWorker, work_dir=WorkDir,
@@ -305,6 +326,10 @@ decide_our_caps(RequestedStrategy) ->
             {true, _UnSupportedStrategy} -> RequestedStrategy
         end,
     [{strategy, SupportedStrategy}].
+decide_our_caps(RequestedStrategy, ObjectFiltering) ->
+    Strategy = decide_our_caps(RequestedStrategy),
+    ObjectHashVersion = [{object_hash_version, app_helper:get_env(riak_repl, fullsync_object_hash_version, 1)}],
+    Strategy ++ ObjectHashVersion ++ [{bucket_filtering, riak_repl_util:bucket_filtering_enabled()}, ObjectFiltering].
 
 %% decide what strategy to use, given our own capabilties and those
 %% of the remote source.
@@ -316,6 +341,13 @@ decide_common_strategy(OurCaps, TheirCaps) ->
         {aae,aae} -> aae;
         {_,_}     -> keylist
     end.
+
+decide_common_object_hash_version([], _TheirCaps) -> 0;
+decide_common_object_hash_version(_OurCaps, []) -> 0;
+decide_common_object_hash_version(OurCaps, TheirCaps) ->
+    OurVersion = proplists:get_value(object_hash_version, OurCaps, 0),
+    TheirVersion = proplists:get_value(object_hash_version, TheirCaps, 0),
+    lists:min([OurVersion, TheirVersion]).
 
 %% Depending on the protocol version number, send our capabilities
 %% as a list of properties, in binary.
@@ -366,3 +398,31 @@ maybe_soft_exit(Reason, State) ->
             {stop, normal, State}
     end.
 
+%% ========================================================================================================= %%
+%% Bucket Filtering (legacy)
+%% ========================================================================================================= %%
+compare_bucket_filtering_flags(OurCaps, TheirCaps) ->
+    OurBucketFilteringState = proplists:get_value(bucket_filtering, OurCaps, false),
+    TheirBucketFilteringState = proplists:get_value(bucket_filtering, TheirCaps, false),
+
+    case {OurBucketFilteringState, TheirBucketFilteringState} of
+        {true, true} -> true;
+        {_, _} -> false
+    end.
+
+maybe_exchange_filtered_buckets(false, _, _Socket, _Transport) ->
+    [];
+maybe_exchange_filtered_buckets(true, ClusterName, Socket, Transport) ->
+    TheirConfig =
+        case Transport:recv(Socket, 0, ?PEERINFO_TIMEOUT) of
+            {ok, Data} ->
+                binary_to_term(Data);
+            {Error, Socket} ->
+                throw(Error);
+            {Error, Socket, Reason} ->
+                throw({Error, Reason})
+        end,
+    BucketsToClusterName = riak_repl_util:filtered_buckets_for_clustername(ClusterName),
+    Transport:send(Socket, term_to_binary(BucketsToClusterName)),
+    %% is this too lazy?
+    lists:usort(BucketsToClusterName ++ TheirConfig).

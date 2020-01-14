@@ -51,7 +51,7 @@
          start_link/2,
          status/1,
          status/2,
-         connected/6,
+         connected/7,
          connect_failed/3,
          stop/1]).
 
@@ -119,15 +119,9 @@ status(Ref) ->
 status(Ref, Timeout) ->
     gen_fsm_compat:sync_send_event(Ref, status, Timeout).
 
--spec connected(port(), atom(), ip_addr(), term(), term(), proplists:proplist()) -> ok.
-connected(Socket,
-          Transport,
-          Addr,
-          {?REMOTE_CLUSTER_PROTO_ID,
-           _MyVer    ={CommonMajor,LocalMinor},
-           _RemoteVer={CommonMajor,RemoteMinor}},
-          {_Remote, Client},
-          Props) ->
+-spec connected(port(), atom(), ip_addr(), term(), term(), proplists:proplist(), boolean()) -> ok.
+connected(Socket, Transport, Addr, {?REMOTE_CLUSTER_PROTO_ID, _MyVer ={CommonMajor,LocalMinor},
+    _RemoteVer={CommonMajor,RemoteMinor}}, {_Remote, Client}, Props, _Primary) ->
     %% give control over the socket to the `Client' process.
     %% tell client we're connected and to whom
     Transport:controlling_process(Socket, Client),
@@ -251,17 +245,11 @@ waiting_for_cluster_members({cluster_members, NewMembers}, State = #state{ proto
     #state{address=Addr,
            name=Name,
            previous_name=PreviousName,
-           members=OldMembers,
+           members=_OldMembers,
            remote=Remote} = State,
     %% this is 1.0 code. NewMembers is list of {IP,Port}
 
-    SortedNew = ordsets:from_list(NewMembers),
-    Members =
-        NewMembers ++ lists:filter(fun(Mem) ->
-                                           not ordsets:is_element(Mem, SortedNew)
-                                   end,
-                                   OldMembers),
-
+    Members = ordsets:from_list(NewMembers),
     ClusterUpdatedMsg = {cluster_updated,
                          PreviousName,
                          Name,
@@ -274,33 +262,18 @@ waiting_for_cluster_members({all_cluster_members, NewMembers}, State) ->
     #state{address=Addr,
            name=Name,
            previous_name=PreviousName,
-           members=OldMembers,
+           members=_OldMembers,
            remote=Remote} = State,
 
     %% this is 1.1+ code. Members is list of {node,{IP,Port}}
-
-    Members =
-        lists:foldl(fun(Elm={_Node,{_Ip,Port}}, Acc) when is_integer(Port) ->
-                            [Elm|Acc];
-                       ({Node,_}, Acc) ->
-                            case lists:keyfind(Node, 1, OldMembers) of
-                                Elm={Node,{_IP,Port}} when is_integer(Port) ->
-                                    [Elm|Acc];
-                                _ ->
-                                    Acc
-                            end
-                    end,
-                    [],
-                    NewMembers ),
-
-    ClusterUpdatedMsg = {cluster_updated,
+   ClusterUpdatedMsg = {cluster_updated,
                          PreviousName,
                          Name,
-                         [Member || {_Node,Member} <- Members],
+                         [Member || {_Node,Member} <- NewMembers],
                          Addr,
                          Remote},
     gen_server:cast(?CLUSTER_MANAGER_SERVER, ClusterUpdatedMsg),
-    {next_state, connected, State#state{members=Members}};
+    {next_state, connected, State#state{members=NewMembers}};
 waiting_for_cluster_members(_, _State) ->
     {next_state, waiting_for_cluster_members, _State}.
 

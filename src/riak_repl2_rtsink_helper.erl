@@ -70,6 +70,6 @@ do_write_objects(BinObjs, DoneFun, Ver) ->
     Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),
-    WrapperFun = fun() -> DoneFun(), gen_server:cast(Me, {unmonitor, MRef}) end,
+    WrapperFun = fun(ObjectFilteringRules) -> DoneFun(ObjectFilteringRules), gen_server:cast(Me, {unmonitor, MRef}) end,
     ok = riak_repl_fullsync_worker:do_binputs(Worker, BinObjs, WrapperFun,
                                               riak_repl2_rtsink_pool, Ver).

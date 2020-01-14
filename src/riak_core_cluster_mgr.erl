@@ -54,7 +54,6 @@
 
 -define(SERVER, ?CLUSTER_MANAGER_SERVER).
 -define(MAX_CONS, 20).
--define(CLUSTER_POLLING_INTERVAL, 10 * 1000).
 -define(GC_INTERVAL, infinity).
 -define(PROXY_CALL_TIMEOUT, 30 * 1000).
 
@@ -73,8 +72,8 @@
                 all_member_fun = fun(_Addr) -> [] end,             % return members of local cluster
                 restore_targets_fun = fun() -> [] end,         % returns persisted cluster targets
                 save_members_fun = fun(_C,_M) -> ok end,       % persists remote cluster members
-                balancer_fun = fun(Addrs) -> Addrs end,        % registered balancer function
-                clusters = orddict:new() :: orddict:orddict()  % resolved clusters by name
+                clusters = orddict:new() :: orddict:orddict(),  % resolved clusters by name
+                polling_interval
                }).
 
 -export([start_link/0,
@@ -90,9 +89,13 @@
          get_known_clusters/0,
          get_connections/0,
          get_ipaddrs_of_cluster/1,
+         get_ipaddrs_of_cluster/2,
+         get_unshuffled_ipaddrs_of_cluster/1,
+         get_ipaddrs_of_cluster_single/1,
          set_gc_interval/1,
          stop/0,
          connect_to_clusters/0,
+         get_my_remote_ip_list/3,
          shuffle_remote_ipaddrs/1
          ]).
 
@@ -102,8 +105,7 @@
 
 %% internal functions
 -export([%ctrlService/5, ctrlServiceProcess/5,
-         round_robin_balancer/1, cluster_mgr_sites_fun/0,
-         get_my_members/1, get_all_members/1]).
+         cluster_mgr_sites_fun/0, get_my_members/1, get_all_members/1]).
 
 -export([ensure_valid_ip_addresses/1]).
 
@@ -180,8 +182,31 @@ get_my_members(MyAddr) ->
 get_all_members(MyAddr) ->
     gen_server:call(?SERVER, {get_all_members, MyAddr}, infinity).
 
-%% @doc Return a list of the known IP addresses of all nodes in the remote cluster.
 get_ipaddrs_of_cluster(ClusterName) ->
+    case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
+        {ok, Reply} ->
+            get_my_remote_ip_list(ClusterName, Reply, all);
+        Reply ->
+            Reply
+    end.
+
+get_ipaddrs_of_cluster(ClusterName, Return) ->
+    case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
+        {ok, Reply} ->
+            get_my_remote_ip_list(ClusterName, Reply, Return);
+        Reply ->
+            Reply
+    end.
+
+get_unshuffled_ipaddrs_of_cluster(ClusterName) ->
+    case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
+        {ok, Reply} ->
+            Reply;
+        _Reply ->
+            []
+    end.
+
+get_ipaddrs_of_cluster_single(ClusterName) ->
     case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
         {ok, Reply} ->
             shuffle_remote_ipaddrs(Reply);
@@ -215,12 +240,12 @@ init(Defaults) ->
             ok
     end,
     %% schedule a timer to poll remote clusters occasionaly
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
-    BalancerFun = fun(Addr) -> round_robin_balancer(Addr) end,
+    ClusterPollingInterval = app_helper:get_env(riak_repl, realtime_sink_cluster_polling_interval, 10),
+    lager:debug("cluster polling interval: ~p", [ClusterPollingInterval*1000]),
+    erlang:send_after(ClusterPollingInterval*1000, self(), poll_clusters_timer),
     MeNode = node(),
     State = register_defaults(Defaults, #state{
-                is_leader = false,
-                balancer_fun = BalancerFun}),
+                is_leader = false, polling_interval = ClusterPollingInterval*1000}),
 
     %% Schedule a delayed connection to know clusters
     schedule_cluster_connections(),
@@ -288,30 +313,15 @@ handle_call(get_connections, _From, State) ->
             NoLeaderResult = {ok, []},
             proxy_call(get_connections, NoLeaderResult, State)
     end;
-    
+
 
 %% Return possible IP addrs of nodes on the named remote cluster.
 %% If a leader has not been elected yet, return an empty list.
-%% This list will get rotated or randomized depending on the balancer
-%% function installed. Every time we poll the remote cluster or it
-%% pushes an update, the list will get reset to whatever the remote
-%% thinks is the best order. The first call here will return the most
-%% recently updated list and then it will rebalance and save for next time.
-%% So, if no updates come from the remote, we'll just keep cycling through
-%% the list of known members according to the balancer fun.
 handle_call({get_known_ipaddrs_of_cluster, {name, ClusterName}}, _From, State) ->
     case State#state.is_leader of
         true ->
-            %% Call a balancer function that will rotate or randomize
-            %% the list. Return original members and save reblanced ones
-            %% for next iteration.
             Members = members_of_cluster(ClusterName, State),
-            BalancerFun = State#state.balancer_fun,
-            RebalancedMembers = BalancerFun(Members),
-            lager:debug("Rebalancer: ~p -> ~p", [Members, RebalancedMembers]),
-            {reply, {ok, Members},
-             State#state{clusters=add_ips_to_cluster(ClusterName, RebalancedMembers,
-                                                     State#state.clusters)}};
+            {reply, {ok, Members}, State};
         false ->
             NoLeaderResult = {ok, []},
             proxy_call({get_known_ipaddrs_of_cluster, {name, ClusterName}},
@@ -323,10 +333,8 @@ handle_cast({set_leader_node, LeaderNode}, State) ->
     State2 = State#state{leader_node = LeaderNode},
     case node() of
         LeaderNode ->
-            %% oh crap, it's me!
             {noreply, become_leader(State2, LeaderNode)};
         _ ->
-            %% not me.
             {noreply, become_proxy(State2, LeaderNode)}
     end;
 
@@ -403,13 +411,13 @@ handle_cast(_Unhandled, _State) ->
     {error, unhandled}. %% this will crash the server
 
 %% it is time to poll all clusters and get updated member lists
-handle_info(poll_clusters_timer, State) when State#state.is_leader == true ->
+handle_info(poll_clusters_timer, State=#state{polling_interval = PI}) when State#state.is_leader == true ->
     Connections = riak_core_cluster_conn_sup:connections(),
     _ = [Pid ! {self(), poll_cluster} || {_Remote, Pid} <- Connections],
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
+    erlang:send_after(PI, self(), poll_clusters_timer),
     {noreply, State};
-handle_info(poll_clusters_timer, State) ->
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
+handle_info(poll_clusters_timer, State=#state{polling_interval = PI}) ->
+    erlang:send_after(PI, self(), poll_clusters_timer),
     {noreply, State};
 
 %% Remove old clusters that no longer have any IP addresses associated with them.
@@ -617,14 +625,8 @@ remove_remote(RemoteName, State) ->
             State#state{clusters = UpdatedClusters}
     end.
 
-%% Simple Round Robin Balancer moves head to tail each time called.
-round_robin_balancer([]) ->
-    [];
-round_robin_balancer([Addr|Addrs]) ->
-    Addrs ++ [Addr].
-
 %% Convert an inet:address to a string if needed.
-string_of_ip(IP) when is_tuple(IP) ->    
+string_of_ip(IP) when is_tuple(IP) ->
     inet_parse:ntoa(IP);
 string_of_ip(IP) ->
     IP.
@@ -687,10 +689,10 @@ remove_ips_from_all_clusters(Addrs, Clusters) ->
                 Clusters).
 
 %% Add Members to Name'd cluster. Returns revised clusters orddict.
-add_ips_to_cluster(Name, RebalancedMembers, Clusters) ->
+add_ips_to_cluster(Name, Members, Clusters) ->
     orddict:store(Name,
                   #cluster{name = Name,
-                           members = RebalancedMembers,
+                           members = Members,
                            last_conn = os:timestamp()},
                   Clusters).
 
@@ -741,7 +743,7 @@ cluster_mgr_sites_fun() ->
     %% get cluster names from cluster manager
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
     Clusters = riak_repl_ring:get_clusters(Ring),
-    [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].    
+    [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].
 
 %% @doc If the current leader, connect to all clusters that have been
 %%      currently persisted in the ring.
@@ -750,12 +752,13 @@ connect_to_persisted_clusters(State) ->
         true ->
             Fun = State#state.restore_targets_fun,
             ClusterTargets = Fun(),
-            lager:debug("Cluster Manager will connect to clusters: ~p", 
+            lager:debug("Cluster Manager will connect to clusters: ~p",
                         [ClusterTargets]),
             connect_to_targets(ClusterTargets);
         _ ->
             ok
     end.
+
 
 shuffle_with_seed(List, Seed={_,_,_}) ->
     _ = rand:seed(exrop, Seed),
@@ -764,9 +767,11 @@ shuffle_with_seed(List, Seed) ->
     <<_:10,S1:50,S2:50,S3:50>> = crypto:hash(sha, term_to_binary(Seed)),
     shuffle_with_seed(List, {S1,S2,S3}).
 
+add_primary_value(List) ->
+    [{IPPort, false} || IPPort <- List].
 
 shuffle_remote_ipaddrs([]) ->
-  {ok, []};
+    {ok, []};
 shuffle_remote_ipaddrs(RemoteUnsorted) ->
     {ok, MyRing} = riak_core_ring_manager:get_my_ring(),
     SortedNodes = lists:sort(riak_core_ring:all_members(MyRing)),
@@ -782,8 +787,212 @@ shuffle_remote_ipaddrs(RemoteUnsorted) ->
             SplitPos = ((MyPos-1) rem length(RemoteAddrs)),
             case lists:split(SplitPos,RemoteAddrs) of
                 {BeforeBuddy,[Buddy|AfterBuddy]} ->
-                    {ok, [Buddy | shuffle_with_seed(AfterBuddy ++ BeforeBuddy, node())]}
+                    {ok, add_primary_value([Buddy | shuffle_with_seed(AfterBuddy ++ BeforeBuddy, node())])}
             end;
         false ->
-            {ok, shuffle_with_seed(lists:sort(RemoteUnsorted), node())}
+            {ok, add_primary_value(shuffle_with_seed(lists:sort(RemoteUnsorted), node()))}
+    end.
+
+
+shuffle(List) ->
+    <<_:10,S1:50,S2:50,S3:50>> = crypto:strong_rand_bytes(20),
+    _ = random:seed({S1,S2,S3}),
+    [E || {E, _} <- lists:keysort(2, [{Elm, random:uniform()} || Elm <- List])].
+
+
+%% The purpose of this function is to calculate for all nodes the correct nodes they should connect too for realtime
+%% replication. Once we have calculated all connections for all nodes we can take our own connections for a given node. The
+%% function relies on the fact that the rtsource_conn_data_mgr leader will eventually provide consistent data with regard
+%% too currently active realtime connections, and UP source and sink nodes.
+get_my_remote_ip_list(_Remote, [], _Return) ->
+    {ok, []};
+get_my_remote_ip_list(Remote, RemoteUnsorted, Return) ->
+    case riak_repl2_rtsource_conn_data_mgr:read(active_nodes) of
+        no_leader ->
+            {ok, []};
+        %% SourceNodes = [SourceNode1, SourceNode3, SourceNode2 ...]
+        %% They are ordered by chronological time with regard to the time the node was UP in riak_kv
+        SourceNodes ->
+            SinkNodes = lists:sort(RemoteUnsorted),
+            SinkNodesLink = lists:seq(1, length(SinkNodes)),
+            %% we reverse the list so that the latest addition to the source cluster is the end of the list (This is important)
+            SourceSortedNodes = lists:reverse(SourceNodes),
+            NumberOfSinkNodes = length(SinkNodes),
+            NumberOfSourceNodes = length(SourceSortedNodes),
+            %% SourceNodesTagged = [{Index, SourceNode} ...] ->
+            %% 2 Cases:
+            %% 1) 2 source nodes can have the same index as we use modulo arthemtic to index with against the length of the sink nodes
+            %% 2) 1 source node can have multiple indexes
+            SourceNodesTagged = case NumberOfSinkNodes < NumberOfSourceNodes of
+                                    true ->
+                                        fix_indecies(NumberOfSinkNodes, lists:reverse(lists:zip(lists:seq(0, length(SourceSortedNodes)-1), SourceSortedNodes)), []);
+                                    false ->
+                                        lists:zip(lists:seq(1, length(SourceSortedNodes)), SourceSortedNodes)
+                                end,
+            %% SinkNodesLinkTagged = [{Index, Position in sink node list}, ...]
+            SinkNodesLinkTagged = lists:zip(lists:seq(0, length(SinkNodesLink)-1), SinkNodesLink),
+            case lists:keyfind(node(), 2, SourceNodesTagged) of
+                false ->
+                    % This node is not part of the cluster
+                    % Therefore should not connect to the othe cluster as part of repl for this
+                    lager:info("Node: ~p is not yet part of the regonised source nodes: ~p in the cluster, therefore no ", [node(), SourceSortedNodes]),
+                    {ok, []};
+                _ ->
+                    %% AllPrimariesList is a list of [{SourceNode, Index1}, ...]. The number of indexes a given source node has depends on its index in the list of source nodes,
+                    %% and the number of sink nodes. [One source node can have 1 or more indexes to be give a connection too]
+                    AllPrimariesList = [ {So, Si}  || {SinkIndex, Si} <- SinkNodesLinkTagged, {SourceIndex, So} <- SourceNodesTagged, SinkIndex rem NumberOfSourceNodes == SourceIndex-1],
+                    %% AllPrimariesDict is a dictionary with key-value pairs of {SourceNode, [Index1, Index2 ...]}
+                    AllPrimariesDict = build_primary_dict(AllPrimariesList, dict:new()),
+                    case link_addrs(AllPrimariesDict, SinkNodes, Remote) of
+                        no_leader ->
+                            {ok, []};
+                        %% FinalLinkedNodes is a dictionary
+                        %% Key-Value -> {Index, SinkNode}
+                        FinalLinkedNodes ->
+                            MyIdx = dict:fetch(node(), AllPrimariesDict),
+                            NotMyIdx = lists:seq(1,length(SinkNodes)) -- MyIdx,
+                            Primary = [{X,true} || X <- [dict:fetch(Idx, FinalLinkedNodes) || Idx <- MyIdx]],
+                            Secondary = [{X,false} || X <- [dict:fetch(Idx, FinalLinkedNodes) || Idx <- NotMyIdx]],
+                            filter_output(Primary, shuffle(Secondary), Return)
+                    end
+            end
+    end.
+
+
+%% This was used instead of dict:from_list because we a source node can have multiple indexes, and from_list would not
+%% append the indexes into a list for the value
+build_primary_dict([], Dict) ->
+    Dict;
+build_primary_dict([{Key, Value}| Rest], Dict) ->
+    Dict2 = dict:append(Key, Value, Dict),
+    build_primary_dict(Rest, Dict2).
+
+%% link_addrs attempts to link and keep as many currently active connections active and untouched before matching
+%% sink nodes to an index which would cause active connections to be dropped and made by other nodes.
+%% Output: dict -> Key-Value: {Index, SinkNode}
+link_addrs(AllPrimariesDict, SinkNodes, Remote) ->
+    case riak_repl2_rtsource_conn_data_mgr:read(realtime_connections, Remote) of
+        no_leader ->
+            no_leader;
+        %% ActiveConnsDict: this is a dictionary of active realtime connections
+        %% Key-value -> {SourceNodeA, [SinkNode1, SinkNode3 ...]}
+        ActiveConnsDict ->
+            ActiveSources = dict:fetch_keys(ActiveConnsDict),
+
+            %% link_active_addr attempts to match as many active source -> sink node connections as possible before matching
+            %% the unlinked/unactive addresses
+            {LinkedActiveNodes, LeftOverSinkNodes, NewPrimaryLinkDict} =
+                link_active_addr({ActiveConnsDict, ActiveSources}, AllPrimariesDict, dict:new(), SinkNodes),
+
+            lager:debug("
+              Old Primary Dict: ~p
+              Active Sources: ~p
+              Source Nodes That Are Not Active: ~p
+              Left Over Sink Nodes: ~p
+              Linked Sink Nodes: ~p", [AllPrimariesDict, ActiveSources, NewPrimaryLinkDict, LeftOverSinkNodes, LinkedActiveNodes]),
+
+            Unlinked = lists:usort(unlinked_indexes(dict:to_list(NewPrimaryLinkDict), [])),
+
+            %% With the remaining sink nodes that have not been linked to an index yet we just loop through and link them.
+            %% So all sink nodes are matched to an index
+            FinalLinkedNodesDict = link_unactive_addr(Unlinked, LeftOverSinkNodes, LinkedActiveNodes),
+            lager:debug("All linked Nodes Dict: ~p", [FinalLinkedNodesDict]),
+            FinalLinkedNodesDict
+    end.
+
+%% calculates the list of indexes that still need to linked to a source node
+unlinked_indexes([], ListOfIndexes) ->
+    lists:reverse(ListOfIndexes);
+unlinked_indexes([{_Node, []}|Rest], ListOfIndexes) ->
+    unlinked_indexes(Rest, ListOfIndexes);
+unlinked_indexes([{Node, [Idx|Idxs]}|Rest], ListOfIndexes) ->
+    unlinked_indexes( [{Node,Idxs}|Rest], [Idx|ListOfIndexes]).
+
+%% matches Index to unlinked SinkNodes
+link_unactive_addr([],[], AllLinkedDict) ->
+    AllLinkedDict;
+link_unactive_addr([],SinkNodes,AllLinkedDict) ->
+    lager:warning("Spare Sink Nodes not linked!,
+      Unlinked indexes: ~p
+      Left Over Sink Nodes: ~p", [[], SinkNodes]),
+    AllLinkedDict;
+link_unactive_addr(Indexes,[],AllLinkedDict) ->
+    lager:warning("Spare Indexes not linked!,
+      Unlinked indexes: ~p
+      Left Over Sink Nodes: ~p", [Indexes, []]),
+    AllLinkedDict;
+link_unactive_addr([Idx|Idxs], [SinkNode|Y], LinkedDict) ->
+    case dict:is_key(Idx, LinkedDict) of
+        true ->
+            link_unactive_addr(Idxs, [SinkNode|Y], LinkedDict);
+        false ->
+            NewLinkedDict = dict:store(Idx, SinkNode, LinkedDict),
+            link_unactive_addr(Idxs, Y, NewLinkedDict)
+    end.
+
+%% Using realtime connection data, we match sink nodes to indexes that are already connected to there source node counter part.
+link_active_addr({_ActiveConnsDict,[]},AllPrimariesDict, LinkedActive,SinkNodes) ->
+    {LinkedActive, SinkNodes, AllPrimariesDict};
+link_active_addr({ActiveConnsDict, [ActiveSourceNode|Rest]}, AllPrimariesDict, LinkedActiveDict, SinkNodes) ->
+    ConnectedSinkNodes = dict:fetch(ActiveSourceNode, ActiveConnsDict),
+    case dict:is_key(ActiveSourceNode, AllPrimariesDict) of
+        true ->
+            {NewLinkActiveDict, NewSinkNodes, NewAllPrimariesDict} = link_active_node_connections(ActiveSourceNode, ConnectedSinkNodes, AllPrimariesDict, LinkedActiveDict, SinkNodes),
+            link_active_addr({ActiveConnsDict, Rest}, NewAllPrimariesDict, NewLinkActiveDict, NewSinkNodes);
+        false ->
+            link_active_addr({ActiveConnsDict, Rest}, AllPrimariesDict, LinkedActiveDict, SinkNodes)
+    end.
+
+
+link_active_node_connections(_ActiveSourceNode, [], AllPrimariesDict, LinkedActiveDict, SinkNodes) ->
+    {LinkedActiveDict, SinkNodes, AllPrimariesDict};
+link_active_node_connections(ActiveSourceNode, [{IPPort, Primary}|Rest], AllPrimariesDict, LinkedActiveDict, SinkNodes) ->
+    case Primary of
+        false ->
+            link_active_node_connections(ActiveSourceNode, Rest, AllPrimariesDict, LinkedActiveDict, SinkNodes);
+        true ->
+            [Idx|Idxs] = dict:fetch(ActiveSourceNode, AllPrimariesDict),
+            NewLinkedActiveDict = dict:store(Idx, IPPort,  LinkedActiveDict),
+            NewSinkNodes = lists:delete(IPPort, SinkNodes),
+            case {dict:is_key(Idx, LinkedActiveDict), lists:member(IPPort, SinkNodes), Idxs} of
+                {true, _, []} ->
+                    %% Index has already been linked to a SINK IP-PORT; Idxs = []
+                    NewAllPrimariesDict = dict:erase(ActiveSourceNode, AllPrimariesDict),
+                    {LinkedActiveDict, SinkNodes, NewAllPrimariesDict};
+                {true, _, _} ->
+                    %% Index has already been linked to a SINK IP-PORT; Idxs /= []
+                    NewAllPrimariesDict = dict:store(ActiveSourceNode, Idxs, AllPrimariesDict),
+                    link_active_node_connections(ActiveSourceNode, Rest, NewAllPrimariesDict, LinkedActiveDict, SinkNodes);
+                {false, true, []} ->
+                    %% Index has not been linked to a SINK IP-PORT; and the SINK IP-PORT has not been linked yet; Idxs = []
+                    NewAllPrimariesDict = dict:erase(ActiveSourceNode, AllPrimariesDict),
+                    {NewLinkedActiveDict, NewSinkNodes, NewAllPrimariesDict};
+                {false, true, _} ->
+                    %% Index has not been linked to a SINK IP-PORT; and the SINK IP-PORT has not been linked yet; Idxs /= []
+                    NewAllPrimariesDict = dict:store(ActiveSourceNode, Idxs, AllPrimariesDict),
+                    link_active_node_connections(ActiveSourceNode, Rest, NewAllPrimariesDict, NewLinkedActiveDict, NewSinkNodes);
+                {false, false, _} ->
+                    %% Index has not been linked to a SINK IP-PORT; and the SINK IP-PORT has already been linked to another index; Idxs /= []
+                    link_active_node_connections(ActiveSourceNode, Rest, AllPrimariesDict, LinkedActiveDict, SinkNodes)
+            end
+    end.
+
+
+
+fix_indecies(_NumberOfSinkNodes, [], Output) ->
+    Output;
+fix_indecies(NumberOfSinkNodes, [{Index, Node} | Rest], Output) ->
+    fix_indecies(NumberOfSinkNodes, Rest, [{(Index rem NumberOfSinkNodes)+1, Node} | Output]).
+
+
+filter_output(Primary, Secondary, Return) ->
+    case Return of
+        primary ->
+            {ok, Primary};
+        secondary->
+            {ok, Secondary};
+        split ->
+            {ok, {Primary, Secondary}};
+        _->
+            {ok, Primary++Secondary}
     end.

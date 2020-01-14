@@ -102,7 +102,7 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     ToValidate = Started -- ToStop,
     _ = [case lists:keyfind(Remote, 1, Connections) of
              {_, PID} ->
-                 riak_repl2_rtsource_conn:maybe_rebalance_delayed(PID);
+                 riak_repl2_rtsource_conn_mgr:maybe_rebalance_delayed(PID);
              false ->
                  ok
          end || Remote <- ToValidate ],
@@ -135,11 +135,14 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     end.
 
 register_remote_locator() ->
-    Locator = fun(_, {use_only, Addrs}) ->
-                       {ok, Addrs};
-                 (Name, _Policy) ->
-                       riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name)
-              end,
+    Locator =
+        fun(_, {use_only, Addrs}) ->
+            {ok, Addrs};
+            (Name, legacy) ->
+                riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name);
+            (Name, _Policy) ->
+                riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name)
+        end,
     ok = riak_core_connection_mgr:register_locator(rt_repl, Locator).
 
 %% Register an active realtime sink (supervised under ranch)
@@ -189,7 +192,7 @@ init([]) ->
 handle_call(status, _From, State = #state{sinks = SinkPids}) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     Sources = [try
-                   riak_repl2_rtsource_conn:status(Pid, Timeout)
+                   riak_repl2_rtsource_conn_mgr:get_all_status(Pid, Timeout)
                catch
                    _:_ ->
                        {Remote, Pid, unavailable}
@@ -242,13 +245,17 @@ do_ring_trans(F, A) ->
     end.
 
 set_bucket_meta(Obj) ->
-    M = orddict:new(),
+    M0 = orddict:new(),
+    ObjectFilteringRules = riak_repl2_object_filter:get_realtime_blacklist(Obj),
+    M = orddict:store(?BT_META_BLACKLIST, ObjectFilteringRules, M0),
     case riak_object:bucket(Obj) of
-        {Type, _B} ->
+        {Type, B} ->
             PropsHash = riak_repl_bucket_type_util:property_hash(Type),
             M1 = orddict:store(?BT_META_TYPED_BUCKET, true, M),
             M2 = orddict:store(?BT_META_TYPE, Type, M1),
-            orddict:store(?BT_META_PROPS_HASH, PropsHash, M2);
-        _B ->
-            orddict:store(?BT_META_TYPED_BUCKET, false, M)
+            M3 = orddict:store(?BT_META_PROPS_HASH, PropsHash, M2),
+            orddict:store(?BT_META_BUCKET_NAME, B, M3);
+        B ->
+            M2 = orddict:store(?BT_META_TYPED_BUCKET, false, M),
+            orddict:store(?BT_META_BUCKET_NAME, B, M2)
     end.

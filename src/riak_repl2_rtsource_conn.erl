@@ -44,13 +44,13 @@
 %% API
 -export([start_link/1,
          stop/1,
+         get_helper_pid/1,
          status/1, status/2,
-         address/1, maybe_rebalance_delayed/1,
+         get_address/1,
+         get_socketname_primary/1,
+         connected/7,
          legacy_status/1, legacy_status/2]).
 
-%% connection manager callbacks
--export([connected/6,
-         connect_failed/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -78,7 +78,7 @@
 
 -record(state, {remote,    % remote name
                 address,   % {IP, Port}
-                connection_ref, % reference handed out by connection manager
+                primary,
                 transport, % transport module
                 socket,    % socket to use with transport
                 peername,  % cached when socket becomes active
@@ -91,7 +91,6 @@
                 hb_timeout_tref,% heartbeat timeout timer reference
                 hb_sent_q,   % queue of heartbeats now() that were sent
                 hb_rtt,    % RTT in milliseconds for last completed heartbeat
-                rb_timeout_tref,% Rebalance timeout timer reference
                 cont = <<>>}). % continuation from previous TCP buffer
 
 %% API - start trying to send realtime repl to remote site
@@ -101,21 +100,16 @@ start_link(Remote) ->
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
 
-address(Pid) ->
-    gen_server:call(Pid, address, ?LONG_TIMEOUT).
-
-%% @doc Check if we need to rebalance.
-%% If we do, delay some time, recheck that we still
-%% need to rebalance, and if we still do, then execute
-%% reconnection to the better sink node.
-maybe_rebalance_delayed(Pid) ->
-    gen_server:cast(Pid, rebalance_delayed).
-
 status(Pid) ->
     status(Pid, infinity).
 
 status(Pid, Timeout) ->
-    gen_server:call(Pid, status, Timeout).
+    try
+        gen_server:call(Pid, status, Timeout)
+    catch
+        _:_ ->
+            []
+    end.
 
 %% legacy status -- look like a riak_repl_tcp_server
 legacy_status(Pid) ->
@@ -124,14 +118,13 @@ legacy_status(Pid) ->
 legacy_status(Pid, Timeout) ->
     gen_server:call(Pid, legacy_status, Timeout).
 
-%% connection manager callbacks
-connected(Socket, Transport, Endpoint, Proto, RtSourcePid, _Props) ->
+connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
         gen_server:call(RtSourcePid,
-                        {connected, Socket, Transport, Endpoint, Proto},
-                        ?LONG_TIMEOUT)
+          {connected, Socket, Transport, IPPort, Proto, Primary},
+          ?LONG_TIMEOUT)
     catch
         _:Reason ->
             lager:warning("Unable to contact RT source connection process (~p). Killing it to force reconnect.",
@@ -140,28 +133,30 @@ connected(Socket, Transport, Endpoint, Proto, RtSourcePid, _Props) ->
             ok
     end.
 
-connect_failed(_ClientProto, Reason, RtSourcePid) ->
-    gen_server:cast(RtSourcePid, {connect_failed, self(), Reason}).
+get_helper_pid(RtSourcePid) ->
+  gen_server:call(RtSourcePid, get_helper_pid).
+
+get_address(Pid) ->
+  gen_server:call(Pid, address, ?LONG_TIMEOUT).
+
+get_socketname_primary(Pid) ->
+  gen_server:call(Pid, get_socketname_primary).
+
+% ======================================================================================================================
 
 %% gen_server callbacks
 
 %% Initialize
 init([Remote]) ->
-    %% Todo: check for bad remote name
-    lager:debug("connecting to remote ~p", [Remote]),
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC) of
-        {ok, Ref} ->
-            lager:debug("connection ref ~p", [Ref]),
-            {ok, #state{remote = Remote, connection_ref = Ref}};
-        {error, Reason}->
-            lager:warning("Error connecting to remote"),
-            {stop, Reason}
-    end.
+  {ok, #state{remote = Remote}}.
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
-handle_call(address, _From, State = #state{ address=A }) ->
-    {reply, {ok, A}, State};
+  {stop, {shutdown, routine}, ok, State};
+handle_call(address, _From, State = #state{address=A, primary=P}) ->
+    {reply, {A,P}, State};
+handle_call(get_socketname_primary, _From, State=#state{socket = S, primary = P}) ->
+  {ok, Peername} = inet:sockname(S),
+  {reply, {Peername, P}, State};
 handle_call(status, _From, State =
                 #state{remote = R, address = _A, transport = T, socket = S,
                        helper_pid = H,
@@ -215,8 +210,7 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
          {strategy, realtime},
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
-%% Receive connection from connection manager
-handle_call({connected, Socket, Transport, EndPoint, Proto}, _From,
+handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
             State = #state{remote = Remote}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
@@ -236,9 +230,11 @@ handle_call({connected, Socket, Transport, EndPoint, Proto}, _From,
                                  proto = Proto,
                                  peername = peername(Transport, Socket),
                                  helper_pid = HelperPid,
-                                 ver = Ver},
-            lager:info("Established realtime connection to site ~p address ~s",
-                       [Remote, peername(State2)]),
+                                 ver = Ver,
+                                 primary = Primary},
+            {ok, Peername} = inet:sockname(Socket),
+            lager:info("Established realtime connection to site ~p address ~s, [data socket: ~p]",
+                       [Remote, peername(State2), Peername]),
 
             case Proto of
                 {realtime, _OurVer, {1, 0}} ->
@@ -256,19 +252,13 @@ handle_call({connected, Socket, Transport, EndPoint, Proto}, _From,
             end;
         ER ->
             {reply, ER, State}
-    end.
+    end;
 
-%% Connection manager failed to make connection
-%% TODO: Consider reissuing connect against another host - maybe that
-%%   functionality should be in the connection manager (I want a connection to site X)
-handle_cast({connect_failed, _HelperPid, Reason},
-            State = #state{remote = Remote}) ->
-    lager:warning("Realtime replication connection to site ~p failed - ~p\n",
-                  [Remote, Reason]),
-    {stop, normal, State};
+handle_call(get_helper_pid, _From, State=#state{helper_pid = H}) ->
+    {reply, H, State}.
 
-handle_cast(rebalance_delayed, State) ->
-    {noreply, maybe_rebalance(State, delayed)}.
+handle_cast(_Request, State) ->
+    {noreply, State}.
 
 
 handle_info({Proto, _S, TcpBin}, State= #state{cont = Cont})
@@ -285,17 +275,14 @@ handle_info({Closed, _S},
             lager:warning("Realtime connection ~s to ~p closed with partial receive of ~b bytes\n",
                           [peername(State), Remote, NumBytes])
     end,
-    %% go to sleep for 1s so a sink that opens the connection ok but then
-    %% dies will not make the server restart too fst.
-    timer:sleep(1000),
-    {stop, normal, State};
+    {stop, {shutdown, Closed}, State};
 handle_info({Error, _S, Reason},
             State = #state{remote = Remote, cont = Cont})
   when Error == tcp_error; Error == ssl_error ->
     riak_repl_stats:rt_source_errors(),
     lager:warning("Realtime connection ~s to ~p network error ~p - ~b bytes pending\n",
                   [peername(State), Remote, Reason, size(Cont)]),
-    {stop, normal, State};
+    {stop, {shutdown, {Error, Reason}}, State};
 
 handle_info(send_heartbeat, State) ->
     {noreply, send_heartbeat(State)};
@@ -317,84 +304,23 @@ handle_info({heartbeat_timeout, HBSent}, State = #state{hb_sent_q = HBSentQ,
             lager:warning("Realtime connection ~s to ~p heartbeat timeout "
                           "after ~p seconds\n",
                           [peername(State), Remote, HBTimeout]),
-            lager:debug("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
-            {stop, normal, State}
+            lager:info("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
+            {stop, {shutdown, heartbeat_timeout}, State}
     end;
-handle_info(rebalance_now, State) ->
-    {noreply, maybe_rebalance(State#state{rb_timeout_tref = undefined}, now)};
+
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
 
-terminate(_Reason, #state{helper_pid=HelperPid, remote=Remote}) ->
-    riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-    catch riak_repl2_rtsource_helper:stop(HelperPid),
+terminate(Reason, #state{socket = Socket, transport = Transport, address = A, primary = P, helper_pid = H}) ->
+    catch riak_repl2_rtsource_helper:stop(H),
+    Key = {A,P},
+    lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, Key]),
+    Transport:close(Socket),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-maybe_rebalance(State, now) ->
-    case should_rebalance(State) of
-        no ->
-            State;
-        {yes, UsefulAddrs} ->
-            reconnect(State, UsefulAddrs)
-    end;
-maybe_rebalance(State, delayed) ->
-    case State#state.rb_timeout_tref of
-        undefined ->
-            RbTimeoutTref = erlang:send_after(rebalance_delay_millis(), self(), rebalance_now),
-            State#state{rb_timeout_tref = RbTimeoutTref};
-        _ ->
-            %% Already sent a "rebalance_now"
-            State
-    end.
-
-should_rebalance(#state{address=ConnectedAddr, remote=Remote}) ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    Addrs = riak_repl_ring:get_clusterIpAddrs(Ring, Remote),
-    {ok, ShuffledAddrs} = riak_core_cluster_mgr:shuffle_remote_ipaddrs(Addrs),
-    lager:debug("ShuffledAddrs: ~p, ConnectedAddr: ~p", [ShuffledAddrs, ConnectedAddr]),
-    case (ShuffledAddrs /= []) andalso same_ipaddr(ConnectedAddr, hd(ShuffledAddrs)) of
-        true ->
-            no; % we're already connected to the ideal buddy
-        false ->
-            %% compute the addrs that are "better" than the currently connected addr
-            BetterAddrs = lists:filter(fun(A) -> not same_ipaddr(ConnectedAddr, A) end,
-                                       ShuffledAddrs),
-            %% remove those that are blacklisted anyway
-            UsefulAddrs = riak_core_connection_mgr:filter_blacklisted_ipaddrs(BetterAddrs),
-            lager:debug("BetterAddrs: ~p, UsefulAddrs ~p", [BetterAddrs, UsefulAddrs]),
-            case UsefulAddrs of
-                [] ->
-                    no;
-                UsefulAddrs ->
-                    {yes, UsefulAddrs}
-            end
-    end.
-
-rebalance_delay_millis() ->
-    MaxDelaySecs =
-        app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 5*60),
-    round(MaxDelaySecs * rand:uniform(1000)).
-
-reconnect(State=#state{remote=Remote}, BetterAddrs) ->
-    lager:info("trying reconnect to one of: ~p", [BetterAddrs]),
-
-    %% if we have a pending connection attempt - drop that
-    riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-
-    lager:debug("re-connecting to remote ~p", [Remote]),
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, BetterAddrs}) of
-        {ok, Ref} ->
-            lager:debug("connecting ref ~p", [Ref]),
-            State#state{ connection_ref = Ref};
-        {error, Reason}->
-            lager:warning("Error connecting to remote ~p (ignoring as we're reconnecting)", [Reason]),
-            State
-    end.
-
 
 cancel_timer(undefined) -> ok;
 cancel_timer(TRef)      -> _ = erlang:cancel_timer(TRef).
@@ -490,14 +416,6 @@ schedule_heartbeat(State) ->
     lager:warning("Heartbeat is misconfigured and is not a valid integer."),
     State.
 
-same_ipaddr({IP,Port}, {IP,Port}) ->
-    true;
-same_ipaddr({_IP1,_Port1}, {_IP2,_Port2}) ->
-    false;
-same_ipaddr(X,Y) ->
-    lager:warning("ipaddrs have unexpected format! ~p, ~p", [X,Y]),
-    false.
-
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
@@ -522,6 +440,9 @@ setup() ->
     riak_repl_test_util:abstract_stats(),
     riak_repl_test_util:abstract_stateful(),
     % ?debugMsg("leave setup()"),
+
+    folsom:start(),
+
     ok.
 
 cleanup(_Ctx) ->
@@ -611,6 +532,7 @@ connect(RemoteName) ->
                   {bytes,0},
                   {max_bytes,104857600},
                   {consumers,[]},
-                  {overload_drops,0}], RTQStats).
+                  {overload_drops,0},
+                  {consumer_latency,[]}], RTQStats).
 
 -endif.

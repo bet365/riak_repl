@@ -290,7 +290,7 @@ handle_info({heartbeat_timeout, HBSent}, State = #state{hb_sent_q = HBSentQ,
                                                         hb_timeout_tref = HBTRef,
                                                         hb_timeout = HBTimeout,
                                                         remote = Remote}) ->
-    TimeSinceTimeout = timer:now_diff(now(), HBSent) div 1000,
+    TimeSinceTimeout = timer:now_diff(os:timestamp(), HBSent) div 1000,
 
     %% hb_timeout_tref is the authority of whether we should
     %% restart the conection on heartbeat timeout or not.
@@ -321,7 +321,6 @@ terminate(Reason, #state{socket = Socket, transport = Transport, address = A, pr
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
 
 cancel_timer(undefined) -> ok;
 cancel_timer(TRef)      -> _ = erlang:cancel_timer(TRef).
@@ -362,7 +361,7 @@ recv(TcpBin, State = #state{remote = Name,
             %% reschedule next.
             {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
             lager:debug("got heartbeat, hb_sent: ~w", [HBSent]),
-            HBRTT = timer:now_diff(now(), HBSent) div 1000,
+            HBRTT = timer:now_diff(os:timestamp(), HBSent) div 1000,
             _ = cancel_timer(HBTRef),
             State2 = State#state{hb_sent_q = HBSentQ2,
                                  hb_timeout_tref = undefined,
@@ -390,7 +389,7 @@ send_heartbeat(State = #state{hb_timeout = HBTimeout,
 
     % Using now as need a unique reference for this heartbeat
     % to spot late heartbeat timeout messages
-    Now = now(),
+    Now = os:timestamp(),
 
     riak_repl2_rtsource_helper:send_heartbeat(HelperPid),
     TRef = erlang:send_after(timer:seconds(HBTimeout), self(), {heartbeat_timeout, Now}),

@@ -693,7 +693,7 @@ add_ips_to_cluster(Name, Members, Clusters) ->
     orddict:store(Name,
                   #cluster{name = Name,
                            members = Members,
-                           last_conn = erlang:now()},
+                           last_conn = os:timestamp()},
                   Clusters).
 
 %% Setup a connection to all given cluster targets
@@ -761,8 +761,8 @@ connect_to_persisted_clusters(State) ->
 
 
 shuffle_with_seed(List, Seed={_,_,_}) ->
-    _ = random:seed(Seed),
-    [E || {E, _} <- lists:keysort(2, [{Elm, random:uniform()} || Elm <- List])];
+    _ = rand:seed(exrop, Seed),
+    [E || {E, _} <- lists:keysort(2, [{Elm, rand:uniform()} || Elm <- List])];
 shuffle_with_seed(List, Seed) ->
     <<_:10,S1:50,S2:50,S3:50>> = crypto:hash(sha, term_to_binary(Seed)),
     shuffle_with_seed(List, {S1,S2,S3}).

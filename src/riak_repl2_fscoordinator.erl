@@ -60,8 +60,8 @@
 -endif.
 
 -record(stat_cache, {
-    worker :: {pid(), reference()},
-    refresh_timer :: reference(),
+    worker :: {pid(), reference()} | undefined,
+    refresh_timer :: reference() | undefined,
     refresh_interval = app_helper:get_env(riak_repl, fullsync_stat_refresh_interval, ?DEFAULT_STAT_REFRESH_INTERVAL) :: pos_integer(),
     last_refresh = riak_core_util:moment() :: 'undefined' | pos_integer(),
     stats = [] :: [tuple()]
@@ -575,9 +575,10 @@ handle_abnormal_exit(ExitType, Pid, _Cause, {value, PartitionWithSource, Running
                     Dropped = [Partition#partition_info.index | State4#state.dropped],
                     Purgatory = queue:filter(fun({P, _}) -> P =/= Partition end,
                                              State4#state.purgatory),
-                    {noreply, State4#state{error_exits = ErrorExits1,
-                                           purgatory = Purgatory,
-                                           dropped = Dropped}};
+                    maybe_complete_fullsync(Running,
+                                            State4#state{error_exits = ErrorExits1,
+                                                            purgatory = Purgatory,
+                                                            dropped = Dropped});
                 true ->
                     Now = riak_core_util:moment(),
                     Purgatory = queue:in({Partition, Now}, State4#state.purgatory),
@@ -919,7 +920,7 @@ sort_partitions(Ring) ->
     %% collisions later
     Partitions = lists:zip(RawPartitions,lists:seq(1,length(RawPartitions))),
     %% pick a random partition in the ring
-    R = crypto:rand_uniform(0, length(Partitions)),
+    R = rand:uniform(length(Partitions)),
     %% pretend that the ring starts at offset R
     {A, B} = lists:split(R, Partitions),
     OffsetPartitions = B ++ A,
@@ -1138,7 +1139,10 @@ test_purgatory_wait_time() ->
     FakeNode = 'not@anode.net',
     FakePid = fake_pid(),
     PartInfo = #partition_info{running_source= FakePid, index=Index, node=FakeNode},
-    State = #state{running_sources=[PartInfo], transport=mock_transport},
+    State =
+        #state{running_sources=[PartInfo],
+                transport=mock_transport,
+                fullsync_start_time = riak_core_util:moment()},
     meck:expect(riak_core_util, moment, [],
                 meck:seq([1, 2, 6])),
 
@@ -1194,9 +1198,11 @@ test_retry_count() ->
 
     #state{purgatory=Purgatory,
            dropped=Dropped,
-           error_exits=ErrorExits} = retry(0,
-                                           MaxRetriesExpected,
-                                           #state{transport=mock_transport}),
+           error_exits=ErrorExits} =
+        retry(0,
+                MaxRetriesExpected,
+                #state{transport=mock_transport,
+                        fullsync_start_time = riak_core_util:moment()}),
 
     ?assertEqual(1, ErrorExits),
     ?assertEqual(1, length(Dropped)),
@@ -1237,6 +1243,10 @@ setup() ->
     meck:new(riak_core, [passthrough]),
     %% make a fake transport
     meck:new(mock_transport, [non_strict]),
+    meck:new(riak_core_connection),
+    meck:expect(riak_core_connection,
+                symbolic_clustername,
+                fun() -> "test_cluster" end),
     {OrigRetries, OrigWait}.
 
 teardown({OrigRetries, OrigWait}) ->

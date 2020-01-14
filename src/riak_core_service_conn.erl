@@ -1,11 +1,11 @@
 -module(riak_core_service_conn).
--behavior(gen_fsm).
+-behavior(gen_fsm_compat).
 
 -include("riak_core_connection.hrl").
 
 % external api; generally used by ranch
 -export([start_link/4]).
-% gen_fsm
+% gen_fsm_compat
 -export([init/1]).
 -export([
     wait_for_hello/3, wait_for_hello/2,
@@ -43,7 +43,7 @@ init({Listener, Socket, Transport, InArgs}) ->
     ok = Transport:setopts(Socket, [{active, once}]),
     TransportMsgs = Transport:messages(),
     State = #state{transport = Transport, transport_msgs = TransportMsgs, socket = Socket, init_args = InArgs},
-    gen_fsm:enter_loop(?MODULE, [], wait_for_hello, State).
+    gen_fsm_compat:enter_loop(?MODULE, [], wait_for_hello, State).
 
 %% ===============
 %% wait_for_hello
@@ -125,13 +125,13 @@ handle_info({TransOk, Socket, Data}, wait_for_protocol_versions, State = #state{
             {stop, {error, invalid_protocol_response}, State}
     end;
 
-handle_info({TransError, Socket, Error}, StateName, State = #state{socket = Socket, transport_msgs = {_, _, TransError}}) ->
+handle_info({TransError, Socket, Error}, _StateName, State = #state{socket = Socket, transport_msgs = {_, _, TransError}}) ->
     lager:warning("Socket error: ~p", [Error]),
-    {stop, Error, StateName, State};
+    {stop, Error, State};
 
-handle_info({TransClosed, Socket}, StateName, State = #state{socket = Socket, transport_msgs = {_, TransClosed, _}}) ->
+handle_info({TransClosed, Socket}, _StateName, State = #state{socket = Socket, transport_msgs = {_, TransClosed, _}}) ->
     lager:debug("Socket closed"),
-    {stop, normal, StateName, State}.
+    {stop, normal, State}.
 
 %% ===============
 %% termiante

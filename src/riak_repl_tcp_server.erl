@@ -36,17 +36,17 @@
          terminate/2, code_change/3]).
 
 -record(state, {
-        sitename :: repl_sitename(),
+        sitename :: repl_sitename() | undefined,
         socket :: repl_socket(),
         transport :: 'ranch_tcp' | 'ranch_ssl',
-        listener :: pid(),
-        client :: tuple(),
+        listener :: pid() | undefined,
+        client :: tuple() | undefined,
         q :: undefined | pid(),
-        work_dir :: string(),   %% working directory for this repl session
-        my_pi :: #peer_info{},
-        their_pi :: #peer_info{},
+        work_dir :: string() | undefined,   %% working directory for this repl session
+        my_pi :: #peer_info{} | undefined,
+        their_pi :: #peer_info{} |undefined,
         fullsync_worker :: pid() | undefined,
-        fullsync_strategy :: atom(),
+        fullsync_strategy :: atom() |undefined,
         election_timeout :: undefined | reference(), % reference for the election timeout
         keepalive_time :: undefined | integer(),
         ver = w0
@@ -102,7 +102,7 @@ handle_call(resume_fullsync, _From, #state{fullsync_worker=FSW,
     {reply, ok, State};
 handle_call(status, _From, #state{fullsync_worker=FSW, q=Q} = State) ->
     Res = case is_pid(FSW) of
-        true -> gen_fsm:sync_send_all_state_event(FSW, status, infinity);
+        true -> gen_fsm_compat:sync_send_all_state_event(FSW, status, infinity);
         false -> []
     end,
     Desc =
@@ -212,7 +212,7 @@ handle_info(_Event, State) ->
 terminate(_Reason, #state{fullsync_worker=FSW, work_dir=WorkDir,q=Q}) ->
     case is_pid(FSW) of
         true ->
-            gen_fsm:sync_send_all_state_event(FSW, stop);
+            gen_fsm_compat:sync_send_all_state_event(FSW, stop);
         _ ->
             ok
     end,
@@ -248,7 +248,7 @@ handle_msg({proxy_get, Ref, Bucket, Key, Options}, State) ->
     _ = send(State#state.transport, State#state.socket, {proxy_get_resp, Ref, Res}),
     {noreply, State};
 handle_msg(Msg, #state{fullsync_worker = FSW} = State) ->
-    gen_fsm:send_event(FSW, Msg),
+    gen_fsm_compat:send_event(FSW, Msg),
     {noreply, State}.
 
 handle_peerinfo(#state{sitename=SiteName, transport=Transport, socket=Socket, my_pi=MyPI} = State, TheirPI, Capability) ->

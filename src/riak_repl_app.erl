@@ -34,7 +34,7 @@ start(_Type, _StartArgs) ->
     %% Ensure that the KV service has fully loaded.
     riak_core:wait_for_service(riak_kv),
 
-    IncarnationId = erlang:phash2({make_ref(), now()}),
+    IncarnationId = erlang:phash2({make_ref(), os:timestamp()}),
     application:set_env(riak_repl, incarnation, IncarnationId),
     ok = ensure_dirs(),
 

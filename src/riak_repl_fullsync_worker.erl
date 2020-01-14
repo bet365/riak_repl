@@ -44,7 +44,7 @@ handle_call({get, B, K, Transport, Socket, Pool, Ver}, From, State) ->
     gen_server:reply(From, ok),
     %% do the get and send it to the client
     {ok, Client} = riak:local_client(),
-    case Client:get(B, K, 1, ?REPL_FSM_TIMEOUT) of
+    case riak_client:get(B, K, 1, ?REPL_FSM_TIMEOUT, Client) of
         {ok, RObj} ->
             %% we don't actually have the vclock to compare, so just send the
             %% key and let the other side sort things out.
@@ -86,7 +86,7 @@ handle_call({get, B, K, Transport, Socket, Pool, Partition, Ver}, From, State) -
 
     ReqID = make_req_id(),
 
-    Req = ?KV_GET_REQ{bkey={B, K}, req_id=ReqID},
+    Req = riak_kv_requests:new_get_request({B, K}, ReqID),
     %% Assuming this function is called from a FSM process
     %% so self() == FSM pid
     riak_core_vnode_master:command(Preflist,

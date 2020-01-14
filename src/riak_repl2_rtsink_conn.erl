@@ -478,7 +478,7 @@ bt_dropped(BucketType, #state{bt_drops = BucketDict} = State) ->
 -define(REACTIVATE_SOCK_INT_MILLIS_TEST_VAL, 20).
 -define(PORT_RANGE, 999999).
 
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 riak_repl2_rtsink_conn_test_() ->
     {spawn,
@@ -603,6 +603,23 @@ cache_peername_test_case() ->
 
         TellMe ! {sink_started, Pid}
     end),
+
+    catch(meck:unload(riak_repl_util)),
+    meck:new(riak_repl_util, [passthrough]),
+    meck:expect(riak_repl_util, generate_socket_tag, fun(Prefix, _Transport, _Socket) ->
+         Portnum = rand:uniform(?PORT_RANGE),
+         lists:flatten(io_lib:format("~s_~p -> ~p:~p",[
+                Prefix,
+                Portnum,
+                ?LOOPBACK_TEST_PEER,
+                ?SINK_PORT]))
+         end),
+
+    catch(meck:unload(riak_core_tcp_mon)),
+    meck:new(riak_core_tcp_mon, [passthrough]),
+    meck:expect(riak_core_tcp_mon, monitor, fun(Socket, _Tag, Transport) ->
+                {reply, ok,  #state{transport=Transport, socket=Socket}}
+                end),
 
     {ok, _SinkPid} = start_sink(),
     {ok, {_Source, _Sink}} = start_source(?VER1).

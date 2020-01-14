@@ -7,7 +7,7 @@
 -include("riak_repl.hrl").
 
 -ifdef(TEST).
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
@@ -430,6 +430,7 @@ maybe_use_ssl() ->
                 get_my_common_name(app_helper:get_env(riak_repl, certfile,
                         undefined))}},
         {verify, verify_peer},
+        {server_name_indication, disable},
         {fail_if_no_peer_cert, true},
         {secure_renegotiate, true} %% both sides are erlang, so we can force this
     ],
@@ -744,9 +745,9 @@ elapsed_secs(Then) ->
 
 shuffle_partitions(Partitions, Seed) ->
     lager:info("Shuffling partition list using seed ~p", [Seed]),
-    _ = random:seed(Seed),
+    _ = rand:seed(exrop, Seed),
     [Partition || {Partition, _} <-
-        lists:keysort(2, [{Key, random:uniform()} || Key <- Partitions])].
+        lists:keysort(2, [{Key, rand:uniform()} || Key <- Partitions])].
 
 %% Parse the version into major, minor, micro digits, ignoring any release
 %% candidate suffix

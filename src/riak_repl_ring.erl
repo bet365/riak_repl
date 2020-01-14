@@ -63,7 +63,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--spec(ensure_config/1 :: (ring()) -> ring()).
+-spec ensure_config(ring()) -> ring().
 %% @doc Ensure that Ring has replication config entry in the ring metadata dict.
 ensure_config(Ring) ->
     % can't use get_repl_config becuase that's guarenteed to return a config.
@@ -74,7 +74,7 @@ ensure_config(Ring) ->
             Ring
     end.
 
--spec(get_repl_config/1 :: (ring()) -> riak_repl_dict()|undefined).
+-spec get_repl_config(ring()) -> riak_repl_dict()|undefined.
 %% @doc Get the replication config dictionary from Ring.
 get_repl_config(Ring) ->
     case riak_core_ring:get_meta(?MODULE, Ring) of
@@ -82,12 +82,12 @@ get_repl_config(Ring) ->
         undefined -> initial_config()
     end.
 
--spec(set_repl_config/2 :: (ring(), riak_repl_dict()) -> ring()).
+-spec set_repl_config(ring(), riak_repl_dict()) -> ring().
 %% @doc Set the replication config dictionary in Ring.
 set_repl_config(Ring, RC) ->
     riak_core_ring:update_meta(?MODULE, RC, Ring).
 
--spec(add_site/2 :: (ring(), #repl_site{}) -> ring()).
+-spec add_site(ring(), #repl_site{}) -> ring().
 %% @doc Add a replication site to the Ring.
 add_site(Ring, Site=#repl_site{name=Name}) ->
     RC = get_repl_config(Ring),
@@ -106,7 +106,7 @@ add_site(Ring, Site=#repl_site{name=Name}) ->
         dict:store(sites, NewSites, RC),
         Ring).
 
--spec(del_site/2 :: (ring(), repl_sitename()) -> ring()).
+-spec del_site(ring(), repl_sitename()) -> ring().
 %% @doc Delete a replication site from the Ring.
 del_site(Ring, SiteName) ->
     RC  = get_repl_config(Ring),
@@ -122,7 +122,7 @@ del_site(Ring, SiteName) ->
               Ring)
     end.
 
--spec(get_site/2 :: (ring(), repl_sitename()) -> #repl_site{}|undefined).
+-spec get_site(ring(), repl_sitename()) -> #repl_site{}|undefined.
 %% @doc Get a replication site record from the Ring.
 get_site(Ring, SiteName) ->
     RC = get_repl_config(Ring),
@@ -132,7 +132,7 @@ get_site(Ring, SiteName) ->
         {value, ReplSite} -> ReplSite
     end.
 
--spec(add_site_addr/3 :: (ring(), repl_sitename(), repl_addr()) -> ring()).
+-spec add_site_addr(ring(), repl_sitename(), repl_addr()) -> ring().
 %% @doc Add a site address to connect to.
 add_site_addr(Ring, SiteName, {_IP, _Port}=Addr) ->
     case get_site(Ring, SiteName) of
@@ -148,7 +148,7 @@ add_site_addr(Ring, SiteName, {_IP, _Port}=Addr) ->
             end
     end.
 
--spec(del_site_addr/3 :: (ring(), repl_sitename(), repl_addr()) -> ring()).
+-spec del_site_addr(ring(), repl_sitename(), repl_addr()) -> ring().
 %% @doc Delete a server address from the site
 del_site_addr(Ring, SiteName, {_IP, _Port}=Addr) ->
     case get_site(Ring, SiteName) of
@@ -164,7 +164,7 @@ del_site_addr(Ring, SiteName, {_IP, _Port}=Addr) ->
             end
     end.
 
--spec(add_listener/2 :: (ring(), #repl_listener{}) -> ring()).
+-spec add_listener(ring(), #repl_listener{}) -> ring().
 %% @doc Add a replication listener host/port to the Ring.
 add_listener(Ring,Listener) ->
     RC = get_repl_config(Ring),
@@ -180,7 +180,7 @@ add_listener(Ring,Listener) ->
             Ring
     end.
 
--spec(add_nat_listener/2 :: (ring(), #nat_listener{}) -> ring()).
+-spec add_nat_listener(ring(), #nat_listener{}) -> ring().
 %% @doc Add a replication NAT listener host/port to the Ring.
 add_nat_listener(Ring,NatListener) ->
     RC = get_repl_config(Ring),
@@ -205,7 +205,7 @@ add_nat_listener(Ring,NatListener) ->
               Ring)
     end.
 
--spec(del_listener/2 :: (ring(), #repl_listener{}) -> ring()).
+-spec del_listener(ring(), #repl_listener{}) -> ring().
 %% @doc Delete a replication listener from the Ring.
 del_listener(Ring,Listener) ->
     RC  = get_repl_config(Ring),
@@ -220,7 +220,7 @@ del_listener(Ring,Listener) ->
               dict:store(listeners, NewListeners, get_repl_config(NatRing)), NatRing)
     end.
 
--spec(del_nat_listener/2 :: (ring(),#repl_listener{}) -> ring()).
+-spec del_nat_listener(ring(),#repl_listener{}) -> ring().
 %% @doc Delete a nat_listener from the list of nat_listeners
 del_nat_listener(Ring,Listener) ->
     RC  = get_repl_config(Ring),
@@ -238,7 +238,7 @@ del_nat_listener(Ring,Listener) ->
             end
     end.
 
--spec(get_listener/2 :: (ring(), repl_addr()) -> #repl_listener{}|undefined).
+-spec get_listener(ring(), repl_addr()) -> #repl_listener{}|undefined.
 %% @doc Fetch a replication host/port listener record from the Ring.
 get_listener(Ring,{_IP,_Port}=ListenAddr) ->
     RC = get_repl_config(Ring),
@@ -251,7 +251,7 @@ get_listener(Ring,{_IP,_Port}=ListenAddr) ->
         error -> undefined
     end.
 
--spec(get_nat_listener/2 :: (ring(), #repl_listener{}) -> #nat_listener{}|undefined).
+-spec get_nat_listener(ring(), #repl_listener{}) -> #nat_listener{}|undefined.
 %% @doc Fetch a replication nat host/port listener record from the Ring.
 get_nat_listener(Ring,Listener) ->
     RC = get_repl_config(Ring),

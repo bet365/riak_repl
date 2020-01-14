@@ -156,7 +156,7 @@ start(Ip, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackA
     start_maybe_link(Ip, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs, start).
 
 start_maybe_link(Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs, StartFunc) ->
-    gen_fsm_compat:StartFunc(?MODULE, {Ip, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}, []).
+    gen_fsm_compat:StartFunc(?MODULE, {Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}, []).
 
 %% gen_fsm_compat callbacks
 

@@ -796,8 +796,8 @@ shuffle_remote_ipaddrs(RemoteUnsorted) ->
 
 shuffle(List) ->
     <<_:10,S1:50,S2:50,S3:50>> = crypto:strong_rand_bytes(20),
-    _ = random:seed({S1,S2,S3}),
-    [E || {E, _} <- lists:keysort(2, [{Elm, random:uniform()} || Elm <- List])].
+    _ = rand:seed(exrop, {S1,S2,S3}),
+    [E || {E, _} <- lists:keysort(2, [{Elm, rand:uniform()} || Elm <- List])].
 
 
 %% The purpose of this function is to calculate for all nodes the correct nodes they should connect too for realtime

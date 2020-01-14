@@ -632,7 +632,7 @@ get_filtered_bucket_config_for_bucket(Ring, BucketName) ->
 %% Replace the config on the ring metadata for the given bucket, we can be smart and only check if data has changed on
 %% replacing the existing data
 %% @end
--spec replace_filtered_config_for_bucket(Ring :: ring(), Metadata :: dict(), BucketName :: binary(), NewConfig :: list(list())) -> ring().
+-spec replace_filtered_config_for_bucket(Ring :: ring(), Metadata :: dict:dict(), BucketName :: binary(), NewConfig :: list(list())) -> ring().
 replace_filtered_config_for_bucket(Ring, MetaData, BucketName, NewConfig) ->
     case dict:find(filteredbuckets, MetaData) of
         {ok, Config} ->

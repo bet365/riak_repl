@@ -746,7 +746,7 @@ bloom_fold({B, K}, V, {MPid, Bloom, Client, Transport, Socket, NSent0, WinSz, Fu
                                         true ->
                                             NSent0;
                                         false ->
-                                            gen_fsm:sync_send_event(MPid,
+                                            gen_fsm_compat:sync_send_event(MPid,
                                                 {diff_obj, RObj},
                                                 infinity),
                                             NSent0 - 1

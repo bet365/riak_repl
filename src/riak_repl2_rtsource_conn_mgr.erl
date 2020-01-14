@@ -101,7 +101,7 @@ init([Remote]) ->
     _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
     E = dict:new(),
     MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
-    M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
+    M = fun(X) -> round(X * rand:uniform(1000)) end,
     RebalanceTimer = app_helper:get_env(riak_repl, realtime_rebalance_on_failure, 5),
 
 

@@ -62,10 +62,7 @@
          mode_12_enabled/1,
          mode_13_enabled/1,
          maybe_get_vnode_lock/1,
-         maybe_send/3,
-         bucket_filtering_enabled/0,
-         filtered_bucket_config/0,
-         filtered_buckets_for_clustername/1
+         maybe_send/3
      ]).
 
 -export([wire_version/1,
@@ -1067,27 +1064,6 @@ maybe_get_vnode_lock(SrcPartition) ->
             end;
         false ->
             ok
-    end.
-
-bucket_filtering_enabled() ->
-    app_helper:get_env(riak_repl, bucket_filtering_enabled, false).
-
-filtered_bucket_config() ->
-    app_helper:get_env(riak_repl, filtered_buckets, []).
-
-filtered_buckets_for_clustername(ClusterName) ->
-    case filtered_bucket_config() of
-        [] -> [];
-        Config ->
-            %% Config is now [{BucketName, [Clusters]}, {BucketName2, [Clusters]}...]
-            lists:foldl(fun({Bucket, Clusters}, Acc) ->
-                            case lists:member(ClusterName, Clusters) of
-                                true ->
-                                    [Bucket | Acc];
-                                false ->
-                                    Acc
-                            end
-                        end, [], Config)
     end.
 
 %% Some eunit tests

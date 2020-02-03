@@ -40,9 +40,7 @@
          all_queues_empty/0,
          shutdown/0,
          stop/0,
-         is_running/0,
-         update_filtered_bucket_state/1,
-         update_filtered_buckets_list/1]).
+         is_running/0]).
 % private api
 -export([report_drops/1]).
 
@@ -72,9 +70,7 @@
                 cs = [],
                 shutting_down=false,
                 qsize_bytes = 0,
-                word_size=erlang:system_info(wordsize),
-                filtered_buckets_enabled = false, % is bucket filtering enabled?
-                filtered_buckets = []
+                word_size=erlang:system_info(wordsize)
                }).
 
 % Consumers
@@ -432,16 +428,7 @@ handle_call({push, NumItems, Bin, Meta}, _From, State) ->
     {reply, ok, push(NumItems, Bin, Meta, State2)};
 
 handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
-    {reply, ok, ack_seq(Name, Seq, Ts, State)};
-
-handle_call({filtered_buckets, update_bucket_filtering_state, Enabled}, _From, State) when is_boolean(Enabled) ->
-    {reply, ok, State#state{filtered_buckets_enabled = Enabled}};
-handle_call({filtered_buckets, update_bucket_filtering_state, InvalidState}, _From, State) ->
-    lager:warning("[~s] invalid value of bucket filtering enabled: '~p'~n", [?MODULE, InvalidState]),
-    {reply, ok, State};
-
-handle_call({filtered_buckets, update_buckets, BucketList}, _From, State) ->
-    {reply, ok, State#state{filtered_buckets = BucketList}}.
+    {reply, ok, ack_seq(Name, Seq, Ts, State)}.
 
 % ye previous cast. rtq_proxy may send us an old pattern.
 handle_cast({push, NumItems, Bin}, State) ->
@@ -564,29 +551,6 @@ unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
             {{error, not_registered}, State}
     end.
 
--spec filter_consumers(Enabled :: boolean(), AllConsumers :: [list()], Clusters :: [list()]) -> [list()].
-filter_consumers(_, AllConsumers, []) -> AllConsumers;
-filter_consumers(false, AllConsumers, _) -> AllConsumers;
-filter_consumers(true, AllConsumers, Clusters) ->
-            [Consumer || Consumer <- AllConsumers, consumer_not_blacklisted(Consumer, Clusters) ].
-
-%% Buckets -> {Bucket, [Consumers_names]}
-config_for_bucket(undefined, _) ->
-    [];
-config_for_bucket(Bucket, Buckets) ->
-    case lists:keyfind(Bucket, 1, Buckets) of
-        false -> [];
-        {_, Clusters} -> Clusters
-    end.
-
-bucket_name_from_meta({_, _, _, Meta}) ->
-    case orddict:find(bucket_name, Meta) of
-        {ok, BucketName} ->
-            BucketName;
-        error ->
-            undefined
-    end.
-
 update_consumer_delivery_funs(DeliverAndConsumers) ->
     [recast_saved_deliver_funs(DeliverStatus, C) || {DeliverStatus, C} <- DeliverAndConsumers].
 recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, name = Name}) ->
@@ -606,30 +570,14 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
 push(NumItems, Bin, Meta, State = #state{qtab = QTab,
                                          qseq = QSeq,
                                          cs = Cs,
-                                         shutting_down = false,
-                                         filtered_buckets_enabled = FEnabled,
-                                         filtered_buckets = FilteredBucketConfig}) ->
+                                         shutting_down = false}) ->
     QSeq2 = QSeq + 1,
-
     QEntry = {QSeq2, NumItems, Bin, Meta},
-    BucketName = bucket_name_from_meta(QEntry),
-
     AllConsumers = [Consumer#c.name || Consumer <- Cs],
-
-%% ========================================================================================================= %%
-%% Bucket Filtering (legacy)
-%% ========================================================================================================= %%
-    BFBlacklistedRemotes = config_for_bucket(BucketName, FilteredBucketConfig),
-    BFFilteredConsumers = filter_consumers(FEnabled, AllConsumers, BFBlacklistedRemotes),
-
-%% ========================================================================================================= %%
-%% Object Filtering
-%% ========================================================================================================= %%
-    OFFilteredConsumerNames = [CName || CName <- BFFilteredConsumers, not riak_repl2_object_filter:realtime_filter(CName, Meta)],
+    OFFilteredConsumerNames = [CName || CName <- AllConsumers, not riak_repl2_object_filter:realtime_filter(CName, Meta)],
     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
-%% ========================================================================================================= %%
 
-    DeliverAndCs2 = [maybe_deliver_item(C, QEntry2, FEnabled, BFBlacklistedRemotes) || C <- Cs],
+     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
     {DeliverResults, Cs3} = lists:unzip(DeliverAndCs3),
 
@@ -654,11 +602,11 @@ push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
 
-pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs, filtered_buckets_enabled = FEnabled, filtered_buckets = FilterBuckets}) ->
+pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
      CsNames = [C#c.name || C <- Cs],
      UpdCs = case lists:keytake(Name, #c.name, Cs) of
                 {value, C, Cs2} ->
-                    [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun, FEnabled, FilterBuckets) | Cs2];
+                    [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun) | Cs2];
                 false ->
                     lager:error("Consumer ~p pulled from RTQ, but was not registered", [Name]),
                     _ = deliver_error(DeliverFun, not_registered),
@@ -666,63 +614,35 @@ pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs, filtere
             end,
     State#state{cs = UpdCs}.
 
-%% @doc check if the given remote name is allowed to be routed to when bucket filtering is enabled
--spec consumer_not_blacklisted(atom() | list(), [list()]) -> boolean().
-consumer_not_blacklisted(RemoteNameAtom, RemoteNames) when is_atom(RemoteNameAtom) ->
-    consumer_not_blacklisted(atom_to_list(RemoteNameAtom), RemoteNames);
-consumer_not_blacklisted(RemoteName, RemoteNames) when is_list(RemoteName) ->
-    not lists:member(RemoteName, RemoteNames).
 
-maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets) ->
+maybe_pull(QTab, QSeq, C = #c{cseq = CSeq}, CsNames, DeliverFun) ->
     CSeq2 = CSeq + 1,
     case CSeq2 =< QSeq of
         true -> % something reday
             case ets:lookup(QTab, CSeq2) of
                 [] -> % entry removed, due to previously being unroutable
                     C2 = C#c{skips = C#c.skips + 1, cseq = CSeq2},
-                    maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets);
+                    maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun);
                 [QEntry] ->
-                    {_, _, _, Meta} = QEntry,
-%% ========================================================================================================= %%
-%% Bucket Filtering (legacy)
-%% ========================================================================================================= %%
-                    BucketName = bucket_name_from_meta(QEntry),
-                    BlacklistedRemotes = config_for_bucket(BucketName, FilteredBuckets),
-                    FilteredCsNames = filter_consumers(FilteringEnabled, CsNames, BlacklistedRemotes),
-
-%% ========================================================================================================= %%
-%% Object Filtering
-%% ========================================================================================================= %%
-                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- FilteredCsNames, not riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
+                    {CSeq2, _NumItems, _Bin, Meta} = QEntry,
+                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- CsNames, not riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
                     QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
-
-
-                    case lists:member(CName, OFFilteredConsumerNames) of
-                        true ->
-                            case C#c.deliver of
-                                undefined ->
-                                    % if the item can't be delivered due to cascading rt,
-                                    % just keep trying.
-                                    case maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2, FilteringEnabled, BlacklistedRemotes) of
-                                        {skipped, C2} ->
-                                            C3 = C2#c{
-                                                deliver = C#c.deliver,
-                                                delivery_funs = C#c.delivery_funs
-                                            },
-                                            maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets);
-                                        {_WorkedOrNoFun, C2} ->
-                                            C2
-                                    end;
-
-                                %% we have a saved function due to being at the head of the queue, just add the function and let the push
-                                %% functionality push the items out to the helpers using the saved deliverfuns
-                                _ ->
-                                    save_consumer(C, DeliverFun)
+                    case C#c.deliver of
+                        undefined ->
+                            % if the item can't be delivered due to cascading rt, or filtering,
+                            % just keep trying.
+                            {Res, C2} = maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2),
+                            case (Res == skipped) or (Res == filtered) of
+                                true ->
+                                    C3 = C2#c{deliver = C#c.deliver, delivery_funs = C#c.delivery_funs},
+                                    maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun);
+                                false ->
+                                    C2
                             end;
-                        false ->
-                            %% not removing any deliver function as we have purposely not used it
-                            C2 = C#c{skips = 0, cseq = CSeq2, delivered = true, filtered = C#c.filtered + 1},
-                            maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun, FilteringEnabled, FilteredBuckets)
+                        %% we have a saved function due to being at the head of the queue, just add the function and let the push
+                        %% functionality push the items out to the helpers using the saved deliverfuns
+                        _ ->
+                            save_consumer(C, DeliverFun)
                     end
             end;
         false ->
@@ -732,46 +652,7 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq, name = CName}, CsNames, DeliverFun, F
     end.
 
 
-
-filter({Enabled, Name, BlacklistRemotes}, {ConsumerName, Meta}) ->
-    case riak_repl2_object_filter:realtime_filter(ConsumerName, Meta) of
-        true ->
-            filtered;
-        false ->
-            bucket_filter_if_enabled(Enabled, Name, BlacklistRemotes)
-    end.
-
-% We can't filter if bucket filtering is disabled or if the bucket config is undefined
-bucket_filter_if_enabled(true, Name, BlacklistedRemotes) ->
-    case consumer_not_blacklisted(Name, BlacklistedRemotes) of
-        true -> no_fun;
-        false -> filtered
-    end;
-bucket_filter_if_enabled(_, _, _) ->
-    no_fun.
-
-deliver_if_can_route({FilteringEnabled, BlacklistedRemotes}, Consumer, QEntry) ->
-    {Seq, _NumItem, _Bin, Meta} = QEntry,
-    case riak_repl2_object_filter:realtime_filter(Consumer#c.name, Meta) of
-        true ->
-            {filtered, Consumer#c{cseq = Seq, aseq = Seq, filtered = Consumer#c.filtered + 1, delivered = true, skips=0}};
-        false ->
-            bucket_filtering_deliver_if_can_route(FilteringEnabled, Consumer, QEntry, BlacklistedRemotes)
-    end.
-
-bucket_filtering_deliver_if_can_route(false, Consumer, QEntry, _BlacklistedRemotes) ->
-    {delivered, deliver_item(Consumer, Consumer#c.deliver, QEntry)};
-bucket_filtering_deliver_if_can_route(true, Consumer, {Seq, _NumItem, _Bin, _Meta} = QEntry, BlacklistedRemotes) ->
-    case consumer_not_blacklisted(Consumer#c.name, BlacklistedRemotes) of
-        true ->
-            {delivered, deliver_item(Consumer, Consumer#c.deliver, QEntry)};
-        false ->
-            {filtered, Consumer#c{cseq = Seq, aseq = Seq, filtered = Consumer#c.filtered + 1, delivered = true, skips=0}}
-    end;
-bucket_filtering_deliver_if_can_route(_, Consumer, QEntry, _BlacklistedRemotes) ->
-    {delivered, deliver_item(Consumer, Consumer#c.deliver, QEntry)}.
-
-maybe_deliver_item(C = #c{deliver = undefined}, QEntry, FilteringEnabled, BlacklistedRemotes) ->
+maybe_deliver_item(C = #c{deliver = undefined}, QEntry) ->
     {_Seq, _NumItem, _Bin, Meta} = QEntry,
 
     Name = C#c.name,
@@ -783,10 +664,10 @@ maybe_deliver_item(C = #c{deliver = undefined}, QEntry, FilteringEnabled, Blackl
         true ->
             skipped;
         false ->
-            filter({FilteringEnabled, Name, BlacklistedRemotes}, {C#c.name, Meta})
+            maybe_filter(C, QEntry)
     end,
     {Cause, C};
-maybe_deliver_item(C, QEntry, FilteringEnabled, BlacklistedRemotes) ->
+maybe_deliver_item(C, QEntry) ->
     {Seq, _NumItem, _Bin, Meta} = QEntry,
     #c{name = Name} = C,
     Routed = case orddict:find(routed_clusters, Meta) of
@@ -800,7 +681,18 @@ maybe_deliver_item(C, QEntry, FilteringEnabled, BlacklistedRemotes) ->
         true ->
             {skipped, C#c{cseq = Seq, aseq = Seq}};
         false ->
-            deliver_if_can_route({FilteringEnabled, BlacklistedRemotes}, C, QEntry)
+            maybe_filter(C, QEntry)
+    end.
+
+maybe_filter(Consumer = #c{deliver = Fun}, QEntry) ->
+    {Seq, _NumItem, _Bin, Meta} = QEntry,
+    case {Fun, riak_repl2_object_filter:realtime_filter(Consumer#c.name, Meta)} of
+        {undefined, _} ->
+            {nofun, Consumer};
+        {_, true} ->
+            {filtered, Consumer#c{cseq = Seq, aseq = Seq, filtered = Consumer#c.filtered + 1, delivered = true, skips=0}};
+        {_, false} ->
+            {delivered, deliver_item(Consumer, Consumer#c.deliver, QEntry)}
     end.
 
 deliver_item(C, DeliverFun, {Seq, _NumItem, _Bin, _Meta} = QEntry) ->
@@ -940,12 +832,6 @@ trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
                     {Cs2, NewState, Entries + 1, Objects + NumObjects}
             end
     end.
-
-update_filtered_bucket_state(Enabled) ->
-    gen_server:call(?SERVER, {filtered_buckets, update_bucket_filtering_state, Enabled}).
-
-update_filtered_buckets_list(FilteringConfig) ->
-    gen_server:call(?SERVER, {filtered_buckets, update_buckets, FilteringConfig}).
 
 save_consumer(C, DeliverFun) ->
     case C#c.deliver of

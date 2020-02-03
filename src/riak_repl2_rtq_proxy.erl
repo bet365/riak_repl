@@ -80,7 +80,15 @@ handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
     BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
     case meta_support(Node, State#state.meta_support) of
         true ->
-            gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
+            case riak_core_capability:get({riak_repl, ack_list}, false) of
+                false ->
+                    %% remove data from meta (could do it in queue!)
+                    Meta1 = orddict:erase(acked_clusters, Meta),
+                    Meta2 = orddict:erase(filtered_clusters, Meta1),
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta2});
+                true ->
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta})
+            end;
         false ->
             gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs})
     end,

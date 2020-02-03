@@ -69,6 +69,11 @@ start(_Type, _StartArgs) ->
         [1.0, 0],
         0
     ),
+    riak_core_capability:register(
+        {riak_repl, ack_list},
+        [true, false],
+        false
+    ),
 
     %% skip Riak CS blocks
     case riak_repl_util:proxy_get_active() of

@@ -16,6 +16,7 @@
 %% The queue is currently stored in a private ETS table.  Once
 %% all consumers are done with an item it is removed from the table.
 -module(riak_repl2_rtq).
+-include("riak_repl.hrl").
 
 -behaviour(gen_server).
 %% API
@@ -24,7 +25,6 @@
          start_test/0,
          register/1,
          unregister/1,
-         set_max_bytes/1,
          push/3,
          push/2,
          pull/2,
@@ -56,7 +56,7 @@
 
 -record(state, {qtab = ets:new(?MODULE, [protected, ordered_set]), % ETS table
                 qseq = 0,  % Last sequence number handed out
-                max_bytes = undefined, % maximum ETS table memory usage in bytes
+                default_max_bytes = undefined, % maximum ETS table memory usage in bytes
 
                 % if the message q exceeds this, the rtq is overloaded
                 overload = ?DEFAULT_OVERLOAD :: pos_integer(),
@@ -78,7 +78,10 @@
             aseq = 0,  % last sequence acked
             cseq = 0,  % last sequence sent
             skips = 0,
-            drops = 0, % number of dropped queue entries (not items)
+            filtered = 0,
+            q_drops = 0, % number of dropped queue entries (not items)
+            c_drops = 0,
+            drops = 0,
             errs = 0,  % delivery errors
             deliver,  % deliver function if pending, otherwise undefined
             delivery_funs = [],
@@ -87,8 +90,8 @@
             % been dropped since the last delivery. The sink side can't
             % determine if there's been drops accurately if the source says there
             % were skips before it's sent even one item.
-            filtered = 0,
-            last_seen  % a timestamp of when we received the last ack to measure latency
+            last_seen,  % a timestamp of when we received the last ack to measure latency
+            consumer_qbytes = 0
            }).
 
 -type name() :: term().
@@ -146,17 +149,6 @@ is_empty(Name) ->
 -spec all_queues_empty() -> boolean().
 all_queues_empty() ->
     gen_server:call(?SERVER, all_queues_empty, infinity).
-
-%% @doc Set the maximum number of bytes to use - could take a while to return
-%% on a big queue. The maximum is for the backend data structure used itself,
-%% not just the raw size of the objects. This was chosen to keep a situation
-%% where overhead of stored objects would cause more memory to be used than
-%% expected just looking at MaxBytes.
--spec set_max_bytes(MaxBytes :: pos_integer() | 'undefined') -> 'ok'.
-set_max_bytes(MaxBytes) ->
-    % TODO if it always returns 'ok' it should likely be a cast, eg:
-    % why are we blocking the caller while it trims the queue?
-    gen_server:call(?SERVER, {set_max_bytes, MaxBytes}, infinity).
 
 %% @doc Push an item onto the queue. Bin should be the list of objects to push
 %% run through term_to_binary, while NumItems is the length of that list
@@ -289,39 +281,61 @@ report_drops(N) ->
 %% @private
 init(Options) ->
     %% Default maximum realtime queue size to 100Mb
-    MaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
+    DefaultMaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{max_bytes = MaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+    {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 %% @private
-handle_call(status, _From, State = #state{qtab = QTab, max_bytes = MaxBytes,
-                                          qseq = QSeq, cs = Cs}) ->
-    Consumers =
-        [{Name, [{pending, QSeq - CSeq},  % items to be send
+handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
+
+  MaxBytes = get_queue_max_bytes(State),
+
+  Consumers =
+        [{Name, [{consumer_qbytes, CBytes},
+                 {consumer_max_qbytes, get_consumer_max_bytes(C)},
+                 {pending, QSeq - CSeq},  % items to be send
                  {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
+                 {c_drops, CDrops},
+                 {q_drops, QDrops},
                  {drops, Drops},          % number of dropped entries due to max bytes
                  {errs, Errs},            % number of non-ok returns from deliver fun
-                 {filtered, Filters}]}    % number of objects filtered
-         || #c{name = Name, aseq = ASeq, cseq = CSeq,
-               drops = Drops, errs = Errs, skips = Skips, filtered = Filters} <- Cs],
+                 {filtered, Filtered}]}    % number of objects filtered
 
-    ConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
+         || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
+            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
+
+    GetTrimmedFolsomMetrics =
+        fun(MetricName) ->
+            lists:foldl(fun
+                            ({min, Value}, Acc) -> [{latency_min, Value} | Acc];
+                            ({max, Value}, Acc) -> [{latency_max, Value} | Acc];
+                            ({percentile, Value}, Acc) -> [{latency_percentile, Value} | Acc];
+                            (_, Acc) -> Acc
+                        end, [], folsom_metrics:get_histogram_statistics(MetricName))
+        end,
+
+
+    UpdatedConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
                                     MetricName = {latency, ConsumerName},
                                     case folsom_metrics:metric_exists(MetricName) of
                                         true ->
-                                            Acc ++ [{ConsumerName, folsom_metrics:get_histogram_statistics(MetricName)}];
+                                            case lists:keytake(ConsumerName, 1, Acc) of
+                                                {value, {ConsumerName, ConsumerStats}, Rest} ->
+                                                    [{ConsumerName, ConsumerStats ++ GetTrimmedFolsomMetrics(MetricName)} | Rest];
+                                                _ ->
+                                                    Acc
+                                            end;
                                         false ->
                                             Acc
                                     end
-                                end, [], [ C#c.name || C <- Cs ]),
+                                end, Consumers, [ C#c.name || C <- Cs ]),
 
     Status =
         [{bytes, qbytes(QTab, State)},
          {max_bytes, MaxBytes},
-         {consumers, Consumers},
-         {overload_drops, State#state.overload_drops},
-         {consumer_latency, ConsumerStats}],
+         {consumers, UpdatedConsumerStats},
+         {overload_drops, State#state.overload_drops}],
     {reply, Status, State};
 
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
@@ -337,35 +351,41 @@ handle_call(is_running, _From,
             State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
-handle_call({is_empty, Name}, _From, State = #state{qseq = QSeq, cs = Cs}) ->
-    Result = is_queue_empty(Name, QSeq, Cs),
+handle_call({is_empty, Name}, _From, State = #state{cs = Cs}) ->
+    Result = is_queue_empty(Name, Cs),
     {reply, Result, State};
 
-handle_call(all_queues_empty, _From, State = #state{qseq = QSeq, cs = Cs}) ->
-    Result = lists:all(fun (#c{name = Name}) -> is_queue_empty(Name, QSeq, Cs) end, Cs),
+handle_call(all_queues_empty, _From, State = #state{cs = Cs}) ->
+    Result = lists:all(fun (#c{name = Name}) -> is_queue_empty(Name, Cs) end, Cs),
     {reply, Result, State};
 
 
 handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
     MinSeq = minseq(QTab, QSeq),
-    case lists:keytake(Name, #c.name, Cs) of
-        {value, C = #c{aseq = PrevASeq, drops = PrevDrops}, Cs2} ->
-            %% Work out if anything should be considered dropped if
-            %% unacknowledged.
-            Drops = max(0, MinSeq - PrevASeq - 1),
+    UpdatedConsumers =
+        case lists:keytake(Name, #c.name, Cs) of
+            {value, C = #c{aseq = PrevASeq, drops = PrevDrops, q_drops = QPrevDrops}, Cs2} ->
+                %% Work out if anything should be considered dropped if
+                %% unacknowledged.
+                Drops = max(0, MinSeq - PrevASeq - 1),
 
-            %% Re-registering, send from the last acked sequence
-            CSeq = case C#c.aseq < MinSeq of
-                true -> MinSeq;
-                false -> C#c.aseq
-            end,
-            UpdCs = [C#c{cseq = CSeq, drops = PrevDrops + Drops,
-                         deliver = undefined} | Cs2];
-        false ->
-            %% New registration, start from the beginning
-            CSeq = MinSeq,
-            UpdCs = [#c{name = Name, aseq = CSeq, cseq = CSeq} | Cs]
-    end,
+                %% Re-registering, send from the last acked sequence
+                CSeq =
+                    case C#c.aseq < MinSeq of
+                        true -> MinSeq;
+                        false -> C#c.aseq
+                    end,
+
+                [C#c{cseq = CSeq, drops = PrevDrops + Drops, q_drops = QPrevDrops + Drops, deliver = undefined} | Cs2];
+
+            false ->
+                %% New registration, start from the beginning
+                %% loop the rtq, update consumer q size, and add self to filter list if required
+                %%TODO: decide if looping the ets table could cause a problem if there is too many objects in the rtq
+                CSeq = MinSeq,
+                RegisteredConsumer = register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab)),
+                [RegisteredConsumer | Cs]
+        end,
 
     RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
     case folsom_metrics:metric_exists({latency, Name}) of
@@ -373,8 +393,7 @@ handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs
         false ->
             folsom_metrics:new_histogram({latency, Name}, slide, RTQSlidingWindow)
     end,
-
-    {reply, {ok, CSeq}, State#state{cs = UpdCs}};
+    {reply, {ok, CSeq}, State#state{cs = UpdatedConsumers}};
 handle_call({unregister, Name}, _From, State) ->
     case unregister_q(Name, State) of
         {ok, NewState} ->
@@ -384,8 +403,6 @@ handle_call({unregister, Name}, _From, State) ->
             {reply, {error, not_registered}, State}
   end;
 
-handle_call({set_max_bytes, MaxBytes}, _From, State) ->
-    {reply, ok, trim_q(State#state{max_bytes = MaxBytes})};
 handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};
 
@@ -463,22 +480,22 @@ record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
             skip
     end.
 
-ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
-    %% Scan through the clients, updating Name for Seq and also finding the minimum
-    %% sequence
-    {UpdCs, MinSeq} = lists:foldl(
-                        fun(C, {Cs2, MinSeq2}) ->
-                                case {C#c.name, C#c.last_seen} of
-                                    {Name, LastSeen} ->
-                                        record_consumer_latency(Name, LastSeen, Seq, NewTs),
-                                        {[C#c{aseq = Seq} | Cs2], min(Seq, MinSeq2)};
-                                    _ ->
-                                        {[C | Cs2], min(C#c.aseq, MinSeq2)}
-                                end
-                        end, {[], QSeq}, Cs),
-    %% Remove any entries from the ETS table before MinSeq
-    NewState = cleanup(QTab, MinSeq, State),
-    NewState#state{cs = UpdCs}.
+ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
+    case lists:keytake(Name, #c.name, Cs) of
+        false ->
+            State;
+        {value, C, Rest} ->
+            %% record consumer latency
+            record_consumer_latency(Name, C#c.last_seen, Seq, NewTs),
+
+            case Seq > C#c.aseq of
+                true ->
+                    {NewState, NewC} = cleanup(C, QTab, Seq, C#c.aseq, State),
+                    NewState#state{cs = Rest ++ [NewC#c{aseq = Seq}]};
+                false ->
+                    State
+            end
+    end.
 
 %% @private
 handle_info(_Msg, State) ->
@@ -539,14 +556,9 @@ unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
                 DeliveryFuns ->
                     _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
             end,
-            MinSeq = case Cs2 of
-                         [] ->
-                             State#state.qseq; % no consumers, remove it all
-                         _ ->
-                             lists:min([Seq || #c{aseq = Seq} <- Cs2])
-                     end,
-            NewState0 = cleanup(QTab, MinSeq, State),
-            {ok, NewState0#state{cs = Cs2}};
+
+            {NewState, _NewC} = cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
+            {ok, NewState#state{cs = Cs2}};
         false ->
             {{error, not_registered}, State}
     end.
@@ -567,37 +579,108 @@ recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, na
             {DeliverStatus, C}
     end.
 
-push(NumItems, Bin, Meta, State = #state{qtab = QTab,
-                                         qseq = QSeq,
-                                         cs = Cs,
-                                         shutting_down = false}) ->
+
+register_new_consumer(_State, C, '$end_of_table') ->
+    C;
+register_new_consumer(#state{qtab = QTab} = State, #c{name = Name} = C, Seq) ->
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            %% entry removed
+            register_new_consumer(QTab, C, ets:next(QTab, Seq));
+        [QEntry] ->
+            {Seq, NumItems, Bin, Meta} = QEntry,
+            Size = ets_obj_size(Bin, State),
+            RoutedList = meta_get(routed_clusters, [], Meta),
+            FilteredList = meta_get(filtered_clusters, [], Meta),
+            AckedList = meta_get(acked_clusters, [], Meta),
+            ShouldSkip = lists:member(Name, RoutedList),
+            ShouldFilter =  riak_repl2_object_filter:realtime_filter(Name, Meta),
+            AlreadyAcked = lists:member(Name, AckedList),
+            {ShouldSend, {UpdatedMeta, NewMeta}} =
+                register_new_consumer_update_meta(Name, Meta, ShouldSkip, ShouldFilter, AlreadyAcked, FilteredList),
+            case UpdatedMeta of
+                true ->
+                    ets:insert(QTab, {Seq, NumItems, Bin, NewMeta});
+                false ->
+                    ok
+            end,
+            NewC = case ShouldSend of
+                       true ->
+                           update_cq_size(C, Size);
+                       false ->
+                           C
+                   end,
+            register_new_consumer(State, NewC, ets:next(QTab, Seq))
+    end.
+
+%% should skip, true
+register_new_consumer_update_meta(_Name, Meta, true, _, _, _FilteredList) ->
+    {false, {false, Meta}};
+%% should filter, true
+register_new_consumer_update_meta(Name, Meta, _, true, _, FilteredList) ->
+    {false, {true, orddict:store(filtered_clusters, [Name | FilteredList], Meta)}};
+%% already acked, true
+register_new_consumer_update_meta(_Name, Meta, _, _, true, _FilteredList) ->
+    {false, {false, Meta}};
+%% should send, true
+register_new_consumer_update_meta(_Name, Meta, false, false, false, _FilteredList) ->
+    {true, {false, Meta}}.
+
+
+allowed_filtered_consumers(Cs, Meta) ->
+    AllConsumers = [Consumer#c.name || Consumer <- Cs],
+    Filtered = [CName || CName <- AllConsumers, riak_repl2_object_filter:realtime_filter(CName, Meta)],
+    Allowed = AllConsumers -- Filtered,
+    {Allowed, Filtered}.
+
+meta_get(Key, Default, Meta) ->
+    case orddict:find(Key, Meta) of
+        error -> Default;
+        {ok, Value} -> Value
+    end.
+
+
+push(NumItems, Bin, Meta,
+    State = #state{qtab = QTab, qseq = QSeq, cs = Cs, shutting_down = false}) ->
+
     QSeq2 = QSeq + 1,
     QEntry = {QSeq2, NumItems, Bin, Meta},
-    AllConsumers = [Consumer#c.name || Consumer <- Cs],
-    OFFilteredConsumerNames = [CName || CName <- AllConsumers, not riak_repl2_object_filter:realtime_filter(CName, Meta)],
-    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
 
-     DeliverAndCs2 = [maybe_deliver_item(C, QEntry2) || C <- Cs],
+    {AllowedConsumerNames, FilteredConsumerNames} = allowed_filtered_consumers(Cs, Meta),
+    QEntry2 = set_local_forwards_meta(AllowedConsumerNames, QEntry),
+    QEntry3 = set_filtered_clusters_meta(FilteredConsumerNames, QEntry2),
+
+
+    %% we have to send to all consumers to update there state!
+    DeliverAndCs2 = [maybe_deliver_item(C, QEntry3) || C <- Cs],
     DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
     {DeliverResults, Cs3} = lists:unzip(DeliverAndCs3),
 
     %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
     %% We do not want to add an object that all consumers will filter or skip to the queue
-    AllSkippedOrFiltered = lists:all(fun
+    AllSkippedFilteredAcked = lists:all(fun
                                          (skipped) -> true;
                                          (filtered) -> true;
+                                         (acked) -> true;
                                          (_) -> false
                                      end, DeliverResults),
 
-    State2 = if
-        AllSkippedOrFiltered ->
-            State;
-        true ->
-            ets:insert(QTab, QEntry2),
-            Size = ets_obj_size(Bin, State),
-            update_q_size(State, Size)
-    end,
-    trim_q(State2#state{qseq = QSeq2, cs = Cs3});
+
+    Routed = meta_get(routed_clusters, [], Meta),
+    Acked = meta_get(acked_clusters, [], Meta),
+    ConsumersToUpdate = AllowedConsumerNames -- (Routed ++ Acked),
+    State2 = State#state{cs = Cs3, qseq = QSeq2},
+    State3 =
+        case AllSkippedFilteredAcked of
+            true ->
+                State2;
+            false ->
+                ets:insert(QTab, QEntry3),
+                Size = ets_obj_size(Bin, State2),
+                NewState = update_q_size(State2, Size),
+                update_consumer_q_sizes(NewState, Size, ConsumersToUpdate)
+        end,
+    trim_q(State3);
 push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
@@ -624,15 +707,13 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq}, CsNames, DeliverFun) ->
                     C2 = C#c{skips = C#c.skips + 1, cseq = CSeq2},
                     maybe_pull(QTab, QSeq, C2, CsNames, DeliverFun);
                 [QEntry] ->
-                    {CSeq2, _NumItems, _Bin, Meta} = QEntry,
-                    OFFilteredConsumerNames = [ConsumerName || ConsumerName <- CsNames, not riak_repl2_object_filter:realtime_filter(ConsumerName, Meta)],
-                    QEntry2 = set_local_forwards_meta(OFFilteredConsumerNames, QEntry),
+                    {CSeq2, _NumItems, _Bin, _Meta} = QEntry,
                     case C#c.deliver of
                         undefined ->
                             % if the item can't be delivered due to cascading rt, or filtering,
                             % just keep trying.
-                            {Res, C2} = maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry2),
-                            case (Res == skipped) or (Res == filtered) of
+                            {Res, C2} = maybe_deliver_item(C#c{deliver = DeliverFun}, QEntry),
+                            case (Res == skipped) or (Res == filtered) or (Res == acked) of
                                 true ->
                                     C3 = C2#c{deliver = C#c.deliver, delivery_funs = C#c.delivery_funs},
                                     maybe_pull(QTab, QSeq, C3, CsNames, DeliverFun);
@@ -652,50 +733,50 @@ maybe_pull(QTab, QSeq, C = #c{cseq = CSeq}, CsNames, DeliverFun) ->
     end.
 
 
-maybe_deliver_item(C = #c{deliver = undefined}, QEntry) ->
-    {_Seq, _NumItem, _Bin, Meta} = QEntry,
 
-    Name = C#c.name,
-    Routed = case orddict:find(routed_clusters, Meta) of
-        error -> [];
-        {ok, V} -> V
-    end,
-    Cause = case lists:member(Name, Routed) of
+maybe_deliver_item(#c{name = Name} = C, {_Seq, _NumItems, _Bin, Meta} = QEntry) ->
+    Routed = meta_get(routed_clusters, [], Meta),
+    Filtered = meta_get(filtered_clusters, [], Meta),
+    Acked = meta_get(acked_clusters, [], Meta),
+
+    IsRouted = lists:member(Name, Routed),
+    IsFiltered = lists:member(Name, Filtered),
+    IsAcked = lists:member(Name, Acked),
+
+    maybe_deliver_item(C, QEntry, IsRouted, IsFiltered, IsAcked).
+
+%% IsRouted = true
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, true, _, _) ->
+    {skipped, C};
+maybe_deliver_item(#c{delivered = Delivered} = C, {Seq, _NumItems, _Bin, _Meta}, true, _, _) ->
+    case Delivered of
         true ->
-            skipped;
-        false ->
-            maybe_filter(C, QEntry)
-    end,
-    {Cause, C};
-maybe_deliver_item(C, QEntry) ->
-    {Seq, _NumItem, _Bin, Meta} = QEntry,
-    #c{name = Name} = C,
-    Routed = case orddict:find(routed_clusters, Meta) of
-        error -> [];
-        {ok, V} -> V
-    end,
-    case lists:member(Name, Routed) of
-        true when C#c.delivered ->
             Skipped = C#c.skips + 1,
             {skipped, C#c{skips = Skipped, cseq = Seq}};
-        true ->
-            {skipped, C#c{cseq = Seq, aseq = Seq}};
         false ->
-            maybe_filter(C, QEntry)
-    end.
+            {skipped, C#c{cseq = Seq}}
+    end;
 
-maybe_filter(Consumer = #c{deliver = Fun}, QEntry) ->
-    {Seq, _NumItem, _Bin, Meta} = QEntry,
-    case {Fun, riak_repl2_object_filter:realtime_filter(Consumer#c.name, Meta)} of
-        {undefined, _} ->
-            {nofun, Consumer};
-        {_, true} ->
-            {filtered, Consumer#c{cseq = Seq, aseq = Seq, filtered = Consumer#c.filtered + 1, delivered = true, skips=0}};
-        {_, false} ->
-            {delivered, deliver_item(Consumer, Consumer#c.deliver, QEntry)}
-    end.
+%% IsFiltered = true
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, true, _) ->
+    {filtered, C};
+maybe_deliver_item(C, {Seq, _NumItems, _Bin, _Meta}, _, true, _) ->
+    {filtered, C#c{cseq = Seq, filtered = C#c.filtered + 1, delivered = true, skips=0}};
 
-deliver_item(C, DeliverFun, {Seq, _NumItem, _Bin, _Meta} = QEntry) ->
+%% IsAcked = true (so this would have been sent via repl_proxy / repl_migration)
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, _, true) ->
+    {acked, C};
+maybe_deliver_item(C, {Seq, _NumItems, _Bin, _Meta}, _, _, true) ->
+    {acked, C#c{cseq = Seq}};
+
+%% NotAcked, NotFiltered, NotRouted (Send)
+maybe_deliver_item(#c{deliver = undefined} = C, _QEntry, _, _, _) ->
+    {no_fun, C};
+maybe_deliver_item(C, QEntry, _, _, _) ->
+    {delivered, deliver_item(C, C#c.deliver, QEntry)}.
+
+
+deliver_item(C, DeliverFun, {Seq, _NumItems, _Bin, _Meta} = QEntry) ->
     try
         Seq = C#c.cseq + 1, % bit of paranoia, remove after EQC
         QEntry2 = set_skip_meta(QEntry, Seq, C),
@@ -733,24 +814,51 @@ set_skip_meta(QEntry, _Seq, _C = #c{skips = S}) ->
 set_local_forwards_meta(LocalForwards, QEntry) ->
     set_meta(QEntry, local_forwards, LocalForwards).
 
-set_meta({_Seq, _NumItems, _Bin, Meta} = QEntry, Key, Value) ->
-    Meta2 = orddict:store(Key, Value, Meta),
-    setelement(4, QEntry, Meta2).
+set_filtered_clusters_meta(FilteredClusters, QEntry) ->
+    set_meta(QEntry, filtered_clusters, FilteredClusters).
 
-%% Cleanup until the start of the table
-cleanup(_QTab, '$end_of_table', State) ->
-    State;
-cleanup(QTab, Seq, State) ->
-    case ets:lookup(QTab, Seq) of
-        [] -> cleanup(QTab, ets:prev(QTab, Seq), State);
-        [{_, _, Bin, _Meta}] ->
-           ShrinkSize = ets_obj_size(Bin, State),
-           NewState = update_q_size(State, -ShrinkSize),
-           ets:delete(QTab, Seq),
-           cleanup(QTab, ets:prev(QTab, Seq), NewState);
-        _ ->
-            lager:warning("Unexpected object in RTQ")
-    end.
+set_acked_clusters_meta(AckedClusters, QEntry) ->
+    set_meta(QEntry, acked_clusters, AckedClusters).
+
+set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
+    Meta2 = orddict:store(Key, Value, Meta),
+    {Seq, NumItems, Bin, Meta2}.
+
+
+cleanup(C, QTab, NewAck, OldAck, State) ->
+    AllConsumerNames = [C1#c.name || C1 <- State#state.cs],
+    queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State).
+
+queue_cleanup(C, _AllClusters, _QTab, '$end_of_table', _OldSeq, State) ->
+    {State, C};
+queue_cleanup(#c{name = Name} = C, AllClusters, QTab, NewAck, OldAck, State) when NewAck > OldAck ->
+    case ets:lookup(QTab, NewAck) of
+        [] ->
+            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State);
+        [{_, _, Bin, Meta} = QEntry] ->
+            Routed = meta_get(routed_clusters, [], Meta),
+            Filtered = meta_get(filtered_clusters, [], Meta),
+            Acked = meta_get(acked_clusters, [], Meta),
+            NewAcked = Acked ++ [Name],
+            QEntry2 = set_acked_clusters_meta(NewAcked, QEntry),
+            RoutedFilteredAcked = Routed ++ Filtered ++ NewAcked,
+            ShrinkSize = ets_obj_size(Bin, State),
+            NewC = update_cq_size(C, -ShrinkSize),
+            State2 = case AllClusters -- RoutedFilteredAcked of
+                         [] ->
+                             ets:delete(QTab, NewAck),
+                             update_q_size(State, -ShrinkSize);
+                         _ ->
+                             ets:insert(QTab, QEntry2),
+                             State
+                     end,
+            queue_cleanup(NewC, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State2);
+        UnExpectedObj ->
+            lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
+            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State)
+    end;
+queue_cleanup(C, _AllClusters, _QTab, _NewAck, _OldAck, State) ->
+    {State, C}.
 
 ets_obj_size(Obj, _State=#state{word_size = WordSize}) when is_binary(Obj) ->
   ets_obj_size(Obj, WordSize);
@@ -766,13 +874,101 @@ ets_obj_size(Obj, _) ->
 update_q_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
   State#state{qsize_bytes = CurrentQSize + Diff}.
 
+update_consumer_q_sizes(State = #state{cs = Cs}, Diff, AllowedNames) ->
+    Cs2 = lists:map(
+        fun(C) ->
+            case lists:member(C#c.name, AllowedNames) of
+                true ->
+                    update_cq_size(C, Diff);
+                false ->
+                    C
+            end
+        end, Cs),
+    State#state{cs = Cs2}.
+
+
+update_cq_size(C = #c{consumer_qbytes = QBytes}, Diff) ->
+    C#c{consumer_qbytes = QBytes + Diff}.
+
+
 %% Trim the queue if necessary
-trim_q(State = #state{max_bytes = undefined}) ->
+trim_q(State = #state{qtab = QTab}) ->
+    State1 = trim_consumers_q(State, ets:first(QTab)),
+    trim_global_q(get_queue_max_bytes(State1), State1).
+
+
+consumer_needs_trim(undefined, _) ->
+    false;
+consumer_needs_trim(MaxBytes, #c{consumer_qbytes = CBytes}) ->
+    CBytes > MaxBytes.
+
+trim_consumers_q(State = #state{cs = Cs}, Seq) ->
+    AllClusters = [C#c.name || C <- Cs],
+    TrimmedCs = [C || C <- Cs, not consumer_needs_trim(get_consumer_max_bytes(C), C)],
+    case Cs -- TrimmedCs of
+        [] ->
+            State;
+        NotTrimmedCs ->
+            trim_consumers_q_entries(State, AllClusters, TrimmedCs, NotTrimmedCs, Seq)
+    end.
+
+trim_consumers_q_entries(State, _AllClusters, TrimmedCs, [], '$end_of_table') ->
+    State#state{cs = TrimmedCs};
+trim_consumers_q_entries(State, _AllClusters, TrimmedCs, [], _Seq) ->
+    State#state{cs = TrimmedCs};
+trim_consumers_q_entries(State, _AllClusters, TrimmedCs, NotTrimmedCs, '$end_of_table') ->
+    lager:warning("rtq trim consumer q, end of table with consumers needing trimming ~p", [NotTrimmedCs]),
+    State#state{cs = TrimmedCs ++ NotTrimmedCs};
+trim_consumers_q_entries(State = #state{qtab = QTab}, AllClusters, TrimmedCs, NotTrimmedCs, Seq) ->
+    [{_, _, Bin, Meta} = QEntry] = ets:lookup(QTab, Seq),
+    ShrinkSize = ets_obj_size(Bin, State),
+
+    Routed = meta_get(routed_clusters, [], Meta),
+    Filtered = meta_get(filtered_clusters, [], Meta),
+    Acked = meta_get(acked_clusters, [], Meta),
+    TooAckClusters = AllClusters -- (Routed ++ Filtered ++ Acked),
+
+    NotTrimmedCNames = [C#c.name || C <- NotTrimmedCs],
+    ConsumersToBeTrimmed = [C || C <- NotTrimmedCs, lists:member(C#c.name, TooAckClusters)],
+    ConsumersNotToBeTrimmed = NotTrimmedCs -- ConsumersToBeTrimmed,
+    {NewState, NewConsumers} =
+        case TooAckClusters -- NotTrimmedCNames of
+            %% The consumers to be trimmed will cause the object to no longer be used by any consumer
+            %% delete the object in this case
+            [] ->
+                State1 = update_q_size(State, -ShrinkSize),
+                ets:delete(QTab, Seq),
+                {State1, [trim_single_consumer_q_entry(C, ShrinkSize, Seq) || C <- ConsumersToBeTrimmed]};
+
+            %% The object is only relevant to a subset of all consumers
+            %% only remove and update the correct consumers
+            _ ->
+                %% we need to update the object in ets to add these consumers to the ack'd list!
+                QEntry2 = set_acked_clusters_meta(Acked ++ [C#c.name || C <- ConsumersToBeTrimmed], QEntry),
+                ets:insert(QTab, QEntry2),
+                {State, [trim_single_consumer_q_entry(C, ShrinkSize, Seq) || C <- ConsumersToBeTrimmed] ++ ConsumersNotToBeTrimmed}
+        end,
+    trim_consumers_q(NewState#state{cs = TrimmedCs ++ NewConsumers}, ets:next(QTab, Seq)).
+
+
+trim_single_consumer_q_entry(C = #c{cseq = CSeq}, ShrinkSize, TrimSeq) ->
+    C1 = update_cq_size(C, -ShrinkSize),
+    case CSeq < TrimSeq of
+        true ->
+            %% count the drop and increase the cseq and aseq to the new trimseq value
+            C1#c{drops = C#c.drops + 1, c_drops = C#c.c_drops + 1, cseq = TrimSeq, aseq = TrimSeq};
+        _ ->
+            C1
+    end.
+
+
+
+trim_global_q(undefined, State) ->
     State;
-trim_q(State = #state{qtab = QTab, qseq = QSeq, max_bytes = MaxBytes}) ->
+trim_global_q(MaxBytes, State = #state{qtab = QTab, qseq = QSeq}) ->
     case qbytes(QTab, State) > MaxBytes of
         true ->
-            {Cs2, NewState} = trim_q_entries(QTab, MaxBytes, State#state.cs,
+            {Cs2, NewState} = trim_global_q_entries(QTab, MaxBytes, State#state.cs,
                                              State),
 
             %% Adjust the last sequence handed out number
@@ -797,8 +993,8 @@ trim_q(State = #state{qtab = QTab, qseq = QSeq, max_bytes = MaxBytes}) ->
             State
     end.
 
-trim_q_entries(QTab, MaxBytes, Cs, State) ->
-    {Cs2, State2, Entries, Objects} = trim_q_entries(QTab, MaxBytes, Cs, State, 0, 0),
+trim_global_q_entries(QTab, MaxBytes, Cs, State) ->
+    {Cs2, State2, Entries, Objects} = trim_global_q_entries(QTab, MaxBytes, Cs, State, 0, 0),
     if
         Entries + Objects > 0 ->
             lager:debug("Dropped ~p objects in ~p entries due to reaching maximum queue size of ~p bytes", [Objects, Entries, MaxBytes]);
@@ -807,29 +1003,35 @@ trim_q_entries(QTab, MaxBytes, Cs, State) ->
     end,
     {Cs2, State2}.
 
-trim_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
+trim_global_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
     case ets:first(QTab) of
         '$end_of_table' ->
             {Cs, State, Entries, Objects};
         TrimSeq ->
-            [{_, NumObjects, Bin, _Meta}] = ets:lookup(QTab, TrimSeq),
+            [{_, NumObjects, Bin, Meta}] = ets:lookup(QTab, TrimSeq),
             ShrinkSize = ets_obj_size(Bin, State),
-            NewState = update_q_size(State, -ShrinkSize),
+            NewState1 = update_q_size(State, -ShrinkSize),
+
+            Routed = meta_get(routed_clusters, [], Meta),
+            Filtered = meta_get(filtered_clusters, [], Meta),
+            Acked = meta_get(acked_clusters, [], Meta),
+            TooAckClusters = [C#c.name || C <- Cs] -- (Routed ++ Filtered ++ Acked),
+            NewState2 = update_consumer_q_sizes(NewState1, -ShrinkSize, TooAckClusters),
             ets:delete(QTab, TrimSeq),
             Cs2 = [case CSeq < TrimSeq of
                        true ->
                            %% If the last sent qentry is before the trimseq
                            %% it will never be sent, so count it as a drop.
-                           C#c{drops = C#c.drops + 1};
+                           C#c{drops = C#c.drops + 1, q_drops = C#c.q_drops +1};
                        _ ->
                            C
                    end || C = #c{cseq = CSeq} <- Cs],
             %% Rinse and repeat until meet the target or the queue is empty
-            case qbytes(QTab, NewState) > MaxBytes of
+            case qbytes(QTab, NewState2) > MaxBytes of
                 true ->
-                    trim_q_entries(QTab, MaxBytes, Cs2, NewState, Entries + 1, Objects + NumObjects);
+                    trim_global_q_entries(QTab, MaxBytes, Cs2, NewState2, Entries + 1, Objects + NumObjects);
                 _ ->
-                    {Cs2, NewState, Entries + 1, Objects + NumObjects}
+                    {Cs2, NewState2, Entries + 1, Objects + NumObjects}
             end
     end.
 
@@ -851,25 +1053,40 @@ get_all_delivery_funs(C) ->
     end.
 
 
+
 -ifdef(TEST).
 qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
     %% when EQC testing, don't account for ETS overhead
     QSizeBytes.
+
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+    Default.
+
+get_consumer_max_bytes(_) ->
+    undefined.
+
 -else.
 qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
+
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
+        undefined -> Default;
+        MaxBytes -> MaxBytes
+    end.
+
+get_consumer_max_bytes(#c{name = Name}) ->
+    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
 -endif.
 
-is_queue_empty(Name, QSeq, Cs) ->
+is_queue_empty(Name, Cs) ->
     case lists:keytake(Name, #c.name, Cs) of
-        {value,  #c{cseq = CSeq}, _Cs2} ->
-            CSeq2 = CSeq + 1,
-            case CSeq2 =< QSeq of
+        {value,  #c{consumer_qbytes = CBytes}, _Cs2} ->
+            case CBytes == 0 of
                 true -> false;
                 false -> true
             end;
-
         false -> lager:error("Unknown queue")
     end.
 

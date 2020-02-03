@@ -89,7 +89,15 @@ drain_queue(false, Peer, PeerWireVer) ->
                         w0 ->
                             {push, NumItem, BinObjs};
                         w1 ->
-                            {push, NumItem, BinObjs, Meta}
+                            case riak_core_capability:get({riak_repl, ack_list}, false) of
+                                false ->
+                                    %% remove data from meta
+                                    Meta1 = orddict:erase(acked_clusters, Meta),
+                                    Meta2 = orddict:erase(filtered_clusters, Meta1),
+                                    {push, NumItem, BinObjs, Meta2};
+                                true ->
+                                    {push, NumItem, BinObjs, Meta}
+                            end
                     end,
                     gen_server:cast({riak_repl2_rtq,Peer}, CastObj),
                     %% Note - the next line is casting, not calling.

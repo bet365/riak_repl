@@ -493,35 +493,12 @@ riak_repl2_rtsink_conn_test_() ->
       }]}.
 
 setup() ->
-    riak_repl_test_util:start_test_ring(),
-    riak_repl_test_util:abstract_gen_tcp(),
-    riak_repl_test_util:kill_and_wait(riak_repl2_rt),
-    {ok, _RT} = riak_repl2_rt:start_link(),
-    riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
-    {ok, _} = riak_repl2_rtq:start_link(),
-    application:set_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 1000),
-
     catch(meck:unload(riak_core_connection_mgr)),
     meck:new(riak_core_connection_mgr, [passthrough]),
     meck:expect(riak_core_connection_mgr, disconnect,
         fun(_Remote) ->
             ok
         end),
-
-    catch(meck:unload(riak_repl2_rtsource_conn_data_mgr)),
-    meck:new(riak_repl2_rtsource_conn_data_mgr, [passthrough]),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read, fun(active_nodes) -> [node()]
-                                                         end),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, read,
-        fun(realtime_connections, _Remote) ->
-            dict:new()
-        end
-    ),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, 4,
-        fun(_, _, _, _) ->
-            ok
-        end
-    ),
 
     catch(meck:unload(riak_core_cluster_mgr)),
     meck:new(riak_core_cluster_mgr, [passthrough]),
@@ -552,6 +529,15 @@ setup() ->
         {reply, ok,  #state{transport=Transport, socket=Socket}}
                                                end),
 
+
+
+    riak_repl_test_util:start_test_ring(),
+    riak_repl_test_util:abstract_gen_tcp(),
+    riak_repl_test_util:kill_and_wait(riak_repl2_rt),
+    {ok, _RT} = riak_repl2_rt:start_link(),
+    riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
+    {ok, _} = riak_repl2_rtq:start_link(),
+    application:set_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 1000),
     folsom:start(),
 
     ok.
@@ -565,7 +551,7 @@ cleanup(_Ctx) ->
     riak_repl_test_util:stop_test_ring(),
     riak_repl_test_util:maybe_unload_mecks(
       [riak_core_service_mgr,
-        riak_repl2_rtsource_conn_data_mgr,
+        riak_repl_util,
         riak_core_connection_mgr,
        riak_repl_util,
        riak_core_tcp_mon,
@@ -632,6 +618,14 @@ start_source(NegotiatedVer) ->
     end),
 
 
+    meck:expect(riak_repl_util, read_realtime_active_nodes, fun() -> [node()] end),
+    meck:expect(riak_repl_util, read_realtime_active_nodes, fun(_) -> [node()] end),
+    meck:expect(riak_repl_util, read_realtime_endpoints, fun(_) -> dict:new() end),
+    meck:expect(riak_repl_util, read_realtime_endpoints, fun(_, _) -> dict:new() end),
+    meck:expect(riak_repl_util, write_realtime_endpoints, fun(_, _) -> ok end),
+    meck:expect(riak_repl_util, write_realtime_endpoints, fun(_, _, _) -> ok end),
+    meck:expect(riak_repl_util, write_realtime_endpoints, fun(_, _, _, _) -> ok end),
+    meck:expect(riak_repl_util, delete_realtime_endpoints, fun(_) -> ok end),
     {ok, SourcePid} = riak_repl2_rtsource_conn_mgr:start_link("sink_cluster"),
     receive
         {sink_started, SinkPid} ->
@@ -653,7 +647,7 @@ unload_mecks() ->
     riak_repl_test_util:maybe_unload_mecks([
         stateful, riak_core_ring_manager, riak_core_ring,
         riak_repl2_rtsink_helper, gen_tcp, fake_source, riak_repl2_rtq,
-        riak_core_capability, riak_repl2_rtsource_conn_data_mgr]).
+        riak_core_capability, riak_repl2_rtsource_conn_data_mgr, riak_repl_util]).
 
 
 -endif.

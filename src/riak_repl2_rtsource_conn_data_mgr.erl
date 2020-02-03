@@ -30,8 +30,7 @@
     is_leader,
     connections,
     active_nodes,
-    restoration,
-    core_capability_polling_interval
+    restoration
 
 }).
 
@@ -78,23 +77,27 @@ node_watcher_update(_Services) ->
 %%%===================================================================
 
 init([]) ->
+    riak_core_node_watcher_events:add_sup_callback(fun ?MODULE:node_watcher_update/1),
+
+    CoreCapabilityPollingIntervalSecs = app_helper:get_env(riak_repl, realtime_core_capability_polling_interval, 60),
+    CoreCapabilityPollingInterval = CoreCapabilityPollingIntervalSecs * 1000,
+    erlang:send_after(CoreCapabilityPollingInterval, self(), poll_core_capability),
+
     Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
     State = case Version of
                 legacy ->
                     legacy_init(#state{});
                 v1 ->
-                    v1_init(#state{})
+                    v1_init(#state{});
+                v2 ->
+                    #state{version = v2}
             end,
     {ok, State}.
 
 
 legacy_init(State) ->
-    riak_core_node_watcher_events:add_sup_callback(fun ?MODULE:node_watcher_update/1),
-    CoreCapabilityPollingIntervalSecs = app_helper:get_env(riak_repl, realtime_core_capability_polling_interval, 60),
-    CoreCapabilityPollingInterval = CoreCapabilityPollingIntervalSecs * 1000,
-    erlang:send_after(CoreCapabilityPollingInterval, self(), poll_core_capability),
     State#state{version = legacy, leader_node = undefined, is_leader = false, connections = dict:new(), active_nodes = [],
-        restoration = false, core_capability_polling_interval = CoreCapabilityPollingInterval}.
+        restoration = false}.
 
 v1_init(State) ->
     {Leader, IsLeader} =
@@ -124,11 +127,7 @@ v1_init(State) ->
 
     C = dict:new(),
     AN = [],
-    riak_core_node_watcher_events:add_sup_callback(fun ?MODULE:node_watcher_update/1),
-    CoreCapabilityPollingIntervalSecs = app_helper:get_env(riak_repl, realtime_core_capability_polling_interval, 60),
-    CoreCapabilityPollingInterval = CoreCapabilityPollingIntervalSecs * 1000,
-    State#state{version = v1, leader_node = Leader, is_leader = IsLeader, connections = C, active_nodes = AN, restoration = false,
-        core_capability_polling_interval = CoreCapabilityPollingInterval}.
+    State#state{version = v1, leader_node = Leader, is_leader = IsLeader, connections = C, active_nodes = AN, restoration = false}.
 
 
 %% -------------------------------------------------- Read ---------------------------------------------------------- %%
@@ -182,6 +181,8 @@ handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 
+handle_cast({set_leader_node, _LeaderNode}, State=#state{version = v2}) ->
+    {noreply, State};
 handle_cast({set_leader_node, LeaderNode}, State=#state{version = V}) ->
     lager:info("setting leader node as: ~p", [LeaderNode]),
     case {V, node()} of
@@ -190,13 +191,15 @@ handle_cast({set_leader_node, LeaderNode}, State=#state{version = V}) ->
             {noreply, State#state{leader_node = LeaderNode, is_leader = true}};
         {legacy, _} ->
             {noreply, State#state{leader_node = LeaderNode, is_leader = false}};
-        {v1, LeaderNode} ->
+        {_, LeaderNode} ->
             gen_server:cast(?SERVER, node_watcher_update),
             {noreply, become_leader(State, LeaderNode)};
-        {v1, _} ->
+        {_, _} ->
             {noreply, become_proxy(State, LeaderNode)}
     end;
 
+handle_cast(node_watcher_update, State=#state{version = v2}) ->
+    {noreply, State};
 handle_cast(node_watcher_update, State=#state{active_nodes = OldActiveNodes, connections = C}) when State#state.is_leader == true ->
     NewActiveNodes = riak_core_node_watcher:nodes(riak_kv),
     DownNodes = OldActiveNodes -- NewActiveNodes,
@@ -302,8 +305,7 @@ handle_cast(Msg = {write_realtime_connections, Remote, Node, ConnectionList}, St
             {noreply, State#state{connections = NewConnections}};
 
         false ->
-            lager:info("data_mgr is proxy sending to leader -> ~p
-      node = ~p", [Msg, node()]),
+            lager:info("data_mgr is proxy sending to leader -> ~p node = ~p", [Msg, node()]),
             proxy_cast(Msg, State),
             {noreply, State}
     end;
@@ -342,18 +344,26 @@ handle_info(restore_leader_data, State) ->
 handle_info(reset_restoration_flag, State) ->
     {noreply, State#state{restoration = false}};
 
-handle_info(poll_core_capability, State=#state{version = OldVersion, core_capability_polling_interval = PI}) ->
-    NewVersion = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
-    case {OldVersion, NewVersion} of
-        {legacy, legacy} ->
+handle_info(poll_core_capability, State=#state{version = OldVersion}) ->
+    CoreCapabilityPollingIntervalSecs = app_helper:get_env(riak_repl, realtime_core_capability_polling_interval, 60),
+    PI = CoreCapabilityPollingIntervalSecs * 1000,
+    case {OldVersion, riak_core_capability:get({riak_repl, realtime_connections}, legacy)} of
+        {_, v2} ->
+            case State#state.leader_node == node() of
+                true ->
+                    riak_core_ring_manager:ring_trans(fun riak_repl_ring:cleanup_realtime_connection_data/2, []);
+                false ->
+                    ok
+            end,
+            {noreply, State#state{version = v2}};
+        {v1, v1} ->
             erlang:send_after(PI, self(), poll_core_capability),
             {noreply, State};
         {legacy, v1} ->
-            %% send upgrade message to conn_mgr after 30 seconds to give the data manager time to get into the correct state
-            %% after changing versions
-            [erlang:send_after(30000, Pid, upgrade_connection_version) || {_Remote, Pid} <- riak_repl2_rtsource_conn_sup:enabled()],
-            {noreply, v1_init(State)};
-        {v1, _} ->
+            erlang:send_after(PI, self(), poll_core_capability),
+            {noreply, v1_init(State#state{version = v1})};
+        _ ->
+            erlang:send_after(PI, self(), poll_core_capability),
             {noreply, State}
     end;
 
@@ -365,8 +375,7 @@ handle_info(_Info, State) ->
 
 
 terminate(Reason, State) ->
-    lager:info("riak_repl2_rtsource_conn_data_mgr termianting due to: ~p
-            State: ~p", [Reason, State]),
+    lager:info("riak_repl2_rtsource_conn_data_mgr termianting due to: ~p State: ~p", [Reason, State]),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

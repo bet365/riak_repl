@@ -78,6 +78,89 @@
          peer_wire_format/1
         ]).
 
+-export([
+    delete_realtime_endpoints/1,
+    write_realtime_endpoints/4,
+    write_realtime_endpoints/3,
+    write_realtime_endpoints/2,
+    read_realtime_endpoints/2,
+    read_realtime_endpoints/1,
+    read_realtime_active_nodes/1,
+    read_realtime_active_nodes/0
+
+]).
+
+% ---------------------------------------------------------------------------------- %
+%                           Realtime Functions                                       %
+% ---------------------------------------------------------------------------------- %
+
+delete_realtime_endpoints(Remote) ->
+    Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
+    Endpoints = read_realtime_endpoints(Version, Remote),
+    Keys = dict:fetch_keys(Endpoints),
+    lists:foreach(fun(Node) -> ?MODULE:write_realtime_endpoints(Version, Remote, Node, []) end, Keys).
+
+write_realtime_endpoints(Remote, Endpoints) ->
+    Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
+    ?MODULE:write_realtime_endpoints(Version, Remote, Endpoints).
+write_realtime_endpoints(Version, Remote, Endpoints) ->
+    ?MODULE:write_realtime_endpoints(Version, Remote, Endpoints, node()).
+write_realtime_endpoints(v1, Remote, Endpoints, Node) ->
+    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, Node, Endpoints),
+    ?MODULE:write_realtime_endpoints(v2, Remote, Endpoints, Node);
+write_realtime_endpoints(v2, Remote, Endpoints, Node) ->
+    riak_core_metadata:put(?RTSOURCE_REALTIME_CONNECTIONS_KEY, {Remote, Node}, Endpoints);
+write_realtime_endpoints(_, _Remote, _Endpoints, _Node) ->
+    ok.
+
+read_realtime_endpoints(Remote) ->
+    Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
+    read_realtime_endpoints(Version, Remote).
+read_realtime_endpoints(legacy, _Remote) ->
+    [];
+read_realtime_endpoints(v1, Remote) ->
+    riak_repl2_rtsource_conn_data_mgr:read(realtime_connections, Remote);
+read_realtime_endpoints(v2, Remote) ->
+    ActiveNodes = read_realtime_active_nodes(v2),
+    iterate_realtime_endpoints(riak_core_metadata:iterator(?RTSOURCE_REALTIME_CONNECTIONS_KEY,
+        [{default, deleted}, {resolver, llw}, {match, {Remote, '_'}}]), [], ActiveNodes);
+read_realtime_endpoints(Version, Remote) ->
+    lager:error("recieved unknown version! Remote: ~p Version: ~p", [Remote, Version]),
+    dict:new().
+
+iterate_realtime_endpoints(Itr, Values, ActiveNodes) ->
+    case riak_core_metadata:itr_done(Itr) of
+        true ->
+            riak_core_metadata:itr_close(Itr),
+            dict:from_list(Values);
+        false ->
+            add_endpoints(ActiveNodes, riak_core_metadata:itr_key_values(Itr), Itr, Values)
+    end.
+
+add_endpoints(ActiveNodes, {Key, deleted}, Itr, Values) ->
+    add_endpoints(ActiveNodes, {Key, []}, Itr, Values);
+add_endpoints(ActiveNodes, {_, []}, Itr, Values) ->
+    iterate_realtime_endpoints(ActiveNodes, riak_core_metadata:itr_next(Itr), Values);
+add_endpoints(ActiveNodes, {{_Remote, Node}, SinkConns}, Itr, Values) ->
+    case lists:member(Node, ActiveNodes) of
+        true ->
+            iterate_realtime_endpoints(riak_core_metadata:itr_next(Itr), [{Node, SinkConns}| Values], ActiveNodes);
+        false ->
+            iterate_realtime_endpoints(ActiveNodes, riak_core_metadata:itr_next(Itr), Values)
+    end.
+
+read_realtime_active_nodes() ->
+    Version = riak_core_capability:get({riak_repl, realtime_connections}, legacy),
+    read_realtime_endpoints(Version).
+read_realtime_active_nodes(legacy) ->
+    [];
+read_realtime_active_nodes(v1) ->
+    riak_repl2_rtsource_conn_data_mgr:read(active_nodes);
+read_realtime_active_nodes(v2) ->
+    riak_core_node_watcher:nodes(riak_kv).
+
+% ---------------------------------------------------------------------------------- %
+
 %% Defines for Wire format encode/decode
 -define(MAGIC, 42). %% as opposed to 131 for Erlang term_to_binary or 51 for riak_object
 -define(W1_VER, 1). %% first non-just-term-to-binary wire format

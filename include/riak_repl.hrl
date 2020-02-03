@@ -49,6 +49,9 @@
 -define(BT_META_BUCKET_NAME, bucket_name).
 -define(BT_META_BLACKLIST, realtime_blacklist).
 
+-define(RIAK_REPL2_RTQ_CONFIG_KEY, {riak_repl2_rtq, config}).
+-define(RTSOURCE_REALTIME_CONNECTIONS_KEY, {riak_repl2_rtsource, realtime_connections}).
+
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).
 -type(repl_addr() :: {ip_addr_str(), ip_portnum()}).

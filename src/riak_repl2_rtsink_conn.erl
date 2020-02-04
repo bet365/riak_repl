@@ -283,24 +283,28 @@ recv(TcpBin, State = #state{transport = T, socket = S}) ->
             end,
             {noreply, State#state{cont = Cont}};
         {ok, {objects, {Seq, BinObjs}}, Cont} ->
-            recv(Cont, do_write_objects(Seq, BinObjs, State));
+            recv(Cont, do_write_objects(Seq, 0, BinObjs, State));
         {ok, heartbeat, Cont} ->
             send_heartbeat(T, S),
             recv(Cont, State#state{hb_last = os:timestamp()});
         {ok, {objects_and_meta, {Seq, BinObjs, Meta}}, Cont} ->
-            recv(Cont, do_write_objects(Seq, {BinObjs, Meta}, State))
+            Skips =
+                case orddict:find(skip_count, Meta) of
+                    {ok, Value} -> Value;
+                    _ -> 0
+                end,
+            recv(Cont, do_write_objects(Seq, Skips, {BinObjs, Meta}, State))
     end.
 
-make_donefun({Binary, Meta}, Me, Ref, Seq) ->
+make_donefun({Binary, Meta}, Skips, Me, Ref, Seq) ->
     Done = fun(ObjectFilteringRules) ->
-        Skips = orddict:fetch(skip_count, Meta),
         gen_server:cast(Me, {ack, Ref, Seq, Skips}),
         maybe_push(Binary, Meta, ObjectFilteringRules)
     end,
     {Done, Binary, Meta};
-make_donefun(Binary, Me, Ref, Seq) when is_binary(Binary) ->
+make_donefun(Binary, Skips, Me, Ref, Seq) when is_binary(Binary) ->
     Done = fun(_ObjectFiltering) ->
-        gen_server:cast(Me, {ack, Ref, Seq, 0})
+        gen_server:cast(Me, {ack, Ref, Seq, Skips})
     end,
     {Done, Binary}.
 
@@ -327,14 +331,10 @@ add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
     Meta.
 
 %% Note match on Seq
-do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
-                                              helper = Helper,
-                                              seq_ref = Ref,
-                                              expect_seq = Seq,
-                                              acked_seq = AckedSeq,
-                                              ver = Ver}) ->
+do_write_objects(Seq, Skips, BinObjsMeta, State) when Seq + Skips == State#state.expect_seq ->
+    #state{max_pending = MaxPending,helper = Helper, seq_ref = Ref, acked_seq = AckedSeq, ver = Ver} = State,
     Me = self(),
-    case make_donefun(BinObjsMeta, Me, Ref, Seq) of
+    case make_donefun(BinObjsMeta, Skips, Me, Ref, Seq) of
         {DoneFun, BinObjs, Meta} ->
             case riak_repl_bucket_type_util:bucket_props_match(Meta) of
                 true ->
@@ -368,7 +368,7 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
         _ ->
             State2
     end;
-do_write_objects(Seq, BinObjs, State) ->
+do_write_objects(Seq, Skips, BinObjs, State) ->
     %% Did not get expected sequence.
     %%
     %% If the source dropped (rtq consumer behind tail of queue), there
@@ -377,24 +377,23 @@ do_write_objects(Seq, BinObjs, State) ->
     %%
     %% If the sequence number wrapped?  don't worry about acks, happens infrequently.
     %%
-    State2 = reset_ref_seq(Seq, State),
-    do_write_objects(Seq, BinObjs, State2).
+    State2 = reset_ref_seq(Seq, Skips, State),
+    do_write_objects(Seq, 0, BinObjs, State2).
 
 insert_completed(Seq, Skipped, Completed) ->
-    Foldfun = fun(N, Acc) ->
-        ordsets:add_element(N, Acc)
-    end,
-    lists:foldl(Foldfun, Completed, lists:seq(Seq - Skipped, Seq)).
+    orddict:store(Seq, Skipped, Completed).
 
-reset_ref_seq(Seq, State) ->
+reset_ref_seq(Seq, Skips, State) ->
     #state{source_drops = SourceDrops, expect_seq = ExpSeq} = State,
     NewSeqRef = make_ref(),
-    SourceDrops2 = case ExpSeq of
-        undefined -> % no need to tell user about first time through
-            SourceDrops;
-        _ ->
-            SourceDrops + Seq - ExpSeq
-    end,
+    SourceDrops2 =
+        case ExpSeq of
+            undefined ->
+                % no need to tell user about first time through
+                SourceDrops;
+            _ ->
+                SourceDrops + ((Seq - Skips) - ExpSeq)
+        end,
     State#state{seq_ref = NewSeqRef, expect_seq = Seq, acked_seq = Seq - 1,
         completed = [], source_drops = SourceDrops2}.
 
@@ -403,10 +402,10 @@ reset_ref_seq(Seq, State) ->
 %% call.
 ack_to(Acked, []) ->
     {Acked, []};
-ack_to(Acked, [LessThanAck | _] = Completed) when LessThanAck =< Acked ->
+ack_to(Acked, [{LessThanAck, Skips} | _] = Completed) when LessThanAck - Skips =< Acked ->
     ack_to(LessThanAck - 1, Completed);
-ack_to(Acked, [Seq | Completed2] = Completed) ->
-    case Acked + 1 of
+ack_to(Acked, [{Seq, Skips} | Completed2] = Completed) ->
+    case Acked + 1 + Skips of
         Seq ->
             ack_to(Seq, Completed2);
         _ ->

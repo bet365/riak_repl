@@ -24,8 +24,8 @@
 [
     start_link/0,
     start_link/1,
-
     register/1,
+
     unregister/1,
     push/3,
     push/2,
@@ -69,9 +69,12 @@
 {
     pid,
     name,
-    aseq = 0,
-    cseq = 0,
-    remote_bytes = 0
+    total_skipped = 0,
+    total_filtered = 0,
+    total_acked = 0,
+    total_drops = 0,
+    rsize_bytes = 0,
+    max_ack = 0
 }).
 
 -type name() :: term().
@@ -99,8 +102,8 @@ start_link(Options) ->
 start_test() ->
     gen_server:start(?MODULE, [], []).
 
-register(Name, Pid) ->
-    gen_server:call(?SERVER, {register, Name, Pid}, infinity).
+register(Name) ->
+    gen_server:call(?SERVER, {register, Name}, infinity).
 
 unregister(Name) ->
     gen_server:call(?SERVER, {unregister, Name}, infinity).
@@ -123,6 +126,7 @@ stop() ->
 is_running() ->
     gen_server:call(?SERVER, is_running, infinity).
 
+%% TODO, replace with drain_queue
 is_empty(Name) ->
     gen_server:call(?SERVER, {is_empty, Name}, infinity).
 
@@ -131,9 +135,6 @@ all_queues_empty() ->
 %%%=====================================================================================================================
 %%% Casts
 %%%=====================================================================================================================
-
-
-%% TODO is this first function call required anymore?
 push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 push(NumItems, Bin, Meta) ->
@@ -162,100 +163,52 @@ init(Options) ->
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
     {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
-handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
-    MinSeq = minseq(QTab, QSeq),
-    UpdatedConsumers =
-        case lists:keytake(Name, #c.name, Cs) of
-            {value, C = #c{aseq = PrevASeq, drops = PrevDrops, q_drops = QPrevDrops}, Cs2} ->
-                %% Work out if anything should be considered dropped if
-                %% unacknowledged.
-                Drops = max(0, MinSeq - PrevASeq - 1),
 
-                %% Re-registering, send from the last acked sequence
-                CSeq =
-                    case C#c.aseq < MinSeq of
-                        true -> MinSeq;
-                        false -> C#c.aseq
-                    end,
-
-                [C#c{cseq = CSeq, drops = PrevDrops + Drops, q_drops = QPrevDrops + Drops, deliver = undefined} | Cs2];
-
+handle_call({register, Name}, Pid, State = #state{qtab = QTab, remotes = Remotes}) ->
+    UpdatedRemotes =
+        case lists:keytake(Name, #remote.name, Remotes) of
+            {value, R = #remote{name = Name, pid = Pid}, Remotes2} ->
+                %% rtsource_rtq has re-registered (under the same pid)
+                Remotes;
+            {value, R = #remote{name = Name, pid = Pid2}, Remotes2} ->
+                %% rtosurce_rtq hash re-registered (new pid, it must have died)
+                [R#remote{pid = Pid2} | Remotes2];
             false ->
                 %% New registration, start from the beginning
-                %% loop the rtq, update consumer q size, and add self to filter list if required
-                %%TODO: decide if looping the ets table could cause a problem if there is too many objects in the rtq
-                CSeq = MinSeq,
-                RegisteredConsumer = register_new_consumer(State, #c{name = Name, aseq = CSeq, cseq = CSeq}, ets:first(QTab)),
-                [RegisteredConsumer | Cs]
+                [#remote{name = Name, pid = Pid} | Remotes]
         end,
+    {reply, {ok, QTab}, State#state{remotes = UpdatedRemotes}};
 
-    RTQSlidingWindow = app_helper:get_env(riak_repl, rtq_latency_window, ?DEFAULT_RTQ_LATENCY_SLIDING_WINDOW),
-    case folsom_metrics:metric_exists({latency, Name}) of
-        true -> skip;
-        false ->
-            folsom_metrics:new_histogram({latency, Name}, slide, RTQSlidingWindow)
-    end,
-    {reply, {ok, CSeq}, State#state{cs = UpdatedConsumers}};
-
+%% TODO create unregisterq_cleanup function
 handle_call({unregister, Name}, _From, State) ->
     case unregister_q(Name, State) of
         {ok, NewState} ->
-            catch folsom_metrics:delete_metric({latency, Name}),
             {reply, ok, NewState};
         {{error, not_registered}, State} ->
             {reply, {error, not_registered}, State}
     end;
 
 
-handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
+handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
+    MaxBytes = get_queue_max_bytes(State),
+    RemoteStats =
+        lists:foldl(
+            fun(Remote, Acc) ->
 
-  MaxBytes = get_queue_max_bytes(State),
+                #remote{name = Name, total_skipped = Skipped, total_filtered = Filtered, total_acked = Acked,
+                    total_drops = Drops, rsize_bytes = RSize, max_ack = MaxAck} = Remote,
 
-  Consumers =
-        [{Name, [{consumer_qbytes, CBytes},
-                 {consumer_max_qbytes, get_consumer_max_bytes(C)},
-                 {pending, QSeq - CSeq},  % items to be send
-                 {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
-                 {c_drops, CDrops},
-                 {q_drops, QDrops},
-                 {drops, Drops},          % number of dropped entries due to max bytes
-                 {errs, Errs},            % number of non-ok returns from deliver fun
-                 {filtered, Filtered}]}    % number of objects filtered
+                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {pending, QSeq - MaxAck},
+                        {unacked, QSeq - Skipped - Filtered - Acked - Drops}, {skipped, Skipped}, {filtered, Filtered},
+                        {acked, Acked}, {drops, Drops}],
 
-         || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
-            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
-
-    GetTrimmedFolsomMetrics =
-        fun(MetricName) ->
-            lists:foldl(fun
-                            ({min, Value}, Acc) -> [{latency_min, Value} | Acc];
-                            ({max, Value}, Acc) -> [{latency_max, Value} | Acc];
-                            ({percentile, Value}, Acc) -> [{latency_percentile, Value} | Acc];
-                            (_, Acc) -> Acc
-                        end, [], folsom_metrics:get_histogram_statistics(MetricName))
-        end,
-
-
-    UpdatedConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
-                                    MetricName = {latency, ConsumerName},
-                                    case folsom_metrics:metric_exists(MetricName) of
-                                        true ->
-                                            case lists:keytake(ConsumerName, 1, Acc) of
-                                                {value, {ConsumerName, ConsumerStats}, Rest} ->
-                                                    [{ConsumerName, ConsumerStats ++ GetTrimmedFolsomMetrics(MetricName)} | Rest];
-                                                _ ->
-                                                    Acc
-                                            end;
-                                        false ->
-                                            Acc
-                                    end
-                                end, Consumers, [ C#c.name || C <- Cs ]),
-
+                [{Name, Stats} | Acc]
+            end, [], Remotes),
     Status =
         [{bytes, qbytes(QTab, State)},
-         {max_bytes, MaxBytes},
-         {consumers, UpdatedConsumerStats},
-         {overload_drops, State#state.overload_drops}],
+        {max_bytes, MaxBytes},
+        {remotes, RemoteStats},
+        {overload_drops, State#state.overload_drops}],
     {reply, Status, State};
 
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
@@ -271,25 +224,24 @@ handle_call(is_running, _From,
             State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
-handle_call({is_empty, Name}, _From, State = #state{cs = Cs}) ->
-    Result = is_queue_empty(Name, Cs),
-    {reply, Result, State};
-
-handle_call(all_queues_empty, _From, State = #state{cs = Cs}) ->
-    Result = lists:all(fun (#c{name = Name}) -> is_queue_empty(Name, Cs) end, Cs),
-    {reply, Result, State};
-
 
 %%%=====================================================================================================================
+%% TODO, replace with drain_queue
+handle_call({is_empty, Name}, _From, State = #state{remotes = Remotes}) ->
+    Result = is_queue_empty(Name, Remotes),
+    {reply, Result, State};
+
+handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
+    Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(Name, Remotes) end, Remotes),
+    {reply, Result, State};
+
 %%TODO decide if this code stays (it is legacy) [they are needed for backward comp.]
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
     handle_call({push, NumItems, Bin, []}, From, State);
 handle_call({push, NumItems, Bin, Meta}, _From, State) ->
     State2 = maybe_flip_overload(State),
-    {reply, ok, push(NumItems, Bin, Meta, State2)};
-handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
-    {reply, ok, ack_seq(Name, Seq, Ts, State)}.
+    {reply, ok, push(NumItems, Bin, Meta, State2)}.
 %%%=====================================================================================================================
 
 % ye previous cast. rtq_proxy may send us an old pattern.
@@ -301,28 +253,37 @@ handle_cast({push, NumItems, Bin, Meta}, State) ->
     State2 = maybe_flip_overload(State),
     {noreply, push(NumItems, Bin, Meta, State2)};
 
+handle_cast({ack, Name, Seq, Ts}, State) ->
+       {noreply, ack_seq(Name, Seq, Ts, State)};
 
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
     Drops = State#state.overload_drops + N,
     State2 = State#state{qseq = QSeq, overload_drops = Drops},
     State3 = maybe_flip_overload(State2),
-    {noreply, State3};
+    {noreply, State3}.
 
-handle_cast({pull, Name, DeliverFun}, State) ->
-     {noreply, pull(Name, DeliverFun, State)};
+%% @private
+handle_info(_Msg, State) ->
+    {noreply, State}.
 
-handle_cast({ack, Name, Seq, Ts}, State) ->
-       {noreply, ack_seq(Name, Seq, Ts, State)}.
+%% @private
+terminate(Reason, State=#state{cs = Cs}) ->
+  lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
+    %% when started from tests, we may not be registered
+    catch(erlang:unregister(?SERVER)),
+    flush_pending_pushes(),
+    DList = [get_all_delivery_funs(C) || C <- Cs],
+    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
+    ok.
 
-record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
-    case OldLastSeen of
-        {SeqNumber, OldTimestamp} ->
-            folsom_metrics:notify({{latency, Name}, abs(timer:now_diff(NewTimestamp, OldTimestamp))});
-        _ ->
-            % Don't log for a non-matching seq number
-            skip
-    end.
+%% @private
+code_change(_OldVsn, State, _Extra) ->
+    {ok, State}.
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
 
 ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
     case lists:keytake(Name, #c.name, Cs) of
@@ -340,29 +301,6 @@ ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
                     State
             end
     end.
-
-%% @private
-handle_info(_Msg, State) ->
-    {noreply, State}.
-
-%% @private
-terminate(Reason, State=#state{cs = Cs}) ->
-  lager:info("rtq terminating due to: ~p
-  State: ~p", [Reason, State]),
-    %% when started from tests, we may not be registered
-    catch(erlang:unregister(?SERVER)),
-    flush_pending_pushes(),
-    DList = [get_all_delivery_funs(C) || C <- Cs],
-    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
-    ok.
-
-%% @private
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
-
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
 
 maybe_flip_overload(State) ->
     #state{overloaded = Overloaded, overload = Overload, recover = Recover} = State,
@@ -393,87 +331,14 @@ flush_pending_pushes() ->
     end.
 
 
-unregister_q(Name, State = #state{qtab = QTab, cs = Cs}) ->
-     case lists:keytake(Name, #c.name, Cs) of
-        {value, C, Cs2} ->
-            %% Remove C from Cs, let any pending process know
-            %% and clean up the queue
-            case get_all_delivery_funs(C) of
-                [] ->
-                    ok;
-                DeliveryFuns ->
-                    _ = [deliver_error(DeliverFun, {error, unregistered}) || DeliverFun <- DeliveryFuns]
-            end,
-
-            {NewState, _NewC} = cleanup(C, QTab, State#state.qseq, C#c.aseq, State),
-            {ok, NewState#state{cs = Cs2}};
+unregister_q(Name, State = #state{remotes = Remotes}) ->
+     case lists:keytake(Name, #remote.name, Remotes) of
+        {value, Remote, Remotes2} ->
+            NewState = unregister_cleanup(Remote, State#state{remotes = Remotes2}),
+            {ok, NewState};
         false ->
             {{error, not_registered}, State}
     end.
-
-update_consumer_delivery_funs(DeliverAndConsumers) ->
-    [recast_saved_deliver_funs(DeliverStatus, C) || {DeliverStatus, C} <- DeliverAndConsumers].
-recast_saved_deliver_funs(DeliverStatus, C = #c{delivery_funs = DeliveryFuns, name = Name}) ->
-    case DeliverStatus of
-        delivered ->
-            case DeliveryFuns of
-                [] ->
-                    {DeliverStatus, C};
-                _ ->
-                    _ = [gen_server:cast(?SERVER, {pull, Name, DeliverFun}) || DeliverFun <- DeliveryFuns],
-                    {DeliverStatus, C#c{delivery_funs = []}}
-            end;
-        _ ->
-            {DeliverStatus, C}
-    end.
-
-
-register_new_consumer(_State, C, '$end_of_table') ->
-    C;
-register_new_consumer(#state{qtab = QTab} = State, #c{name = Name} = C, Seq) ->
-    case ets:lookup(QTab, Seq) of
-        [] ->
-            %% entry removed
-            register_new_consumer(QTab, C, ets:next(QTab, Seq));
-        [QEntry] ->
-            {Seq, NumItems, Bin, Meta} = QEntry,
-            Size = ets_obj_size(Bin, State),
-            RoutedList = meta_get(routed_clusters, [], Meta),
-            FilteredList = meta_get(filtered_clusters, [], Meta),
-            AckedList = meta_get(acked_clusters, [], Meta),
-            ShouldSkip = lists:member(Name, RoutedList),
-            ShouldFilter =  riak_repl2_object_filter:realtime_filter(Name, Meta),
-            AlreadyAcked = lists:member(Name, AckedList),
-            {ShouldSend, {UpdatedMeta, NewMeta}} =
-                register_new_consumer_update_meta(Name, Meta, ShouldSkip, ShouldFilter, AlreadyAcked, FilteredList),
-            case UpdatedMeta of
-                true ->
-                    ets:insert(QTab, {Seq, NumItems, Bin, NewMeta});
-                false ->
-                    ok
-            end,
-            NewC = case ShouldSend of
-                       true ->
-                           update_cq_size(C, Size);
-                       false ->
-                           C
-                   end,
-            register_new_consumer(State, NewC, ets:next(QTab, Seq))
-    end.
-
-%% should skip, true
-register_new_consumer_update_meta(_Name, Meta, true, _, _, _FilteredList) ->
-    {false, {false, Meta}};
-%% should filter, true
-register_new_consumer_update_meta(Name, Meta, _, true, _, FilteredList) ->
-    {false, {true, orddict:store(filtered_clusters, [Name | FilteredList], Meta)}};
-%% already acked, true
-register_new_consumer_update_meta(_Name, Meta, _, _, true, _FilteredList) ->
-    {false, {false, Meta}};
-%% should send, true
-register_new_consumer_update_meta(_Name, Meta, false, false, false, _FilteredList) ->
-    {true, {false, Meta}}.
-
 
 allowed_filtered_consumers(Cs, Meta) ->
     AllConsumers = [Consumer#c.name || Consumer <- Cs],
@@ -792,7 +657,7 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
 get_queue_max_bytes(#state{default_max_bytes = Default}) ->
     Default.
 
-get_consumer_max_bytes(_) ->
+get_remote_max_bytes(_) ->
     undefined.
 
 -else.
@@ -806,7 +671,7 @@ get_queue_max_bytes(#state{default_max_bytes = Default}) ->
         MaxBytes -> MaxBytes
     end.
 
-get_consumer_max_bytes(#c{name = Name}) ->
+get_remote_max_bytes(#remote{name = Name}) ->
     riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
 -endif.
 

@@ -82,6 +82,9 @@ handle_call({pull_with_ack, Name, DeliverFun}, _From, State) ->
 pull(Name, DeliverFun) ->
     gen_server:cast(?SERVER, {pull, Name, DeliverFun}).
 
+handle_cast({pull, Name, DeliverFun}, State) ->
+    {noreply, pull(Name, DeliverFun, State)};
+
 pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
     CsNames = [C#c.name || C <- Cs],
     UpdCs = case lists:keytake(Name, #c.name, Cs) of
@@ -217,3 +220,86 @@ set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
 %% ================================================================================================================== %%
 ack_sync(Name, Seq) ->
     gen_server:call(?SERVER, {ack_sync, Name, Seq, os:timestamp()}, infinity).
+
+handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
+    {reply, ok, ack_seq(Name, Seq, Ts, State)}.
+
+%% ================================================================================================================== %%
+
+handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
+
+    MaxBytes = get_queue_max_bytes(State),
+
+    Consumers =
+        [{Name, [{consumer_qbytes, CBytes},
+            {consumer_max_qbytes, get_consumer_max_bytes(C)},
+            {pending, QSeq - CSeq},  % items to be send
+            {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
+            {c_drops, CDrops},
+            {q_drops, QDrops},
+            {drops, Drops},          % number of dropped entries due to max bytes
+            {errs, Errs},            % number of non-ok returns from deliver fun
+            {filtered, Filtered}]}    % number of objects filtered
+
+            || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
+            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
+
+    GetTrimmedFolsomMetrics =
+        fun(MetricName) ->
+            lists:foldl(fun
+                            ({min, Value}, Acc) -> [{latency_min, Value} | Acc];
+                            ({max, Value}, Acc) -> [{latency_max, Value} | Acc];
+                            ({percentile, Value}, Acc) -> [{latency_percentile, Value} | Acc];
+                            (_, Acc) -> Acc
+                        end, [], folsom_metrics:get_histogram_statistics(MetricName))
+        end,
+
+
+    UpdatedConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
+        MetricName = {latency, ConsumerName},
+        case folsom_metrics:metric_exists(MetricName) of
+            true ->
+                case lists:keytake(ConsumerName, 1, Acc) of
+                    {value, {ConsumerName, ConsumerStats}, Rest} ->
+                        [{ConsumerName, ConsumerStats ++ GetTrimmedFolsomMetrics(MetricName)} | Rest];
+                    _ ->
+                        Acc
+                end;
+            false ->
+                Acc
+        end
+                                       end, Consumers, [ C#c.name || C <- Cs ]),
+
+    Status =
+        [{bytes, qbytes(QTab, State)},
+            {max_bytes, MaxBytes},
+            {consumers, UpdatedConsumerStats},
+            {overload_drops, State#state.overload_drops}],
+    {reply, Status, State};
+
+-ifdef(TEST).
+qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
+    %% when EQC testing, don't account for ETS overhead
+    QSizeBytes.
+
+-else.
+get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
+        undefined -> Default;
+        MaxBytes -> MaxBytes
+    end.
+
+get_consumer_max_bytes(#c{name = Name}) ->
+    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
+-endif.
+
+
+%% ================================================================================================================== %%
+record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
+    case OldLastSeen of
+        {SeqNumber, OldTimestamp} ->
+            folsom_metrics:notify({{latency, Name}, abs(timer:now_diff(NewTimestamp, OldTimestamp))});
+        _ ->
+            % Don't log for a non-matching seq number
+            skip
+    end.

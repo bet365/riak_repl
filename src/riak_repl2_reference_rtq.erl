@@ -1,4 +1,4 @@
--module(riak_repl2_rtsource_rtq).
+-module(riak_repl2_reference_rtq).
 -behaviour(gen_server).
 
 %% API

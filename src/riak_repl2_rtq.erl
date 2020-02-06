@@ -62,7 +62,8 @@
                 remotes = [],
                 shutting_down=false,
                 qsize_bytes = 0,
-                word_size=erlang:system_info(wordsize)
+                word_size=erlang:system_info(wordsize),
+                all_remote_names = []
                }).
 
 -record(remote,
@@ -146,8 +147,9 @@ push(NumItems, Bin, Meta) ->
             gen_server:cast(?SERVER, {push, NumItems, Bin, Meta})
     end.
 
-ack(Name, Seq) ->
-    gen_server:cast(?SERVER, {ack, Name, Seq, os:timestamp()}).
+%% TODO provide the ability to pass a list of seq numbers
+ack(Name, Seqs) ->
+    gen_server:cast(?SERVER, {ack, Name, Seqs}).
 
 report_drops(N) ->
     gen_server:cast(?SERVER, {report_drops, N}).
@@ -164,69 +166,38 @@ init(Options) ->
     {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
-handle_call({register, Name}, Pid, State = #state{qtab = QTab, remotes = Remotes}) ->
-    UpdatedRemotes =
-        case lists:keytake(Name, #remote.name, Remotes) of
-            {value, R = #remote{name = Name, pid = Pid}, Remotes2} ->
-                %% rtsource_rtq has re-registered (under the same pid)
-                Remotes;
-            {value, R = #remote{name = Name, pid = Pid2}, Remotes2} ->
-                %% rtosurce_rtq hash re-registered (new pid, it must have died)
-                [R#remote{pid = Pid2} | Remotes2];
-            false ->
-                %% New registration, start from the beginning
-                [#remote{name = Name, pid = Pid} | Remotes]
-        end,
-    {reply, {ok, QTab}, State#state{remotes = UpdatedRemotes}};
+handle_call({register, Name}, Pid, State = #state{qtab = QTab, qseq = QSeq}) ->
+    NewState = register_remote(Name, Pid, State),
+    {reply, {QTab, QSeq}, NewState};
 
-%% TODO create unregisterq_cleanup function
+
 handle_call({unregister, Name}, _From, State) ->
-    case unregister_q(Name, State) of
-        {ok, NewState} ->
-            {reply, ok, NewState};
-        {{error, not_registered}, State} ->
-            {reply, {error, not_registered}, State}
-    end;
+    {Reply, NewState} =  unregister_q(Name, State),
+    {reply, Reply, NewState};
 
-
-handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
-    MaxBytes = get_queue_max_bytes(State),
-    RemoteStats =
-        lists:foldl(
-            fun(Remote, Acc) ->
-
-                #remote{name = Name, total_skipped = Skipped, total_filtered = Filtered, total_acked = Acked,
-                    total_drops = Drops, rsize_bytes = RSize, max_ack = MaxAck} = Remote,
-
-                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {pending, QSeq - MaxAck},
-                        {unacked, QSeq - Skipped - Filtered - Acked - Drops}, {skipped, Skipped}, {filtered, Filtered},
-                        {acked, Acked}, {drops, Drops}],
-
-                [{Name, Stats} | Acc]
-            end, [], Remotes),
-    Status =
-        [{bytes, qbytes(QTab, State)},
-        {max_bytes, MaxBytes},
-        {remotes, RemoteStats},
-        {overload_drops, State#state.overload_drops}],
+%% TODO decide if want some information from rtsource_rtq
+handle_call(status, _From, State) ->
+    Status = make_status(State),
     {reply, Status, State};
 
+%% this is okay
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
     %% this will allow the realtime repl hook to determine if it should send
     %% to another host
     _ = riak_repl2_rtq_proxy:start(),
     {reply, ok, State#state{shutting_down = true}};
 
+%% this is okay
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
-handle_call(is_running, _From,
-            State = #state{shutting_down = ShuttingDown}) ->
+%% this is okay
+handle_call(is_running, _From, State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
 
 %%%=====================================================================================================================
-%% TODO, replace with drain_queue
+%% TODO, replace with drain_queue functionality for repl_migration
 handle_call({is_empty, Name}, _From, State = #state{remotes = Remotes}) ->
     Result = is_queue_empty(Name, Remotes),
     {reply, Result, State};
@@ -235,7 +206,7 @@ handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
     Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(Name, Remotes) end, Remotes),
     {reply, Result, State};
 
-%%TODO decide if this code stays (it is legacy) [they are needed for backward comp.]
+%% TODO decide if this code stays (it is legacy) [they are needed for backward compatibility]
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
     handle_call({push, NumItems, Bin, []}, From, State);
@@ -247,14 +218,14 @@ handle_call({push, NumItems, Bin, Meta}, _From, State) ->
 % ye previous cast. rtq_proxy may send us an old pattern.
 handle_cast({push, NumItems, Bin}, State) ->
     handle_cast({push, NumItems, Bin, []}, State);
-handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{cs=[]}) ->
+handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{remotes=[]}) ->
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta}, State) ->
     State2 = maybe_flip_overload(State),
     {noreply, push(NumItems, Bin, Meta, State2)};
 
-handle_cast({ack, Name, Seq, Ts}, State) ->
-       {noreply, ack_seq(Name, Seq, Ts, State)};
+handle_cast({ack, Name, Seqs}, State) ->
+       {noreply, ack_seqs(Name, Seqs, State)};
 
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
@@ -274,100 +245,122 @@ terminate(Reason, State=#state{cs = Cs}) ->
     catch(erlang:unregister(?SERVER)),
     flush_pending_pushes(),
     DList = [get_all_delivery_funs(C) || C <- Cs],
-    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
+%%    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
     ok.
 
 %% @private
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+%% ================================================================================================================== %%
 
-%%%===================================================================
-%%% Internal functions
-%%%===================================================================
+%% Internal Functions For Gen Server Calls
 
-ack_seq(Name, Seq, NewTs, State = #state{qtab = QTab, cs = Cs}) ->
-    case lists:keytake(Name, #c.name, Cs) of
-        false ->
-            State;
-        {value, C, Rest} ->
-            %% record consumer latency
-            record_consumer_latency(Name, C#c.last_seen, Seq, NewTs),
-
-            case Seq > C#c.aseq of
-                true ->
-                    {NewState, NewC} = cleanup(C, QTab, Seq, C#c.aseq, State),
-                    NewState#state{cs = Rest ++ [NewC#c{aseq = Seq}]};
-                false ->
-                    State
-            end
-    end.
-
-maybe_flip_overload(State) ->
-    #state{overloaded = Overloaded, overload = Overload, recover = Recover} = State,
-    {message_queue_len, MsgQLen} = erlang:process_info(self(), message_queue_len),
-    if
-        Overloaded andalso MsgQLen =< Recover ->
-            lager:info("Recovered from overloaded condition"),
-            ets:insert(?overload_ets, {overloaded, false}),
-            State#state{overloaded = false};
-        (not Overloaded) andalso MsgQLen > Overload ->
-            lager:warning("Realtime queue mailbox size of ~p is greater than ~p indicating overload; objects will be dropped until size is less than or equal to ~p", [MsgQLen, Overload, Recover]),
-            % flip the rt_dirty flag on
-            riak_repl_stats:rt_source_errors(),
-            ets:insert(?overload_ets, {overloaded, true}),
-            State#state{overloaded = true};
-        true ->
-            State
-    end.
-
-flush_pending_pushes() ->
-    receive
-        {'$gen_cast', {push, NumItems, Bin}} ->
-            riak_repl2_rtq_proxy:push(NumItems, Bin),
-            flush_pending_pushes()
-    after
-        1000 ->
-            ok
-    end.
+%% ================================================================================================================== %%
+%% Register
+%% TODO: what happens if a remote name change occurs?
+%% ================================================================================================================== %%
+register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
+    UpdatedRemotes =
+        case lists:keytake(Name, #remote.name, Remotes) of
+            {value, R = #remote{name = Name, pid = Pid}, Remotes2} ->
+                %% rtsource_rtq has re-registered (under the same pid)
+                Remotes;
+            {value, R = #remote{name = Name, pid = Pid2}, Remotes2} ->
+                %% rtosurce_rtq hash re-registered (new pid, it must have died)
+                [R#remote{pid = Pid2} | Remotes2];
+            false ->
+                %% New registration, start from the beginning
+                [#remote{name = Name, pid = Pid} | Remotes]
+        end,
+    UpdatedAllRemoteNames =
+        case lists:member(Name, AllRemoteNames) of
+            true -> AllRemoteNames;
+            false -> [Name | AllRemoteNames]
+        end,
+    State#state{remotes = UpdatedRemotes, all_remote_names = UpdatedAllRemoteNames}.
 
 
-unregister_q(Name, State = #state{remotes = Remotes}) ->
-     case lists:keytake(Name, #remote.name, Remotes) of
+%% ================================================================================================================== %%
+%% Unregister
+%% ================================================================================================================== %%
+unregister_q(Name, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames, qtab = QTab}) ->
+    NewAllRemoteNames = AllRemoteNames -- [Name],
+    case lists:keytake(Name, #remote.name, Remotes) of
         {value, Remote, Remotes2} ->
-            NewState = unregister_cleanup(Remote, State#state{remotes = Remotes2}),
+            MinSeq = ets:first(QTab),
+            NewState = unregister_cleanup(Remote, MinSeq, State#state{remotes = Remotes2, all_remote_names = NewAllRemoteNames}),
             {ok, NewState};
         false ->
             {{error, not_registered}, State}
     end.
 
-allowed_filtered_consumers(Cs, Meta) ->
-    AllConsumers = [Consumer#c.name || Consumer <- Cs],
-    lists:foldl(
-        fun(Consumer, {Allowed, Filtered}) ->
-            Name = Consumer#c.name,
-            case riak_repl2_object_filter:realtime_filter(Name, Meta) of
-                true ->
-                    {Allowed, [Name | Filtered]};
-                false ->
-                    {[Name | Allowed], Filtered}
-            end end, {[], []}, AllConsumers).
-
-meta_get(Key, Default, Meta) ->
-    case orddict:find(Key, Meta) of
-        error -> Default;
-        {ok, Value} -> Value
+%% we have to iterate the entire queue and check if we need to delete any objects
+unregister_cleanup('$end_of_table', _Remote, State) ->
+    State;
+unregister_cleanup(Seq, Remote, State = #state{qtab = QTab, all_remote_names = AllRemoteNames}) ->
+    case ets:lookup(QTab, Seq) of
+        [{_, _, Bin, _, Completed}] ->
+            ShrinkSize = ets_obj_size(Bin, State),
+            case AllRemoteNames -- Completed of
+                [] ->
+                    ets:delete(QTab, Seq),
+                    NewState = update_q_size(State, -ShrinkSize),
+                    unregister_cleanup(ets:next(QTab, Seq), Remote, NewState);
+                _ ->
+                    unregister_cleanup(ets:next(QTab, Seq), Remote, State)
+            end;
+        _ ->
+            unregister_cleanup(ets:next(QTab, Seq), Remote, State)
     end.
 
 
-push(NumItems, Bin, Meta,
-    State = #state{qtab = QTab, qseq = QSeq, cs = Cs, shutting_down = false}) ->
+%% ================================================================================================================== %%
+%% Status
+%% ================================================================================================================== %%
+make_status(State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
+    MaxBytes = get_queue_max_bytes(State),
+    RemoteStats =
+        lists:foldl(
+            fun(Remote, Acc) ->
+
+                #remote{name = Name, total_skipped = Skipped, total_filtered = Filtered, total_acked = Acked,
+                    total_drops = Drops, rsize_bytes = RSize, max_ack = MaxAck} = Remote,
+
+                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {pending, QSeq - MaxAck},
+                    {unacked, QSeq - Skipped - Filtered - Acked - Drops}, {skipped, Skipped}, {filtered, Filtered},
+                    {acked, Acked}, {drops, Drops}],
+
+                [{Name, Stats} | Acc]
+            end, [], Remotes),
+
+    [{bytes, qbytes(QTab, State)},
+    {max_bytes, MaxBytes},
+    {remotes, RemoteStats},
+    {overload_drops, State#state.overload_drops}].
+
+%% ================================================================================================================== %%
+
+%% Internal Functions For Gen Server Casts
+
+%% ================================================================================================================== %%
+%% Push
+%% TODO: decide if we ever send messages to remote pids (rtsource_rtq processes)
+%% ================================================================================================================== %%
+push(NumItems, Bin, Meta, State) ->
+    #state
+    {
+        qtab = QTab,
+        qseq = QSeq,
+        remotes = Remotes,
+        all_remote_names = AllRemoteNames,
+        shutting_down = false
+    } = State,
 
     QSeq2 = QSeq + 1,
-    QEntry = {QSeq2, NumItems, Bin, Meta},
+    QEntry = {QSeq2, NumItems, Bin, Meta, Completed},
 
     {AllowedConsumerNames, FilteredConsumerNames} = allowed_filtered_consumers(Cs, Meta),
     QEntry2 = set_local_forwards_meta(AllowedConsumerNames, QEntry),
-    QEntry3 = set_filtered_clusters_meta(FilteredConsumerNames, QEntry2),
 
 
     %% we have to send to all consumers to update there state!
@@ -378,11 +371,11 @@ push(NumItems, Bin, Meta,
     %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
     %% We do not want to add an object that all consumers will filter or skip to the queue
     AllSkippedFilteredAcked = lists:all(fun
-                                         (skipped) -> true;
-                                         (filtered) -> true;
-                                         (acked) -> true;
-                                         (_) -> false
-                                     end, DeliverResults),
+                                            (skipped) -> true;
+                                            (filtered) -> true;
+                                            (acked) -> true;
+                                            (_) -> false
+                                        end, DeliverResults),
 
 
     Routed = meta_get(routed_clusters, [], Meta),
@@ -403,88 +396,22 @@ push(NumItems, Bin, Meta,
 push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
     State.
+%% ================================================================================================================== %%
+%% Push Helper Functions
+%% ================================================================================================================== %%
 
 
-
-set_local_forwards_meta(LocalForwards, QEntry) ->
-    set_meta(QEntry, local_forwards, LocalForwards).
-
-set_filtered_clusters_meta(FilteredClusters, QEntry) ->
-    set_meta(QEntry, filtered_clusters, FilteredClusters).
-
-set_acked_clusters_meta(AckedClusters, QEntry) ->
-    set_meta(QEntry, acked_clusters, AckedClusters).
-
-set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
-    Meta2 = orddict:store(Key, Value, Meta),
-    {Seq, NumItems, Bin, Meta2}.
-
-
-cleanup(C, QTab, NewAck, OldAck, State) ->
-    AllConsumerNames = [C1#c.name || C1 <- State#state.cs],
-    queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State).
-
-queue_cleanup(C, _AllClusters, _QTab, '$end_of_table', _OldSeq, State) ->
-    {State, C};
-queue_cleanup(#c{name = Name} = C, AllClusters, QTab, NewAck, OldAck, State) when NewAck > OldAck ->
-    case ets:lookup(QTab, NewAck) of
-        [] ->
-            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State);
-        [{_, _, Bin, Meta} = QEntry] ->
-            Routed = meta_get(routed_clusters, [], Meta),
-            Filtered = meta_get(filtered_clusters, [], Meta),
-            Acked = meta_get(acked_clusters, [], Meta),
-            NewAcked = Acked ++ [Name],
-            QEntry2 = set_acked_clusters_meta(NewAcked, QEntry),
-            RoutedFilteredAcked = Routed ++ Filtered ++ NewAcked,
-            ShrinkSize = ets_obj_size(Bin, State),
-            NewC = update_cq_size(C, -ShrinkSize),
-            State2 = case AllClusters -- RoutedFilteredAcked of
-                         [] ->
-                             ets:delete(QTab, NewAck),
-                             update_q_size(State, -ShrinkSize);
-                         _ ->
-                             ets:insert(QTab, QEntry2),
-                             State
-                     end,
-            queue_cleanup(NewC, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State2);
-        UnExpectedObj ->
-            lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
-            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State)
-    end;
-queue_cleanup(C, _AllClusters, _QTab, _NewAck, _OldAck, State) ->
-    {State, C}.
-
-ets_obj_size(Obj, _State=#state{word_size = WordSize}) when is_binary(Obj) ->
-  ets_obj_size(Obj, WordSize);
-ets_obj_size(Obj, WordSize) when is_binary(Obj) ->
-  BSize = erlang:byte_size(Obj),
-  case BSize > 64 of
-        true -> BSize - (6 * WordSize);
-        false -> BSize
-  end;
-ets_obj_size(Obj, _) ->
-  erlang:size(Obj).
-
-update_q_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
-  State#state{qsize_bytes = CurrentQSize + Diff}.
-
-update_consumer_q_sizes(State = #state{cs = Cs}, Diff, AllowedNames) ->
-    Cs2 = lists:map(
-        fun(C) ->
-            case lists:member(C#c.name, AllowedNames) of
+allowed_filtered_consumers(Cs, Meta) ->
+    AllConsumers = [Consumer#c.name || Consumer <- Cs],
+    lists:foldl(
+        fun(Consumer, {Allowed, Filtered}) ->
+            Name = Consumer#c.name,
+            case riak_repl2_object_filter:realtime_filter(Name, Meta) of
                 true ->
-                    update_cq_size(C, Diff);
+                    {Allowed, [Name | Filtered]};
                 false ->
-                    C
-            end
-        end, Cs),
-    State#state{cs = Cs2}.
-
-
-update_cq_size(C = #c{consumer_qbytes = QBytes}, Diff) ->
-    C#c{consumer_qbytes = QBytes + Diff}.
-
+                    {[Name | Allowed], Filtered}
+            end end, {[], []}, AllConsumers).
 
 %% Trim the queue if necessary
 trim_q(State = #state{qtab = QTab}) ->
@@ -564,7 +491,7 @@ trim_global_q(MaxBytes, State = #state{qtab = QTab, qseq = QSeq}) ->
     case qbytes(QTab, State) > MaxBytes of
         true ->
             {Cs2, NewState} = trim_global_q_entries(QTab, MaxBytes, State#state.cs,
-                                             State),
+                State),
 
             %% Adjust the last sequence handed out number
             %% so that the next pull will retrieve the new minseq
@@ -630,14 +557,145 @@ trim_global_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
             end
     end.
 
-save_consumer(C, DeliverFun) ->
-    case C#c.deliver of
-        undefined ->
-            C#c{deliver = DeliverFun};
-        _ ->
-            DeliveryFuns = C#c.delivery_funs ++ [DeliverFun],
-            C#c{delivery_funs = DeliveryFuns}
+%% ================================================================================================================== %%
+%% Acking the queue. Either adds to a remote to the 'Completed' list, or deletes the object.
+%% ================================================================================================================== %%
+ack_seqs(Name, Seqs, State = #state{remotes = Remotes}) ->
+    case lists:keytake(Name, #remote.name, Remotes) of
+        false ->
+            State;
+        {value, Remote, Remotes2} ->
+            {UpdatedRemote, UpdatedState} =
+                lists:foldl(
+                    fun(Seq, {AccRemote, AccState}) ->
+                        ack_seq(Seq, AccRemote, AccState)
+                    end, {Remote, State}, Seqs),
+            UpdatedState#state{remotes = [UpdatedRemote |Remotes2]}
     end.
+
+ack_seq(Seq, Remote, State) ->
+    #state{qtab = QTab, qsize_bytes = QSize, all_remote_names = AllRemoteNames} = State,
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            %% TODO:
+            %% the queue has been trimmed due to reaching its maximum size
+            %% but this has been sent and acked! - so we can reduce the dropped counter
+            {Remote, State};
+        [{_, _, Bin, _, Completed}] ->
+            NewCompleted = [Remote#remote.name | Completed],
+            ShrinkSize = ets_obj_size(Bin, State),
+            NewRemote = update_remote_size(Remote, -ShrinkSize),
+            case AllRemoteNames -- NewCompleted of
+                [] ->
+                    ets:delete(QTab, Seq),
+                    NewState = update_q_size(State, -ShrinkSize),
+                    {NewRemote, NewState};
+                _ ->
+                    ets:update_element(QTab, Seq, {5, NewCompleted}),
+                    {NewRemote, State}
+            end;
+        UnExpectedObj ->
+            lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
+            {Remote, QSize}
+    end.
+%% ================================================================================================================== %%
+
+%%%===================================================================
+%%% Internal functions
+%%%===================================================================
+
+%% ================================================================================================================== %%
+%% Maybe flip overload used to ensure that the rtq mailbox does not exceed a configured size.
+%% ================================================================================================================== %%
+maybe_flip_overload(State) ->
+    #state{overloaded = Overloaded, overload = Overload, recover = Recover} = State,
+    {message_queue_len, MsgQLen} = erlang:process_info(self(), message_queue_len),
+    if
+        Overloaded andalso MsgQLen =< Recover ->
+            lager:info("Recovered from overloaded condition"),
+            ets:insert(?overload_ets, {overloaded, false}),
+            State#state{overloaded = false};
+        (not Overloaded) andalso MsgQLen > Overload ->
+            lager:warning("Realtime queue mailbox size of ~p is greater than ~p indicating overload; objects will be dropped until size is less than or equal to ~p", [MsgQLen, Overload, Recover]),
+            % flip the rt_dirty flag on
+            riak_repl_stats:rt_source_errors(),
+            ets:insert(?overload_ets, {overloaded, true}),
+            State#state{overloaded = true};
+        true ->
+            State
+    end.
+
+flush_pending_pushes() ->
+    receive
+        {'$gen_cast', {push, NumItems, Bin}} ->
+            riak_repl2_rtq_proxy:push(NumItems, Bin),
+            flush_pending_pushes()
+    after
+        1000 ->
+            ok
+    end.
+
+
+
+
+meta_get(Key, Default, Meta) ->
+    case orddict:find(Key, Meta) of
+        error -> Default;
+        {ok, Value} -> Value
+    end.
+
+
+
+set_local_forwards_meta(LocalForwards, QEntry) ->
+    set_meta(QEntry, local_forwards, LocalForwards).
+
+set_filtered_clusters_meta(FilteredClusters, QEntry) ->
+    set_meta(QEntry, filtered_clusters, FilteredClusters).
+
+set_acked_clusters_meta(AckedClusters, QEntry) ->
+    set_meta(QEntry, acked_clusters, AckedClusters).
+
+set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
+    Meta2 = orddict:store(Key, Value, Meta),
+    {Seq, NumItems, Bin, Meta2}.
+
+
+
+
+ets_obj_size(Obj, _State=#state{word_size = WordSize}) when is_binary(Obj) ->
+  ets_obj_size(Obj, WordSize);
+ets_obj_size(Obj, WordSize) when is_binary(Obj) ->
+  BSize = erlang:byte_size(Obj),
+  case BSize > 64 of
+        true -> BSize - (6 * WordSize);
+        false -> BSize
+  end;
+ets_obj_size(Obj, _) ->
+  erlang:size(Obj).
+
+update_q_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
+  State#state{qsize_bytes = CurrentQSize + Diff}.
+
+update_consumer_q_sizes(State = #state{cs = Cs}, Diff, AllowedNames) ->
+    Cs2 = lists:map(
+        fun(C) ->
+            case lists:member(C#c.name, AllowedNames) of
+                true ->
+                    update_cq_size(C, Diff);
+                false ->
+                    C
+            end
+        end, Cs),
+    State#state{cs = Cs2}.
+
+
+update_remote_size(Remote = #remote{rsize_bytes = RBytes}, Diff) ->
+    Remote#remote{rsize_bytes = RBytes + Diff}.
+
+
+
+
+
 
 get_all_delivery_funs(C) ->
     case C#c.deliver of

@@ -303,3 +303,52 @@ record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
             % Don't log for a non-matching seq number
             skip
     end.
+
+
+
+%% ================================================================================================================== %%
+cleanup(C, QTab, NewAck, OldAck, State) ->
+    AllConsumerNames = [C1#c.name || C1 <- State#state.cs],
+    queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State).
+
+queue_cleanup(C, _AllClusters, _QTab, '$end_of_table', _OldSeq, State) ->
+    {State, C};
+queue_cleanup(#c{name = Name} = C, AllClusters, QTab, NewAck, OldAck, State) when NewAck > OldAck ->
+    case ets:lookup(QTab, NewAck) of
+        [] ->
+            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State);
+        [{_, _, Bin, Meta} = QEntry] ->
+            Routed = meta_get(routed_clusters, [], Meta),
+            Filtered = meta_get(filtered_clusters, [], Meta),
+            Acked = meta_get(acked_clusters, [], Meta),
+            NewAcked = Acked ++ [Name],
+            QEntry2 = set_acked_clusters_meta(NewAcked, QEntry),
+            RoutedFilteredAcked = Routed ++ Filtered ++ NewAcked,
+            ShrinkSize = ets_obj_size(Bin, State),
+            NewC = update_cq_size(C, -ShrinkSize),
+            State2 = case AllClusters -- RoutedFilteredAcked of
+                         [] ->
+                             ets:delete(QTab, NewAck),
+                             update_q_size(State, -ShrinkSize);
+                         _ ->
+                             ets:insert(QTab, QEntry2),
+                             State
+                     end,
+            queue_cleanup(NewC, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State2);
+        UnExpectedObj ->
+            lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
+            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State)
+    end;
+queue_cleanup(C, _AllClusters, _QTab, _NewAck, _OldAck, State) ->
+    {State, C}.
+
+
+%% ================================================================================================================== %%
+save_consumer(C, DeliverFun) ->
+    case C#c.deliver of
+        undefined ->
+            C#c{deliver = DeliverFun};
+        _ ->
+            DeliveryFuns = C#c.delivery_funs ++ [DeliverFun],
+            C#c{delivery_funs = DeliveryFuns}
+    end.

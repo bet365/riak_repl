@@ -2,7 +2,11 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export(
+[
+    start_link/1,
+    restart_sending/1
+]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -48,6 +52,9 @@
 
 start_link(Name) ->
     gen_server:start_link(?MODULE, [Name], []).
+
+restart_sending(Pid) ->
+    gen_server:cast(Pid, restart_sending).
 
 %%%===================================================================
 %%% gen_server callbacks

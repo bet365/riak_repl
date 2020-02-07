@@ -56,6 +56,7 @@ handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) -
                             riak_repl_stats:rt_source_errors(),
                             error;
                         [Peer|_Rest] ->
+                            %% TODO create new function for draining queue, using register will not start at the begining!
                             {ok, _} = riak_repl2_rtq:register(qm),
                             WireVer = riak_repl_util:peer_wire_format(Peer),
                             lager:info("Migrating replication queue data to ~p with wire version ~p",
@@ -82,7 +83,7 @@ drain_queue(false, Peer, PeerWireVer) ->
     % would have made this a standard function, but I need a closure for the
     % value Peer
     riak_repl2_rtq:pull_sync(qm,
-             fun ({Seq, NumItem, W1BinObjs, Meta}) ->
+             fun ({Seq, NumItem, W1BinObjs, Meta, Completed}) ->
                 try
                     BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
                     CastObj = case PeerWireVer of
@@ -92,11 +93,9 @@ drain_queue(false, Peer, PeerWireVer) ->
                             case riak_core_capability:get({riak_repl, ack_list}, false) of
                                 false ->
                                     %% remove data from meta
-                                    Meta1 = orddict:erase(acked_clusters, Meta),
-                                    Meta2 = orddict:erase(filtered_clusters, Meta1),
-                                    {push, NumItem, BinObjs, Meta2};
+                                    {push, NumItem, BinObjs, Meta};
                                 true ->
-                                    {push, NumItem, BinObjs, Meta}
+                                    {push, NumItem, BinObjs, Meta, Completed}
                             end
                     end,
                     gen_server:cast({riak_repl2_rtq,Peer}, CastObj),

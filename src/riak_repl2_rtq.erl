@@ -25,7 +25,6 @@
     start_link/0,
     start_link/1,
     register/1,
-
     unregister/1,
     push/3,
     push/2,
@@ -47,6 +46,7 @@
 -define(DEFAULT_OVERLOAD, 2000).
 -define(DEFAULT_RECOVER, 1000).
 -define(DEFAULT_RTQ_LATENCY_SLIDING_WINDOW, 300).
+-define(DEFAULT_MAX_BYTES, 104857600). %% 100 MB
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -54,16 +54,16 @@
 
 -record(state, {qtab = ets:new(?MODULE, [protected, ordered_set]), % ETS table
                 qseq = 0,  % Last sequence number handed out
-                default_max_bytes = undefined, % maximum ETS table memory usage in bytes
                 overload = ?DEFAULT_OVERLOAD :: pos_integer(), % if the message q exceeds this, the rtq is overloaded
                 recover = ?DEFAULT_RECOVER :: pos_integer(), % if the rtq is in overload mode, it does not recover until =<
                 overloaded = false :: boolean(),
                 overload_drops = 0 :: non_neg_integer(),
-                remotes = [],
                 shutting_down=false,
                 qsize_bytes = 0,
                 word_size=erlang:system_info(wordsize),
-                all_remote_names = []
+                remotes = [],
+                all_remote_names = [],
+                remotes_to_restart = []
                }).
 
 -record(remote,
@@ -159,11 +159,9 @@ report_drops(N) ->
 %%%===================================================================
 
 init(Options) ->
-    %% Default maximum realtime queue size to 100Mb
-    DefaultMaxBytes = app_helper:get_env(riak_repl, rtq_max_bytes, 100*1024*1024),
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{default_max_bytes = DefaultMaxBytes, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+    {ok, #state{overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
 handle_call({register, Name}, Pid, State = #state{qtab = QTab, qseq = QSeq}) ->
@@ -175,7 +173,7 @@ handle_call({unregister, Name}, _From, State) ->
     {Reply, NewState} =  unregister_q(Name, State),
     {reply, Reply, NewState};
 
-%% TODO decide if want some information from rtsource_rtq
+%% TODO decide if want some information from reference rtq
 handle_call(status, _From, State) ->
     Status = make_status(State),
     {reply, Status, State};
@@ -239,12 +237,11 @@ handle_info(_Msg, State) ->
     {noreply, State}.
 
 %% @private
-terminate(Reason, State=#state{cs = Cs}) ->
+terminate(Reason, State) ->
   lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
     %% when started from tests, we may not be registered
     catch(erlang:unregister(?SERVER)),
     flush_pending_pushes(),
-    DList = [get_all_delivery_funs(C) || C <- Cs],
 %%    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
     ok.
 
@@ -257,7 +254,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% ================================================================================================================== %%
 %% Register
-%% TODO: what happens if a remote name change occurs?
+%% TODO: what happens if a remote name change occurs? (same as before it would be a problem!)
 %% ================================================================================================================== %%
 register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
     UpdatedRemotes =
@@ -304,7 +301,7 @@ unregister_cleanup(Seq, Remote, State = #state{qtab = QTab, all_remote_names = A
             case AllRemoteNames -- Completed of
                 [] ->
                     ets:delete(QTab, Seq),
-                    NewState = update_q_size(State, -ShrinkSize),
+                    NewState = update_queue_size(State, -ShrinkSize),
                     unregister_cleanup(ets:next(QTab, Seq), Remote, NewState);
                 _ ->
                     unregister_cleanup(ets:next(QTab, Seq), Remote, State)
@@ -318,7 +315,7 @@ unregister_cleanup(Seq, Remote, State = #state{qtab = QTab, all_remote_names = A
 %% Status
 %% ================================================================================================================== %%
 make_status(State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
-    MaxBytes = get_queue_max_bytes(State),
+    MaxBytes = get_queue_max_bytes(),
     RemoteStats =
         lists:foldl(
             fun(Remote, Acc) ->
@@ -344,217 +341,207 @@ make_status(State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
 
 %% ================================================================================================================== %%
 %% Push
-%% TODO: decide if we ever send messages to remote pids (rtsource_rtq processes)
 %% ================================================================================================================== %%
 push(NumItems, Bin, Meta, State) ->
+    push(NumItems, Bin, Meta, [], State).
+push(NumItems, Bin, Meta, PreCompleted, State) ->
     #state
     {
         qtab = QTab,
         qseq = QSeq,
-        remotes = Remotes,
         all_remote_names = AllRemoteNames,
         shutting_down = false
     } = State,
+    case filter_remotes(AllRemoteNames, PreCompleted, Meta) of
+        {[], _} ->
+            %% We have no remotes to send too, drop the object (do not insert)
+            State;
+        {Send, Completed} ->
+            % create object to place into queue
+            QSeq2 = QSeq + 1,
+            UpdatedMeta = set_local_forwards_meta(Send, Meta),
+            QEntry = {QSeq2, NumItems, Bin, UpdatedMeta, Completed},
+            State1 = State#state{qseq = QSeq2},
 
-    QSeq2 = QSeq + 1,
-    QEntry = {QSeq2, NumItems, Bin, Meta, Completed},
+            %% insert object into queue
+            ets:insert(QTab, QEntry),
 
-    {AllowedConsumerNames, FilteredConsumerNames} = allowed_filtered_consumers(Cs, Meta),
-    QEntry2 = set_local_forwards_meta(AllowedConsumerNames, QEntry),
+            %% update queue and remote sizes
+            Size = ets_obj_size(Bin, State1),
+            State2 = update_queue_size(State1, Size),
+            State3 = update_remotes_queue_size(State2, Size, Send),
 
+            %% update remotes that are at the head of the queue
+            State4 = restart_remotes(QSeq2, State3),
 
-    %% we have to send to all consumers to update there state!
-    DeliverAndCs2 = [maybe_deliver_item(C, QEntry3) || C <- Cs],
-    DeliverAndCs3 = update_consumer_delivery_funs(DeliverAndCs2),
-    {DeliverResults, Cs3} = lists:unzip(DeliverAndCs3),
+            %% (trim consumers) find out if consumers have reach maximum capacity
+            State5 = maybe_trim_remote_queues(State4),
 
-    %% This has changed for 'filtered' to mimic the behaviour of 'skipped'.
-    %% We do not want to add an object that all consumers will filter or skip to the queue
-    AllSkippedFilteredAcked = lists:all(fun
-                                            (skipped) -> true;
-                                            (filtered) -> true;
-                                            (acked) -> true;
-                                            (_) -> false
-                                        end, DeliverResults),
-
-
-    Routed = meta_get(routed_clusters, [], Meta),
-    Acked = meta_get(acked_clusters, [], Meta),
-    ConsumersToUpdate = AllowedConsumerNames -- (Routed ++ Acked),
-    State2 = State#state{cs = Cs3, qseq = QSeq2},
-    State3 =
-        case AllSkippedFilteredAcked of
-            true ->
-                State2;
-            false ->
-                ets:insert(QTab, QEntry3),
-                Size = ets_obj_size(Bin, State2),
-                NewState = update_q_size(State2, Size),
-                update_consumer_q_sizes(NewState, Size, ConsumersToUpdate)
-        end,
-    trim_q(State3);
-push(NumItems, Bin, Meta, State = #state{shutting_down = true}) ->
-    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+            %% (trime queue) find out if queue reached maximum capcity
+            maybe_trim_queue(State5)
+    end;
+push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = true}) ->
+    riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, PreCompleted),
     State.
+
+
+
 %% ================================================================================================================== %%
 %% Push Helper Functions
 %% ================================================================================================================== %%
-
-
-allowed_filtered_consumers(Cs, Meta) ->
-    AllConsumers = [Consumer#c.name || Consumer <- Cs],
-    lists:foldl(
-        fun(Consumer, {Allowed, Filtered}) ->
-            Name = Consumer#c.name,
-            case riak_repl2_object_filter:realtime_filter(Name, Meta) of
-                true ->
-                    {Allowed, [Name | Filtered]};
-                false ->
-                    {[Name | Allowed], Filtered}
-            end end, {[], []}, AllConsumers).
-
-%% Trim the queue if necessary
-trim_q(State = #state{qtab = QTab}) ->
-    State1 = trim_consumers_q(State, ets:first(QTab)),
-    trim_global_q(get_queue_max_bytes(State1), State1).
-
-
-consumer_needs_trim(undefined, _) ->
-    false;
-consumer_needs_trim(MaxBytes, #c{consumer_qbytes = CBytes}) ->
-    CBytes > MaxBytes.
-
-trim_consumers_q(State = #state{cs = Cs}, Seq) ->
-    AllClusters = [C#c.name || C <- Cs],
-    TrimmedCs = [C || C <- Cs, not consumer_needs_trim(get_consumer_max_bytes(C), C)],
-    case Cs -- TrimmedCs of
-        [] ->
-            State;
-        NotTrimmedCs ->
-            trim_consumers_q_entries(State, AllClusters, TrimmedCs, NotTrimmedCs, Seq)
-    end.
-
-trim_consumers_q_entries(State, _AllClusters, TrimmedCs, [], '$end_of_table') ->
-    State#state{cs = TrimmedCs};
-trim_consumers_q_entries(State, _AllClusters, TrimmedCs, [], _Seq) ->
-    State#state{cs = TrimmedCs};
-trim_consumers_q_entries(State, _AllClusters, TrimmedCs, NotTrimmedCs, '$end_of_table') ->
-    lager:warning("rtq trim consumer q, end of table with consumers needing trimming ~p", [NotTrimmedCs]),
-    State#state{cs = TrimmedCs ++ NotTrimmedCs};
-trim_consumers_q_entries(State = #state{qtab = QTab}, AllClusters, TrimmedCs, NotTrimmedCs, Seq) ->
-    [{_, _, Bin, Meta} = QEntry] = ets:lookup(QTab, Seq),
-    ShrinkSize = ets_obj_size(Bin, State),
-
+filter_remotes(AllRemoteNames, PreCompleted, Meta) ->
     Routed = meta_get(routed_clusters, [], Meta),
-    Filtered = meta_get(filtered_clusters, [], Meta),
-    Acked = meta_get(acked_clusters, [], Meta),
-    TooAckClusters = AllClusters -- (Routed ++ Filtered ++ Acked),
+    Filtered = riak_repl2_object_filter:realtime_blacklist(Meta),
+    Completed = lists:usort(PreCompleted ++ Routed ++ Filtered),
+    Send = AllRemoteNames -- Completed,
+    {Send, Completed}.
 
-    NotTrimmedCNames = [C#c.name || C <- NotTrimmedCs],
-    ConsumersToBeTrimmed = [C || C <- NotTrimmedCs, lists:member(C#c.name, TooAckClusters)],
-    ConsumersNotToBeTrimmed = NotTrimmedCs -- ConsumersToBeTrimmed,
-    {NewState, NewConsumers} =
-        case TooAckClusters -- NotTrimmedCNames of
-            %% The consumers to be trimmed will cause the object to no longer be used by any consumer
-            %% delete the object in this case
-            [] ->
-                State1 = update_q_size(State, -ShrinkSize),
-                ets:delete(QTab, Seq),
-                {State1, [trim_single_consumer_q_entry(C, ShrinkSize, Seq) || C <- ConsumersToBeTrimmed]};
+meta_get(Key, Default, Meta) ->
+    case orddict:find(Key, Meta) of
+        error -> Default;
+        {ok, Value} -> Value
+    end.
 
-            %% The object is only relevant to a subset of all consumers
-            %% only remove and update the correct consumers
-            _ ->
-                %% we need to update the object in ets to add these consumers to the ack'd list!
-                QEntry2 = set_acked_clusters_meta(Acked ++ [C#c.name || C <- ConsumersToBeTrimmed], QEntry),
-                ets:insert(QTab, QEntry2),
-                {State, [trim_single_consumer_q_entry(C, ShrinkSize, Seq) || C <- ConsumersToBeTrimmed] ++ ConsumersNotToBeTrimmed}
-        end,
-    trim_consumers_q(NewState#state{cs = TrimmedCs ++ NewConsumers}, ets:next(QTab, Seq)).
+set_local_forwards_meta(LocalForwards, Meta) ->
+    orddict:store(local_forwards, LocalForwards, Meta).
 
-
-trim_single_consumer_q_entry(C = #c{cseq = CSeq}, ShrinkSize, TrimSeq) ->
-    C1 = update_cq_size(C, -ShrinkSize),
-    case CSeq < TrimSeq of
+restart_remotes(Seq, State = #state{remotes_to_restart = RemoteSeqs}) ->
+    NotRestarted = restart_remote(Seq, RemoteSeqs, []),
+    State#state{remotes_to_restart = NotRestarted}.
+restart_remote(_, [], Acc) ->
+    Acc;
+restart_remote(Seq, [{Seq2, Pid} | Rest], Acc) ->
+    case Seq > Seq2 of
         true ->
-            %% count the drop and increase the cseq and aseq to the new trimseq value
-            C1#c{drops = C#c.drops + 1, c_drops = C#c.c_drops + 1, cseq = TrimSeq, aseq = TrimSeq};
+            %% TODO: check is this needs to be try catch'd
+            riak_repl2_reference_rtq:restart_sending(Pid),
+            restart_remote(Seq, Rest, Acc);
+        false ->
+            restart_remote(Seq, Rest, [{Seq2,Pid} | Acc])
+    end.
+
+%% ==================================================== %%
+%% Trimming Remote Queues
+%% TODO: should we inform reference queue if we trim?
+%% ==================================================== %%
+maybe_trim_remote_queues(State = #state{remotes = Remotes, qtab = QTab}) ->
+    case remotes_needs_trim(Remotes, [], []) of
+        ok ->
+            State;
+        {trim, RemotesToTrim, OkRemotes} ->
+            trim_remote_queues(RemotesToTrim, ets:first(QTab), State#state{remotes = OkRemotes})
+    end.
+
+remotes_needs_trim([], [], _) ->
+    ok;
+remotes_needs_trim([], RemotesToTrim, OkRemotes) ->
+    {trim, RemotesToTrim, OkRemotes};
+remotes_needs_trim([Remote | Rest], RemotesToTrim, OkRemotes) ->
+    case remote_need_trim(Remote) of
+        true -> remotes_needs_trim(Rest, [Remote|RemotesToTrim], OkRemotes);
+        false -> remotes_needs_trim(Rest, RemotesToTrim, [Remote | OkRemotes])
+    end.
+
+remote_need_trim(Remote = #remote{rsize_bytes = RBytes}) ->
+    RBytes > get_remote_max_bytes(Remote).
+
+
+trim_remote_queues([], _, State) ->
+    State;
+trim_remote_queues([], '$end_of_table', State) ->
+    State;
+trim_remote_queues(Remotes, '$end_of_table', State = #state{remotes = OkRemotes}) ->
+    lager:error("Remotes requires trimming but we reached the end of table ~p", [Remotes]),
+    State#state{remotes = Remotes ++ OkRemotes};
+trim_remote_queues(Remotes, Seq, State = #state{remotes = OkRemotes, qseq = QTab, all_remote_names = AllRemoteNames}) ->
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            trim_remote_queues(Remotes, ets:next(QTab, Seq), State);
+        [{_, _, Bin, _, PreCompleted}] ->
+            ShrinkSize = ets_obj_size(Bin, State),
+            {NewCompleted, NewRemotes, NewOkRemotes} = maybe_trim_remotes_single_entry(Remotes, PreCompleted, ShrinkSize),
+            case AllRemoteNames -- NewCompleted of
+                [] ->
+                    %% delete queue entry
+                    ets:delete(QTab, Seq);
+                _ ->
+                    %% update queue entry
+                    ets:update_element(QTab, Seq, {5, NewCompleted})
+
+            end,
+            %% continue trimming remotes
+            trim_remote_queues(NewRemotes, ets:next(QTab, Seq), State#state{remotes = OkRemotes ++ NewOkRemotes})
+    end.
+
+maybe_trim_remotes_single_entry(Remotes, PreCompleted, ShrinkSize) ->
+    lists:foldl(
+        fun(Remote, {Completed, TrimRemotes, OkRemotes}) ->
+            case maybe_trim_remote_single_entry(Completed, Remote, ShrinkSize) of
+                {ok, NewCompleted, NewRemote} ->
+                    {NewCompleted, TrimRemotes, [NewRemote | OkRemotes]};
+                {trim, NewCompleted, NewRemote} ->
+                    {NewCompleted, [NewRemote | TrimRemotes], OkRemotes}
+            end
+        end, {PreCompleted, [], []}, Remotes).
+
+maybe_trim_remote_single_entry(Remote, Completed, ShrinkSize) ->
+    case lists:member(Remote#remote.name, Completed) of
+        true ->
+            {trim, Completed, Remote};
+        false ->
+            trim_remote_single_entry(Completed, Remote, ShrinkSize)
+    end.
+
+trim_remote_single_entry(Completed, Remote, ShrinkSize) ->
+    Remote1 = update_remote_queue_size(Remote, -ShrinkSize),
+    Remote2 = update_remote_total_drops(Remote1, 1),
+    Completed1 = Completed -- [Remote#remote.name],
+    case remote_need_trim(Remote2) of
+        true ->
+            {trim, Completed1, Remote2};
         _ ->
-            C1
+            {ok, Completed1, Remote2}
     end.
 
 
-
-trim_global_q(undefined, State) ->
-    State;
-trim_global_q(MaxBytes, State = #state{qtab = QTab, qseq = QSeq}) ->
-    case qbytes(QTab, State) > MaxBytes of
+%% ==================================================== %%
+%% Trimming The Queue
+%% TODO: should we inform reference queue if we trim?
+%% ==================================================== %%
+maybe_trim_queue(State) ->
+    maybe_trim_queue(State, 0).
+maybe_trim_queue(State = #state{qtab = QTab}, Counter) ->
+    case queue_needs_trim(State) of
         true ->
-            {Cs2, NewState} = trim_global_q_entries(QTab, MaxBytes, State#state.cs,
-                State),
-
-            %% Adjust the last sequence handed out number
-            %% so that the next pull will retrieve the new minseq
-            %% number.  If that increases a consumers cseq,
-            %% reset the aseq too.  The drops have already been
-            %% accounted for.
-            NewCSeq = case ets:first(QTab) of
-                          '$end_of_table' ->
-                              QSeq; % if empty, make sure pull waits
-                          MinSeq ->
-                              MinSeq - 1
-                      end,
-            Cs3 = [case CSeq < NewCSeq of
-                       true ->
-                           C#c{cseq = NewCSeq, aseq = NewCSeq};
-                       _ ->
-                           C
-                   end || C = #c{cseq = CSeq} <- Cs2],
-            NewState#state{cs = Cs3};
-        false -> % Q size is less than MaxBytes words
+            NewState = trim_single_queue_entry(ets:first(QTab), State),
+            maybe_trim_queue(NewState, Counter+1);
+        false ->
+            case Counter of
+                0 -> ok;
+                _ ->
+                    lager:error("Dropped ~p objects in ~p entries due to reaching maximum queue size of ~p bytes",
+                        [Counter, get_queue_max_bytes()])
+            end,
             State
     end.
 
-trim_global_q_entries(QTab, MaxBytes, Cs, State) ->
-    {Cs2, State2, Entries, Objects} = trim_global_q_entries(QTab, MaxBytes, Cs, State, 0, 0),
-    if
-        Entries + Objects > 0 ->
-            lager:debug("Dropped ~p objects in ~p entries due to reaching maximum queue size of ~p bytes", [Objects, Entries, MaxBytes]);
-        true ->
-            ok
-    end,
-    {Cs2, State2}.
 
-trim_global_q_entries(QTab, MaxBytes, Cs, State, Entries, Objects) ->
-    case ets:first(QTab) of
-        '$end_of_table' ->
-            {Cs, State, Entries, Objects};
-        TrimSeq ->
-            [{_, NumObjects, Bin, Meta}] = ets:lookup(QTab, TrimSeq),
+queue_needs_trim(#state{qsize_bytes = QBytes}) ->
+    QBytes > get_queue_max_bytes().
+
+
+trim_single_queue_entry(Seq, State = #state{qtab = QTab, all_remote_names = AllRemoteNames}) ->
+    case ets:lookup(QTab, Seq) of
+        [{_, _, Bin, _, Completed}] ->
             ShrinkSize = ets_obj_size(Bin, State),
-            NewState1 = update_q_size(State, -ShrinkSize),
+            State1 = update_queue_size(State, -ShrinkSize),
+            State2 = update_remotes_queue_size(State1, -ShrinkSize, AllRemoteNames -- Completed),
+            State3 = update_remotes_total_drops(State2, 1, AllRemoteNames -- Completed),
+            ets:delete(QTab, Seq),
+            State3;
+        _ ->
+            State
 
-            Routed = meta_get(routed_clusters, [], Meta),
-            Filtered = meta_get(filtered_clusters, [], Meta),
-            Acked = meta_get(acked_clusters, [], Meta),
-            TooAckClusters = [C#c.name || C <- Cs] -- (Routed ++ Filtered ++ Acked),
-            NewState2 = update_consumer_q_sizes(NewState1, -ShrinkSize, TooAckClusters),
-            ets:delete(QTab, TrimSeq),
-            Cs2 = [case CSeq < TrimSeq of
-                       true ->
-                           %% If the last sent qentry is before the trimseq
-                           %% it will never be sent, so count it as a drop.
-                           C#c{drops = C#c.drops + 1, q_drops = C#c.q_drops +1};
-                       _ ->
-                           C
-                   end || C = #c{cseq = CSeq} <- Cs],
-            %% Rinse and repeat until meet the target or the queue is empty
-            case qbytes(QTab, NewState2) > MaxBytes of
-                true ->
-                    trim_global_q_entries(QTab, MaxBytes, Cs2, NewState2, Entries + 1, Objects + NumObjects);
-                _ ->
-                    {Cs2, NewState2, Entries + 1, Objects + NumObjects}
-            end
     end.
 
 %% ================================================================================================================== %%
@@ -584,11 +571,11 @@ ack_seq(Seq, Remote, State) ->
         [{_, _, Bin, _, Completed}] ->
             NewCompleted = [Remote#remote.name | Completed],
             ShrinkSize = ets_obj_size(Bin, State),
-            NewRemote = update_remote_size(Remote, -ShrinkSize),
+            NewRemote = update_remote_queue_size(Remote, -ShrinkSize),
             case AllRemoteNames -- NewCompleted of
                 [] ->
                     ets:delete(QTab, Seq),
-                    NewState = update_q_size(State, -ShrinkSize),
+                    NewState = update_queue_size(State, -ShrinkSize),
                     {NewRemote, NewState};
                 _ ->
                     ets:update_element(QTab, Seq, {5, NewCompleted}),
@@ -625,40 +612,22 @@ maybe_flip_overload(State) ->
             State
     end.
 
+
 flush_pending_pushes() ->
     receive
         {'$gen_cast', {push, NumItems, Bin}} ->
             riak_repl2_rtq_proxy:push(NumItems, Bin),
+            flush_pending_pushes();
+        {'$gen_cast', {push, NumItems, Bin, Meta}} ->
+            riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
+            flush_pending_pushes();
+        {'$gen_cast', {push, NumItems, Bin, Meta, Completed}} ->
+            riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, Completed),
             flush_pending_pushes()
     after
         1000 ->
             ok
     end.
-
-
-
-
-meta_get(Key, Default, Meta) ->
-    case orddict:find(Key, Meta) of
-        error -> Default;
-        {ok, Value} -> Value
-    end.
-
-
-
-set_local_forwards_meta(LocalForwards, QEntry) ->
-    set_meta(QEntry, local_forwards, LocalForwards).
-
-set_filtered_clusters_meta(FilteredClusters, QEntry) ->
-    set_meta(QEntry, filtered_clusters, FilteredClusters).
-
-set_acked_clusters_meta(AckedClusters, QEntry) ->
-    set_meta(QEntry, acked_clusters, AckedClusters).
-
-set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
-    Meta2 = orddict:store(Key, Value, Meta),
-    {Seq, NumItems, Bin, Meta2}.
-
 
 
 
@@ -673,36 +642,52 @@ ets_obj_size(Obj, WordSize) when is_binary(Obj) ->
 ets_obj_size(Obj, _) ->
   erlang:size(Obj).
 
-update_q_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
-  State#state{qsize_bytes = CurrentQSize + Diff}.
 
-update_consumer_q_sizes(State = #state{cs = Cs}, Diff, AllowedNames) ->
-    Cs2 = lists:map(
-        fun(C) ->
-            case lists:member(C#c.name, AllowedNames) of
+
+
+update_queue_size(State = #state{qsize_bytes = CurrentQSize}, Diff) ->
+    State#state{qsize_bytes = CurrentQSize + Diff}.
+
+update_remotes_queue_size(State = #state{remotes = Remotes}, Diff, RemoteNames) ->
+    UpdatedRemotes = lists:map(
+        fun(Remote) ->
+            case lists:member(Remote#remote.name, RemoteNames) of
                 true ->
-                    update_cq_size(C, Diff);
+                    update_remote_queue_size(Remote, Diff);
                 false ->
-                    C
+                    Remote
             end
-        end, Cs),
-    State#state{cs = Cs2}.
-
-
-update_remote_size(Remote = #remote{rsize_bytes = RBytes}, Diff) ->
+        end, Remotes),
+    State#state{remotes = UpdatedRemotes}.
+update_remote_queue_size(Remote = #remote{rsize_bytes = RBytes}, Diff) ->
     Remote#remote{rsize_bytes = RBytes + Diff}.
 
 
 
+update_remotes_total_drops(State = #state{remotes = Remotes}, Diff, RemoteNames) ->
+    UpdatedRemotes = lists:map(
+        fun(Remote) ->
+            case lists:member(Remote#remote.name, RemoteNames) of
+                true ->
+                    update_remote_total_drops(Remote, Diff);
+                false ->
+                    Remote
+            end
+        end, Remotes),
+    State#state{remotes = UpdatedRemotes}.
+update_remote_total_drops(Remote = #remote{total_drops = Drops}, Diff) ->
+    Remote#remote{total_drops = Drops + Diff}.
 
 
 
-get_all_delivery_funs(C) ->
-    case C#c.deliver of
-        undefined ->
-            C#c.delivery_funs;
-        Deliver ->
-            C#c.delivery_funs ++ [Deliver]
+is_queue_empty(Name, Remotes) ->
+    case lists:keytake(Name, #remote.name, Remotes) of
+        {value,  #remote{rsize_bytes = RBytes}, _Remotes2} ->
+            case RBytes == 0 of
+                true -> false;
+                false -> true
+            end;
+        false -> lager:error("Unknown queue")
     end.
 
 
@@ -712,44 +697,27 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
     %% when EQC testing, don't account for ETS overhead
     QSizeBytes.
 
-get_queue_max_bytes(#state{default_max_bytes = Default}) ->
-    Default.
+get_queue_max_bytes() ->
+    %% Default maximum realtime queue size to 100Mb
+    app_helper:get_env(riak_repl, rtq_max_bytes, ?DEFAULT_MAX_BYTES).
 
 get_remote_max_bytes(_) ->
-    undefined.
+    app_helper:get_env(riak_repl, rtq_remote_max_bytes, ?DEFAULT_MAX_BYTES).
 
 -else.
 qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
 
-get_queue_max_bytes(#state{default_max_bytes = Default}) ->
+get_queue_max_bytes() ->
     case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
-        undefined -> Default;
+        undefined -> get_queue_max_bytes();
         MaxBytes -> MaxBytes
     end.
 
-get_remote_max_bytes(#remote{name = Name}) ->
-    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
--endif.
-
-is_queue_empty(Name, Cs) ->
-    case lists:keytake(Name, #c.name, Cs) of
-        {value,  #c{consumer_qbytes = CBytes}, _Cs2} ->
-            case CBytes == 0 of
-                true -> false;
-                false -> true
-            end;
-        false -> lager:error("Unknown queue")
-    end.
-
-
-%% Find the first sequence number
-minseq(QTab, QSeq) ->
-    case ets:first(QTab) of
-        '$end_of_table' ->
-            QSeq;
-        MinSeq ->
-            MinSeq - 1
-    end.
-
+get_remote_max_bytes(Remote = #remote{name = Name}) ->
+    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}) of
+        undefined -> get_remote_max_bytes(Remote);
+        MaxBytes -> MaxBytes
+    end,
+    -endif.

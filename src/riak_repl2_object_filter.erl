@@ -16,7 +16,8 @@
     get_version/0,
     fullsync_filter/2,
     get_realtime_blacklist/1,
-    realtime_filter/2
+    realtime_filter/2,
+    realtime_blacklist/1
 ]).
 
 -define(MD_USERMETA, <<"X-Riak-Meta">>).
@@ -124,6 +125,15 @@ realtime_filter(RemoteName, Meta) ->
         _ ->
             false
     end.
+
+realtime_blacklist(Meta) ->
+     case get_status(realtime) of
+         enabled ->
+             case orddict:find(?BT_META_BLACKLIST, Meta) of
+                 {ok, Blacklist} -> Blacklist;
+                 _ -> []
+             end
+     end.
 
 %%%===================================================================
 %%% Helper Functions

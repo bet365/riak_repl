@@ -9,7 +9,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start/0, start_link/0, push/2, push/3]).
+-export([start/0, start_link/0, push/2, push/3, push/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -43,7 +43,10 @@ push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 
 push(NumItems, Bin, Meta) ->
-    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta}).
+    push(NumItems, Bin, Meta, []).
+
+push(NumItems, Bin, Meta, PreCompleted) ->
+    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta, PreCompleted}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -65,13 +68,14 @@ handle_call(_Request, _From, State) ->
 
 % we got a push from an older process/node, so upgrade it and retry.
 handle_cast({push, NumItems, Bin}, State) ->
-    handle_cast({push, NumItems, Bin, []}, State);
-
-handle_cast({push, NumItems, _Bin, _Meta}, State = #state{nodes=[]}) ->
+    handle_cast({push, NumItems, Bin, [], []}, State);
+handle_cast({push, NumItems, Bin, Meta}, State) ->
+    handle_cast({push, NumItems, Bin, Meta, []}, State);
+handle_cast({push, NumItems, _Bin, _Meta, _Completed}, State = #state{nodes=[]}) ->
     lager:warning("No available nodes to proxy ~p objects to~n", [NumItems]),
     catch(riak_repl_stats:rt_source_errors()),
     {noreply, State};
-handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
+handle_cast({push, NumItems, W1BinObjs, Meta, Completed}, State) ->
     %% push items to another node for queueing. If the other node does not speak binary
     %% object format, then downconvert the items (if needed) before pushing.
     [Node | Nodes] = State#state.nodes,
@@ -82,12 +86,9 @@ handle_cast({push, NumItems, W1BinObjs, Meta}, State) ->
         true ->
             case riak_core_capability:get({riak_repl, ack_list}, false) of
                 false ->
-                    %% remove data from meta (could do it in queue!)
-                    Meta1 = orddict:erase(acked_clusters, Meta),
-                    Meta2 = orddict:erase(filtered_clusters, Meta1),
-                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta2});
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta});
                 true ->
-                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta})
+                    gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs, Meta, Completed})
             end;
         false ->
             gen_server:cast({riak_repl2_rtq, Node}, {push, NumItems, BinObjs})

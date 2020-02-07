@@ -1,20 +1,4 @@
-%% Riak EnterpriseDS
-%% Copyright (c) 2007-2012 Basho Technologies, Inc.  All Rights Reserved.
-
 %% @doc Queue module for realtime replication.
-%%
-%% The queue strives to reliably pass on realtime replication, with the
-%% aim of reducing the need to fullsync.  Every item in the queue is
-%% given a sequence number when pushed.  Consumers register with the
-%% queue, then pull passing in a function to receive items (executed
-%% on the queue process - it can cast/! as it desires).
-%%
-%% Once the consumer has delievered the item, it must ack the queue
-%% with the sequence number.  If multiple deliveries have taken
-%% place an ack of the highest seq number acknowledge all previous.
-%%
-%% The queue is currently stored in a private ETS table.  Once
-%% all consumers are done with an item it is removed from the table.
 -module(riak_repl2_rtq).
 -include("riak_repl.hrl").
 
@@ -26,6 +10,7 @@
     start_link/1,
     register/1,
     unregister/1,
+    push/4,
     push/3,
     push/2,
     ack/2,
@@ -52,19 +37,21 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--record(state, {qtab = ets:new(?MODULE, [protected, ordered_set]), % ETS table
-                qseq = 0,  % Last sequence number handed out
-                overload = ?DEFAULT_OVERLOAD :: pos_integer(), % if the message q exceeds this, the rtq is overloaded
-                recover = ?DEFAULT_RECOVER :: pos_integer(), % if the rtq is in overload mode, it does not recover until =<
-                overloaded = false :: boolean(),
-                overload_drops = 0 :: non_neg_integer(),
-                shutting_down=false,
-                qsize_bytes = 0,
-                word_size=erlang:system_info(wordsize),
-                remotes = [],
-                all_remote_names = [],
-                remotes_to_restart = []
-               }).
+-record(state,
+{
+    qtab = ets:new(?MODULE, [protected, ordered_set, {read_concurrency, true}]), % ETS table
+    qseq = 0,  % Last sequence number handed out
+    overload = ?DEFAULT_OVERLOAD :: pos_integer(), % if the message q exceeds this, the rtq is overloaded
+    recover = ?DEFAULT_RECOVER :: pos_integer(), % if the rtq is in overload mode, it does not recover until =<
+    overloaded = false :: boolean(),
+    overload_drops = 0 :: non_neg_integer(),
+    shutting_down=false,
+    qsize_bytes = 0,
+    word_size=erlang:system_info(wordsize),
+    remotes = [],
+    all_remote_names = [],
+    remotes_to_restart = []
+}).
 
 -record(remote,
 {
@@ -77,9 +64,6 @@
     rsize_bytes = 0,
     max_ack = 0
 }).
-
--type name() :: term().
--type seq() :: non_neg_integer().
 
 %%%===================================================================
 %%% API
@@ -139,15 +123,17 @@ all_queues_empty() ->
 push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 push(NumItems, Bin, Meta) ->
+    push(NumItems, Bin, Meta, []).
+push(NumItems, Bin, Meta, PreCompleted) ->
     case ets:lookup(?overload_ets, overloaded) of
         [{overloaded, true}] ->
             lager:debug("rtq overloaded"),
             riak_repl2_rtq_overload_counter:drop();
         [{overloaded, false}] ->
-            gen_server:cast(?SERVER, {push, NumItems, Bin, Meta})
+            gen_server:cast(?SERVER, {push, NumItems, Bin, Meta, PreCompleted})
     end.
 
-%% TODO provide the ability to pass a list of seq numbers
+
 ack(Name, Seqs) ->
     gen_server:cast(?SERVER, {ack, Name, Seqs}).
 
@@ -207,24 +193,29 @@ handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
 %% TODO decide if this code stays (it is legacy) [they are needed for backward compatibility]
 % either old code or old node has sent us a old push, upvert it.
 handle_call({push, NumItems, Bin}, From, State) ->
-    handle_call({push, NumItems, Bin, []}, From, State);
-handle_call({push, NumItems, Bin, Meta}, _From, State) ->
+    handle_call({push, NumItems, Bin, [], []}, From, State);
+handle_call({push, NumItems, Bin, Meta, []}, From, State) ->
+    handle_call({push, NumItems, Bin, Meta, []}, From, State);
+handle_call({push, NumItems, Bin, Meta, Completed}, _From, State) ->
     State2 = maybe_flip_overload(State),
-    {reply, ok, push(NumItems, Bin, Meta, State2)}.
+    {reply, ok, push(NumItems, Bin, Meta, Completed, State2)}.
 %%%=====================================================================================================================
 
-% ye previous cast. rtq_proxy may send us an old pattern.
+% have to have backward compatability for cluster upgrades
 handle_cast({push, NumItems, Bin}, State) ->
-    handle_cast({push, NumItems, Bin, []}, State);
-handle_cast({push, _NumItems, _Bin, _Meta}, State=#state{remotes=[]}) ->
-    {noreply, State};
+    handle_cast({push, NumItems, Bin, [], []}, State);
 handle_cast({push, NumItems, Bin, Meta}, State) ->
+    handle_cast({push, NumItems, Bin, Meta, []}, State);
+handle_cast({push, _NumItems, _Bin, _Meta, _Completed}, State=#state{remotes=[]}) ->
+    {noreply, State};
+handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
     State2 = maybe_flip_overload(State),
-    {noreply, push(NumItems, Bin, Meta, State2)};
+    {noreply, push(NumItems, Bin, Meta, PreCompleted, State2)};
 
 handle_cast({ack, Name, Seqs}, State) ->
        {noreply, ack_seqs(Name, Seqs, State)};
 
+%%TODO: should we include remote drops?
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
     Drops = State#state.overload_drops + N,
@@ -232,11 +223,11 @@ handle_cast({report_drops, N}, State) ->
     State3 = maybe_flip_overload(State2),
     {noreply, State3}.
 
-%% @private
+
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-%% @private
+%%TODO: this needs fixing
 terminate(Reason, State) ->
   lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
     %% when started from tests, we may not be registered
@@ -245,7 +236,7 @@ terminate(Reason, State) ->
 %%    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
     ok.
 
-%% @private
+
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 %% ================================================================================================================== %%
@@ -342,8 +333,6 @@ make_status(State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
 %% ================================================================================================================== %%
 %% Push
 %% ================================================================================================================== %%
-push(NumItems, Bin, Meta, State) ->
-    push(NumItems, Bin, Meta, [], State).
 push(NumItems, Bin, Meta, PreCompleted, State) ->
     #state
     {
@@ -560,30 +549,37 @@ ack_seqs(Name, Seqs, State = #state{remotes = Remotes}) ->
             UpdatedState#state{remotes = [UpdatedRemote |Remotes2]}
     end.
 
-ack_seq(Seq, Remote, State) ->
+ack_seq(Seq, Remote = #remote{max_ack = MaxAck}, State) ->
     #state{qtab = QTab, qsize_bytes = QSize, all_remote_names = AllRemoteNames} = State,
+    NewRemote1 =
+        case Seq > MaxAck of
+            true ->
+                Remote#remote{max_ack = Seq};
+            false ->
+                Remote
+        end,
     case ets:lookup(QTab, Seq) of
         [] ->
             %% TODO:
             %% the queue has been trimmed due to reaching its maximum size
             %% but this has been sent and acked! - so we can reduce the dropped counter
-            {Remote, State};
+            {NewRemote1, State};
         [{_, _, Bin, _, Completed}] ->
-            NewCompleted = [Remote#remote.name | Completed],
+            NewCompleted = [NewRemote1#remote.name | Completed],
             ShrinkSize = ets_obj_size(Bin, State),
-            NewRemote = update_remote_queue_size(Remote, -ShrinkSize),
+            NewRemote2 = update_remote_queue_size(NewRemote1, -ShrinkSize),
             case AllRemoteNames -- NewCompleted of
                 [] ->
                     ets:delete(QTab, Seq),
                     NewState = update_queue_size(State, -ShrinkSize),
-                    {NewRemote, NewState};
+                    {NewRemote2, NewState};
                 _ ->
                     ets:update_element(QTab, Seq, {5, NewCompleted}),
-                    {NewRemote, State}
+                    {NewRemote2, State}
             end;
         UnExpectedObj ->
             lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
-            {Remote, QSize}
+            {NewRemote1, QSize}
     end.
 %% ================================================================================================================== %%
 

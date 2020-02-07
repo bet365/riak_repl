@@ -27,6 +27,7 @@
 %%%===================================================================
 
 %% ================================================================================================================== %%
+%%TODO might need to put this back for testing purposes
 summarize() ->
     gen_server:call(?SERVER, summarize, infinity).
 
@@ -92,20 +93,11 @@ pull(Name, DeliverFun, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
                     [maybe_pull(QTab, QSeq, C, CsNames, DeliverFun) | Cs2];
                 false ->
                     lager:error("Consumer ~p pulled from RTQ, but was not registered", [Name]),
-                    _ = deliver_error(DeliverFun, not_registered),
+%%                    _ = deliver_error(DeliverFun, not_registered),
                     Cs
             end,
     State#state{cs = UpdCs}.
 
-
-
-
-%% Deliver an error if a delivery function is registered.
-deliver_error(DeliverFun, Reason) when is_function(DeliverFun)->
-    catch DeliverFun({error, Reason}),
-    ok;
-deliver_error(_NotAFun, _Reason) ->
-    ok.
 
 maybe_pull(QTab, QSeq, C = #c{cseq = CSeq}, CsNames, DeliverFun) ->
     CSeq2 = CSeq + 1,
@@ -205,94 +197,13 @@ deliver_item(C, DeliverFun, {Seq, _NumItems, _Bin, _Meta} = QEntry) ->
             %% do not advance head so it will be delivered again
             C#c{errs = C#c.errs + 1, deliver = undefined}
     end.
-
-% if nothing has been delivered, the sink assumes nothing was skipped
-% fulfill that expectation.
-set_skip_meta(QEntry, _Seq, _C = #c{delivered = false}) ->
-    set_meta(QEntry, skip_count, 0);
-set_skip_meta(QEntry, _Seq, _C = #c{skips = S}) ->
-    set_meta(QEntry, skip_count, S).
-
-set_meta({Seq, NumItems, Bin, Meta}, Key, Value) ->
-    Meta2 = orddict:store(Key, Value, Meta),
-    {Seq, NumItems, Bin, Meta2}.
-
 %% ================================================================================================================== %%
+%% TODO this has to go back into riak_repl2_rtq! for testing purposes
 ack_sync(Name, Seq) ->
     gen_server:call(?SERVER, {ack_sync, Name, Seq, os:timestamp()}, infinity).
 
 handle_call({ack_sync, Name, Seq, Ts}, _From, State) ->
     {reply, ok, ack_seq(Name, Seq, Ts, State)}.
-
-%% ================================================================================================================== %%
-
-handle_call(status, _From, State = #state{qtab = QTab, qseq = QSeq, cs = Cs}) ->
-
-    MaxBytes = get_queue_max_bytes(State),
-
-    Consumers =
-        [{Name, [{consumer_qbytes, CBytes},
-            {consumer_max_qbytes, get_consumer_max_bytes(C)},
-            {pending, QSeq - CSeq},  % items to be send
-            {unacked, CSeq - ASeq - Skips},  % sent items requiring ack
-            {c_drops, CDrops},
-            {q_drops, QDrops},
-            {drops, Drops},          % number of dropped entries due to max bytes
-            {errs, Errs},            % number of non-ok returns from deliver fun
-            {filtered, Filtered}]}    % number of objects filtered
-
-            || #c{name = Name, aseq = ASeq, cseq = CSeq, skips = Skips, q_drops = QDrops, c_drops = CDrops, drops = Drops,
-            filtered = Filtered, errs = Errs, consumer_qbytes = CBytes} = C <- Cs],
-
-    GetTrimmedFolsomMetrics =
-        fun(MetricName) ->
-            lists:foldl(fun
-                            ({min, Value}, Acc) -> [{latency_min, Value} | Acc];
-                            ({max, Value}, Acc) -> [{latency_max, Value} | Acc];
-                            ({percentile, Value}, Acc) -> [{latency_percentile, Value} | Acc];
-                            (_, Acc) -> Acc
-                        end, [], folsom_metrics:get_histogram_statistics(MetricName))
-        end,
-
-
-    UpdatedConsumerStats = lists:foldl(fun(ConsumerName, Acc) ->
-        MetricName = {latency, ConsumerName},
-        case folsom_metrics:metric_exists(MetricName) of
-            true ->
-                case lists:keytake(ConsumerName, 1, Acc) of
-                    {value, {ConsumerName, ConsumerStats}, Rest} ->
-                        [{ConsumerName, ConsumerStats ++ GetTrimmedFolsomMetrics(MetricName)} | Rest];
-                    _ ->
-                        Acc
-                end;
-            false ->
-                Acc
-        end
-                                       end, Consumers, [ C#c.name || C <- Cs ]),
-
-    Status =
-        [{bytes, qbytes(QTab, State)},
-            {max_bytes, MaxBytes},
-            {consumers, UpdatedConsumerStats},
-            {overload_drops, State#state.overload_drops}],
-    {reply, Status, State};
-
--ifdef(TEST).
-qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
-    %% when EQC testing, don't account for ETS overhead
-    QSizeBytes.
-
--else.
-get_queue_max_bytes(#state{default_max_bytes = Default}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
-        undefined -> Default;
-        MaxBytes -> MaxBytes
-    end.
-
-get_consumer_max_bytes(#c{name = Name}) ->
-    riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}).
--endif.
-
 
 %% ================================================================================================================== %%
 record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
@@ -302,53 +213,4 @@ record_consumer_latency(Name, OldLastSeen, SeqNumber, NewTimestamp) ->
         _ ->
             % Don't log for a non-matching seq number
             skip
-    end.
-
-
-
-%% ================================================================================================================== %%
-cleanup(C, QTab, NewAck, OldAck, State) ->
-    AllConsumerNames = [C1#c.name || C1 <- State#state.cs],
-    queue_cleanup(C, AllConsumerNames, QTab, NewAck, OldAck, State).
-
-queue_cleanup(C, _AllClusters, _QTab, '$end_of_table', _OldSeq, State) ->
-    {State, C};
-queue_cleanup(#c{name = Name} = C, AllClusters, QTab, NewAck, OldAck, State) when NewAck > OldAck ->
-    case ets:lookup(QTab, NewAck) of
-        [] ->
-            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State);
-        [{_, _, Bin, Meta} = QEntry] ->
-            Routed = meta_get(routed_clusters, [], Meta),
-            Filtered = meta_get(filtered_clusters, [], Meta),
-            Acked = meta_get(acked_clusters, [], Meta),
-            NewAcked = Acked ++ [Name],
-            QEntry2 = set_acked_clusters_meta(NewAcked, QEntry),
-            RoutedFilteredAcked = Routed ++ Filtered ++ NewAcked,
-            ShrinkSize = ets_obj_size(Bin, State),
-            NewC = update_cq_size(C, -ShrinkSize),
-            State2 = case AllClusters -- RoutedFilteredAcked of
-                         [] ->
-                             ets:delete(QTab, NewAck),
-                             update_q_size(State, -ShrinkSize);
-                         _ ->
-                             ets:insert(QTab, QEntry2),
-                             State
-                     end,
-            queue_cleanup(NewC, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State2);
-        UnExpectedObj ->
-            lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
-            queue_cleanup(C, AllClusters, QTab, ets:prev(QTab, NewAck), OldAck, State)
-    end;
-queue_cleanup(C, _AllClusters, _QTab, _NewAck, _OldAck, State) ->
-    {State, C}.
-
-
-%% ================================================================================================================== %%
-save_consumer(C, DeliverFun) ->
-    case C#c.deliver of
-        undefined ->
-            C#c{deliver = DeliverFun};
-        _ ->
-            DeliveryFuns = C#c.delivery_funs ++ [DeliverFun],
-            C#c{delivery_funs = DeliveryFuns}
     end.

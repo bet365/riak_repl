@@ -20,30 +20,20 @@
 
 -record(state,
 {
-    name
+    name,
+    consumers,
+    remote_tab = ets:new(?MODULE, [protected, ordered_set]),
+    rtq_tab,
+    qseq
+
 }).
 
 % Consumers
 -record(consumer,
 {
-    name,      % consumer name
-    aseq = 0,  % last sequence acked
-    cseq = 0,  % last sequence sent
-    skips = 0,
-    filtered = 0,
-    q_drops = 0, % number of dropped queue entries (not items)
-    c_drops = 0,
-    drops = 0,
-    errs = 0,  % delivery errors
-    deliver,  % deliver function if pending, otherwise undefined
-    delivery_funs = [],
-    delivered = false,  % used by the skip count.
-    % skip_count is used to help the sink side determine if an item has
-    % been dropped since the last delivery. The sink side can't
-    % determine if there's been drops accurately if the source says there
-    % were skips before it's sent even one item.
-    last_seen,  % a timestamp of when we received the last ack to measure latency
-    consumer_qbytes = 0
+    pid,
+    aseq = 0,
+    cseq = 0
 }).
 
 %%%===================================================================
@@ -56,18 +46,27 @@ start_link(Name) ->
 restart_sending(Pid) ->
     gen_server:cast(Pid, restart_sending).
 
+pull(Pid, ConnPid)->
+    gen_server:cast(Pid, {pull, ConnPid}).
+
+%% pull, if at head of queue store the pid
+%% when we receive restart_sending, send as many objects to as many pids as possible
+%% when we ack, this should act as another pull
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
 init([Name]) ->
     %% register to riak_repl2_rtq
-    S = self(),
-    riak_repl2_rtq:register(Name, S),
-    {ok, #state{name = Name}}.
+    {QTab, QSeq} = riak_repl2_rtq:register(Name),
+    {ok, #state{name = Name, qtab = QTab, qseq = QSeq}}.
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
+
+handle_cast({pull, Pid}, State) ->
+    {noreply, State};
 
 handle_cast(_Request, State) ->
     {noreply, State}.

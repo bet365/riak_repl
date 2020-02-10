@@ -91,7 +91,9 @@
                 hb_timeout_tref,% heartbeat timeout timer reference
                 hb_sent_q,   % queue of heartbeats now() that were sent
                 hb_rtt,    % RTT in milliseconds for last completed heartbeat
-                cont = <<>>}). % continuation from previous TCP buffer
+                cont = <<>>, % continuation from previous TCP buffer
+                ack_ref
+}).
 
 %% API - start trying to send realtime repl to remote site
 start_link(Remote) ->
@@ -148,7 +150,8 @@ get_socketname_primary(Pid) ->
 
 %% Initialize
 init([Remote]) ->
-  {ok, #state{remote = Remote}}.
+    Ref = make_ref(),
+  {ok, #state{remote = Remote, ack_ref = Ref}}.
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, routine}, ok, State};
@@ -211,7 +214,7 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
 handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
-            State = #state{remote = Remote}) ->
+            State = #state{remote = Remote, ack_ref = Ref}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
@@ -219,7 +222,7 @@ handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             lager:debug("RT source connection negotiated ~p wire format from proto ~p", [Ver, Proto]),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, Ref),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             lager:debug("Keeping stats for " ++ SocketTag),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source,

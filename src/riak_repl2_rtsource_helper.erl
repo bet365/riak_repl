@@ -8,7 +8,7 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/4,
+-export([start_link/5,
     stop/1,
     v1_ack/2,
     status/1, status/2, send_heartbeat/1]).
@@ -29,11 +29,12 @@
                 sent_seq,   % last sequence sent
                 v1_offset = 0,
                 v1_seq_map = [],
-                objects = 0 % number of objects sent - really number of pulls as could be multiobj
+                objects = 0, % number of objects sent - really number of pulls as could be multiobj
+                ack_ref
 }).
 
-start_link(Remote, Transport, Socket, Version) ->
-    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version], []).
+start_link(Remote, Transport, Socket, Version, AckRef) ->
+    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, AckRef], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -54,11 +55,11 @@ send_heartbeat(Pid) ->
     %% as it is responsible for checking heartbeat
     gen_server:cast(Pid, send_heartbeat).
 
-init([Remote, Transport, Socket, Version]) ->
+init([Remote, Transport, Socket, Version, AckRef]) ->
     Me = self(),
     Deliver = fun(Result) -> gen_server:call(Me, {pull, Result}, infinity) end,
     State = #state{remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, deliver_fun = Deliver},
+        socket = Socket, deliver_fun = Deliver, ack_ref = AckRef},
     async_pull(State),
     {ok, State}.
 

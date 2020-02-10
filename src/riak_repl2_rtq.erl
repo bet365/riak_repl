@@ -150,9 +150,9 @@ init(Options) ->
     {ok, #state{overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
-handle_call({register, Name}, Pid, State = #state{qtab = QTab, qseq = QSeq}) ->
+handle_call({register, Name}, Pid, State = #state{qtab = QTab}) ->
     NewState = register_remote(Name, Pid, State),
-    {reply, {QTab, QSeq}, NewState};
+    {reply, QTab, NewState};
 
 
 handle_call({unregister, Name}, _From, State) ->
@@ -348,8 +348,9 @@ push(NumItems, Bin, Meta, PreCompleted, State) ->
         {Send, Completed} ->
             % create object to place into queue
             QSeq2 = QSeq + 1,
-            UpdatedMeta = set_local_forwards_meta(Send, Meta),
-            QEntry = {QSeq2, NumItems, Bin, UpdatedMeta, Completed},
+            Meta1 = set_local_forwards_meta(Send, Meta),
+            Meta2 = set_skip_meta(Meta1),
+            QEntry = {QSeq2, NumItems, Bin, Meta2, Completed},
             State1 = State#state{qseq = QSeq2},
 
             %% insert object into queue
@@ -360,8 +361,8 @@ push(NumItems, Bin, Meta, PreCompleted, State) ->
             State2 = update_queue_size(State1, Size),
             State3 = update_remotes_queue_size(State2, Size, Send),
 
-            %% update remotes that are at the head of the queue
-            State4 = restart_remotes(QSeq2, State3),
+            %% push to reference queues
+            State4 = push_to_remotes(Send, QSeq2, State3),
 
             %% (trim consumers) find out if consumers have reach maximum capacity
             State5 = maybe_trim_remote_queues(State4),
@@ -394,20 +395,19 @@ meta_get(Key, Default, Meta) ->
 set_local_forwards_meta(LocalForwards, Meta) ->
     orddict:store(local_forwards, LocalForwards, Meta).
 
-restart_remotes(Seq, State = #state{remotes_to_restart = RemoteSeqs}) ->
-    NotRestarted = restart_remote(Seq, RemoteSeqs, []),
-    State#state{remotes_to_restart = NotRestarted}.
-restart_remote(_, [], Acc) ->
-    Acc;
-restart_remote(Seq, [{Seq2, Pid} | Rest], Acc) ->
-    case Seq > Seq2 of
-        true ->
-            %% TODO: check is this needs to be try catch'd
-            riak_repl2_reference_rtq:restart_sending(Pid),
-            restart_remote(Seq, Rest, Acc);
-        false ->
-            restart_remote(Seq, Rest, [{Seq2,Pid} | Acc])
-    end.
+set_skip_meta(Meta) ->
+    orddict:store(skip_count, 0, Meta).
+
+push_to_remotes([], _Seq, State) ->
+    State;
+push_to_remotes([RemoteName | Rest], Seq, State = #state{remotes = Remotes}) ->
+    case lists:keyfind(RemoteName, #remote.name, Remotes) of
+        {_, Remote} ->
+            riak_repl2_reference_rtq:push(Remote#remote.pid, Seq);
+        _ ->
+            ok
+    end,
+    push_to_remotes(Rest, Seq, State).
 
 %% ==================================================== %%
 %% Trimming Remote Queues

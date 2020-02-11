@@ -40,7 +40,9 @@
 {
     pid = undefined, %% rtsource_helper pid to push objects
     aseq = 0,
-    cseq = 0
+    cseq = 0,
+    batch_sent = 0,
+    batch_acked = 0
 }).
 
 %%%===================================================================
@@ -56,9 +58,6 @@ push(Pid, Seq) ->
 register(Pid, HelperPid, Ref)->
     gen_server:call(Pid, {register, HelperPid, Ref}, infinity).
 
-%% pull, if at head of queue store the pid
-%% when we receive restart_sending, send as many objects to as many pids as possible
-%% when we ack, this should act as another pull
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -154,24 +153,61 @@ maybe_deliver_object(ConsumerRef, QEntry, #state{consumers = Consumers} = State)
     end.
 
 deliver_object(ConsumerRef, Consumer, QEntry, State) ->
-    #state{reference_tab = RefTab, sent_tab = SentTab, current_seq = CurrentSeq, consumers = Consumers} = State,
-    #consumer{pid = Pid, cseq = CSeq} = Consumer,
+    #state
+    {
+        reference_tab = RefTab, sent_tab = SentTab,
+        current_seq = CurrentSeq, consumers = Consumers,
+        consumer_queue = ConsumerQ
+    } = State,
+    #consumer
+    {
+        pid = Pid, cseq = CSeq, batch = Batch,
+        batch_sent = BatchSent, batch_acked = BatchAcked
+    } = Consumer,
+
     {QSeq, NumItems, Bin, Meta, _Completed} = QEntry,
     Entry = {CSeq, NumItems, Bin, Meta},
-    try
-        %% send to rtsource helper
-        ok = riak_repl2_rtsource_helper:send_object(Pid, Entry),
-        %% insert into sent table
-        ets:insert(SentTab, {{ConsumerRef, CSeq}, QSeq}),
-        %% delete from reference table
-        ets:delete(RefTab, CurrentSeq),
-        %% update consumer
-        UpdatedConsumer = Consumer#consumer{cseq = CSeq + 1},
-        %% update state
-        State#state{current_seq = CurrentSeq +1, consumers = orddict:store(ConsumerRef, UpdatedConsumer, Consumers)}
-    catch Type:Error ->
-            lager:warning("failed to send object to rtsource helper pid: ~p", [Pid]),
+
+    OkError =
+        try
+            %% send to rtsource helper
+            ok = riak_repl2_rtsource_helper:send_object(Pid, Entry),
+            ok
+        catch Type:Error ->
+            {error, Type, Error}
+        end,
+
+    case OkError of
+        ok ->
+            %% insert into sent table
+            ets:insert(SentTab, {{ConsumerRef, CSeq}, QSeq}),
+
+            %% delete from reference table
+            ets:delete(RefTab, CurrentSeq),
+
+            %% update consumer
+            UpdatedConsumer = Consumer#consumer{cseq = CSeq +1, batch_sent = BatchSent +1},
+
+            %% update consumers orddict
+            UpdatedConsumers = orddict:store(ConsumerRef, UpdatedConsumer, Consumers),
+
+            %% update consumer queue
+            UpdatedConsumerQ =
+                case UpdatedConsumer#consumer.batch_sent == Batch of
+                    true ->
+                        ConsumerQ;
+                    false ->
+                        queue:in(ConsumerRef, ConsumerQ)
+                end,
+
+            %% update state
+            State#state
+            {
+                current_seq = CurrentSeq +1, consumers = UpdatedConsumers, consumer_queue = UpdatedConsumerQ
+            };
+        {error, Type, Error} ->
+            lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
             maybe_deliver_object(QEntry, State)
-    end
+    end.
 

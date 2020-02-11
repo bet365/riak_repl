@@ -367,7 +367,7 @@ push(NumItems, Bin, Meta, PreCompleted, State) ->
             %% (trim consumers) find out if consumers have reach maximum capacity
             State5 = maybe_trim_remote_queues(State4),
 
-            %% (trime queue) find out if queue reached maximum capcity
+            %% (trim queue) find out if queue reached maximum capacity
             maybe_trim_queue(State5)
     end;
 push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = true}) ->
@@ -455,6 +455,7 @@ trim_remote_queues(Remotes, Seq, State = #state{remotes = OkRemotes, qseq = QTab
                     ets:delete(QTab, Seq);
                 _ ->
                     %% update queue entry
+                    %% TODO: this will not get rid of the sequence number in the reference queue!?? This might be okay
                     ets:update_element(QTab, Seq, {5, NewCompleted})
 
             end,
@@ -611,14 +612,14 @@ maybe_flip_overload(State) ->
 
 flush_pending_pushes() ->
     receive
-        {'$gen_cast', {push, NumItems, Bin}} ->
-            riak_repl2_rtq_proxy:push(NumItems, Bin),
+        {'$gen_cast', {push, NumItems, Bin, Meta, Completed}} ->
+            riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, Completed),
             flush_pending_pushes();
         {'$gen_cast', {push, NumItems, Bin, Meta}} ->
             riak_repl2_rtq_proxy:push(NumItems, Bin, Meta),
             flush_pending_pushes();
-        {'$gen_cast', {push, NumItems, Bin, Meta, Completed}} ->
-            riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, Completed),
+        {'$gen_cast', {push, NumItems, Bin}} ->
+            riak_repl2_rtq_proxy:push(NumItems, Bin),
             flush_pending_pushes()
     after
         1000 ->

@@ -40,9 +40,7 @@
 {
     pid = undefined, %% rtsource_helper pid to push objects
     aseq = 0,
-    cseq = 0,
-    batch_sent = 0,
-    batch_acked = 0
+    cseq = 0
 }).
 
 %%%===================================================================

@@ -1,14 +1,4 @@
-%%%-------------------------------------------------------------------
-%%% @author nordinesaabouni
-%%% @copyright (C) 2020, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 11. Feb 2020 12:42
-%%%-------------------------------------------------------------------
 -module(riak_repl2_rtq_router).
--author("nordinesaabouni").
-
 -behaviour(gen_server).
 
 %% API

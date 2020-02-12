@@ -15,21 +15,27 @@
     timer
 }).
 
--export([start_link/0, start_link/1, stop/0]).
+-export([start_link/1, start_link/2, stop/0]).
 -export([drop/0]).
+-export([name/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
     code_change/3]).
 
 %% API
 
+name(RemoteName) ->
+    IdBin = list_to_binary(RemoteName),
+    binary_to_atom(<<"riak_repl2_rtq_", IdBin/binary>>, latin1).
+
+
 %% @doc Start linked and registered as module name with default options.
-start_link() ->
+start_link(RemoteName) ->
     SendInterval = app_helper:get_env(riak_repl, rtq_drop_report_interval, ?DEFAULT_INTERVAL),
-    start_link([{report_interval, SendInterval}]).
+    start_link(RemoteName, [{report_interval, SendInterval}]).
 
 %% @doc Start linked and registered as the module name with the given options.
-start_link(Options) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, Options, []).
+start_link(RemoteName, Options) ->
+    gen_server:start_link({local, name(RemoteName)}, ?MODULE, Options, []).
 
 %% @doc Stop the counter gracefully.
 stop() ->

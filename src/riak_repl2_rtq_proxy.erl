@@ -9,7 +9,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start/0, start_link/0, push/2, push/3, push/4]).
+-export([start/0, start_link/0, push/2, push/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -43,10 +43,7 @@ push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 
 push(NumItems, Bin, Meta) ->
-    push(NumItems, Bin, Meta, []).
-
-push(NumItems, Bin, Meta, PreCompleted) ->
-    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta, PreCompleted}).
+    gen_server:cast(?MODULE, {push, NumItems, Bin, Meta}).
 
 %%%===================================================================
 %%% gen_server callbacks

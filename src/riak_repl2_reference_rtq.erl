@@ -79,20 +79,21 @@ populate_reference_table(Seq, Seq, State) ->
     State;
 populate_reference_table('$end_of_table', _Seq, State) ->
     State;
-populate_reference_table(Seq, QSeq, State = #state{reference_tab = RefTab, qtab = QTab, rseq = RSeq}) ->
+populate_reference_table(Seq, QSeq, State = #state{reference_tab = RefTab, qtab = QTab, rseq = RSeq, name = Name}) ->
+    RSeq2 = RSeq +1,
     case ets:lookup(QTab, Seq) of
         [] ->
             %% been trimmed forget it
             populate_reference_table(Seq+1, QSeq, State);
         [{Seq, _, _, _, Completed}] ->
-            case lists:member(Name, Compelted) of
+            case lists:member(Name, Completed) of
                 true ->
                     %% object is not for us
                     populate_reference_table(Seq+1, QSeq, State);
                 false ->
                     %% object is for us
-                    ets:insert(RefTab, {})
-                    populate_reference_table(Seq+1, QSeq, blag)
+                    ets:insert(RefTab, {RSeq2, Seq}),
+                    populate_reference_table(Seq+1, QSeq, State#state{rseq = RSeq2})
             end
     end.
 

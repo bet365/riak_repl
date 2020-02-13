@@ -6,6 +6,7 @@
 [
     start_link/1,
     push/2,
+    ack/3,
     register/3
 ]).
 
@@ -25,24 +26,22 @@
 -record(state,
 {
     name = undefined,
+    qtab = undefined,
     consumers = orddict:new(),
     consumer_queue = queue:new(),
     reference_tab = ets:new(?MODULE, [protected, ordered_set]),
-    sent_tab = ets:new(?MODULE, [protected, ordered_set]),
-    qtab = undefined,
-    current_seq = 0,
-    last_seq = 0
-
+    rseq = 0, %% the last sequence number in the reference queue
+    seq = 0, %% the next sequence number to send
+    total_sent = 0,
+    total_acked = 0
 }).
 
 % Consumers
 -record(consumer,
 {
     pid = undefined, %% rtsource_helper pid to push objects
-    aseq = 0,
-    cseq = 0,
-    batch_sent = 0,
-    batch_acked = 0
+    seq = undefined, %% if undefined this means that it has nothing in flight
+    qseq = undefined  %% if undefined this means that it has nothing in flight
 }).
 
 %%%===================================================================
@@ -52,8 +51,11 @@
 start_link(Name) ->
     gen_server:start_link(?MODULE, [Name], []).
 
-push(Pid, Seq) ->
-    gen_server:cast(Pid, {push, Seq}).
+push(Pid, QEntry) ->
+    gen_server:cast(Pid, {push, QEntry}).
+
+ack(Pid, Ref, Seq) ->
+    gen_server:cast(Pid, {ack, Ref, Seq}).
 
 register(Pid, HelperPid, Ref)->
     gen_server:call(Pid, {register, HelperPid, Ref}, infinity).
@@ -65,8 +67,34 @@ register(Pid, HelperPid, Ref)->
 
 init([Name]) ->
     %% register to riak_repl2_rtq
-    QTab = riak_repl2_rtq:register(Name),
-    {ok, #state{name = Name, qtab = QTab}}.
+    {Seq, QSeq, QTab} = riak_repl2_rtq:register(Name),
+
+    State = #state{name = Name, qtab = QTab},
+    %% decide if we need to populate
+    NewState = populate_reference_table(Seq, QSeq, State),
+
+    {ok, NewState}.
+
+populate_reference_table(Seq, Seq, State) ->
+    State;
+populate_reference_table('$end_of_table', _Seq, State) ->
+    State;
+populate_reference_table(Seq, QSeq, State = #state{reference_tab = RefTab, qtab = QTab, rseq = RSeq}) ->
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            %% been trimmed forget it
+            populate_reference_table(Seq+1, QSeq, State);
+        [{Seq, _, _, _, Completed}] ->
+            case lists:member(Name, Compelted) of
+                true ->
+                    %% object is not for us
+                    populate_reference_table(Seq+1, QSeq, State);
+                false ->
+                    %% object is for us
+                    ets:insert(RefTab, {})
+                    populate_reference_table(Seq+1, QSeq, blag)
+            end
+    end.
 
 handle_call({register, Ref}, Pid, State = #state{consumers = Consumers, consumer_queue = Queue}) ->
     case orddict:fetch(Ref, Consumers) of
@@ -78,18 +106,24 @@ handle_call({register, Ref}, Pid, State = #state{consumers = Consumers, consumer
             C = #consumer{pid = Pid},
             NewConsumers = orddict:store(Ref, C, Consumers),
             NewQueue = queue:in(Ref, Queue),
-            erlang:send(self(), maybe_send),
+            erlang:send(self(), maybe_pull),
             {reply, ok, State#state{consumer_queue = NewConsumers, consumer_queue = NewQueue}}
     end;
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
+handle_cast({push, QEntry}, State) ->
+    {noreply, do_push(QEntry, State)};
+
+handle_cast({ack, Ref, Seq}, State) ->
+    {noreply, ack_seq(Ref, Seq, State)};
+
 handle_cast(_Request, State) ->
     {noreply, State}.
 
-handle_info(maybe_send, State) ->
-    {noreply, maybe_send(State)};
+handle_info(maybe_pull, State) ->
+    {noreply, maybe_pull(State)};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -104,72 +138,105 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-maybe_send(State) ->
+ack_seq(Ref, Seq, State = #state{consumers = Consumers, name = Name, reference_tab = RefTab}) ->
+    case orddict:fetch(Ref, Consumers) of
+        {ok, #consumer{seq = Seq, qseq = QSeq} = Consumer} ->
+            %% Should this be a call?
+            riak_repl2_rtq:ack(Name, Seq),
+
+            %% remove from reference table
+            ets:delete(RefTab, QSeq),
+
+            %% update consumer
+            UpdatedConsumer = Consumer#consumer{seq = undefined, qseq = undefined},
+
+            %% store in state and return
+            State#state{consumers = orddict:store(Ref, UpdatedConsumer, Consumers)};
+        _ ->
+            %% this consumer is suppsoed to be dead, or sequence number did not match!
+            State
+    end.
+
+
+do_push(QEntry, State = #state{seq = Seq, rseq = RSeq, reference_tab = RefTab}) ->
+    RSeq2 = RSeq +1,
+    {QSeq, _NumItem, _Bin, _Meta, _Completed} = QEntry,
+
+    %% insert into reference table
+    ets:insert(RefTab, {RSeq2, QSeq}),
+
+    %% update reference sequence number
+    NewState = State#state{rseq = RSeq2},
+
+    %% maybe_deliver_object, only if we are at the head of the queue!
+    case RSeq == Seq of
+        true ->
+            maybe_deliver_object(RSeq2, QEntry, NewState);
+        false ->
+            NewState
+    end.
+
+
+maybe_pull(State) ->
     case maybe_get_object(State) of
-        {ok, QEntry, NewState} ->
-            maybe_deliver_object(QEntry, NewState);
+        {ok, Seq2, QEntry, NewState} ->
+            maybe_deliver_object(Seq2, QEntry, NewState);
         {error, State} ->
             State
     end.
 
-maybe_get_object(State = #state{current_seq = CurrentSeq, last_seq = LastSeq}) ->
-    ObjectAvailable = CurrentSeq >= LastSeq,
-    maybe_get_object(ObjectAvailable, State).
+maybe_get_object(State = #state{seq = Seq, rseq = RSeq}) ->
+    Seq2 = Seq +1,
+    case Seq2 =< RSeq of
+        true ->
+            maybe_get_object(Seq2, State);
+        false ->
+            {error, State}
+    end.
 
-maybe_get_object(false, State) ->
-    {error, State};
-maybe_get_object(true, #state{reference_tab = RefTab, qtab = QTab, current_seq = CurrentSeq} = State) ->
-    case ets:lookup(CurrentSeq, RefTab) of
+maybe_get_object(Seq2, #state{reference_tab = RefTab, qtab = QTab} = State) ->
+    case ets:lookup(Seq2, RefTab) of
         [] ->
             %% entry removed from reference table? This would not happen
             lager:error("something removed reference queue entry!"),
-            maybe_get_object(State#state{current_seq = CurrentSeq+1});
-        [{CurrentSeq, QSeq}] ->
+            maybe_get_object(State#state{seq = Seq2});
+        [{Seq2, QSeq}] ->
             case ets:lookup(QSeq, QTab) of
                 [] ->
                     %% entry removed, this can happen if the queue was trimmed!
-                    maybe_get_object(State#state{current_seq = CurrentSeq+1});
+                    maybe_get_object(State#state{seq = Seq2});
                 [QEntry] ->
-                    {ok, QEntry, State}
+                    {ok, Seq2, QEntry, State}
             end
     end.
 
-maybe_deliver_object(QEntry, State = #state{consumer_queue = ConsumerQ}) ->
+maybe_deliver_object(Seq2, QEntry, State = #state{consumer_queue = ConsumerQ}) ->
     case queue:out(ConsumerQ) of
         {empty, NewQ} ->
             State#state{consumer_queue = NewQ};
         {{value, ConsumerRef}, NewQ} ->
-            maybe_deliver_object(ConsumerRef, QEntry, State#state{consumer_queue = NewQ})
+            maybe_deliver_object(ConsumerRef, Seq2, QEntry, State#state{consumer_queue = NewQ})
     end.
 
-maybe_deliver_object(ConsumerRef, QEntry, #state{consumers = Consumers} = State) ->
+maybe_deliver_object(ConsumerRef, Seq2, QEntry, #state{consumers = Consumers} = State) ->
     case orddict:fetch(ConsumerRef, Consumers) of
         error ->
             %% consumer must have died and was removed from consumers
             %% however its ref was still in the queue!
-            maybe_deliver_object(QEntry, State);
+            maybe_deliver_object(Seq2, QEntry, State);
         {ok, Consumer} ->
-            deliver_object(ConsumerRef, Consumer, QEntry, State)
+            deliver_object(ConsumerRef, Consumer, Seq2, QEntry, State)
     end.
 
-deliver_object(ConsumerRef, Consumer, QEntry, State) ->
-    #state
-    {
-        reference_tab = RefTab, sent_tab = SentTab,
-        current_seq = CurrentSeq, consumers = Consumers,
-        consumer_queue = ConsumerQ
-    } = State,
-    #consumer
-    {
-        pid = Pid, cseq = CSeq, batch = Batch,
-        batch_sent = BatchSent, batch_acked = BatchAcked
-    } = Consumer,
-
+deliver_object(ConsumerRef, Consumer, Seq2, QEntry, State) ->
+    #state{seq = Seq, consumers = Consumers} = State,
+    #consumer{pid = Pid} = Consumer,
     {QSeq, NumItems, Bin, Meta, _Completed} = QEntry,
-    Entry = {CSeq, NumItems, Bin, Meta},
+    Entry = {Seq2, NumItems, Bin, Meta},
 
     OkError =
         try
+            Seq2 = Seq +1, %% sanity check
             %% send to rtsource helper
             ok = riak_repl2_rtsource_helper:send_object(Pid, Entry),
             ok
@@ -179,32 +246,15 @@ deliver_object(ConsumerRef, Consumer, QEntry, State) ->
 
     case OkError of
         ok ->
-            %% insert into sent table
-            ets:insert(SentTab, {{ConsumerRef, CSeq}, QSeq}),
-
-            %% delete from reference table
-            ets:delete(RefTab, CurrentSeq),
 
             %% update consumer
-            UpdatedConsumer = Consumer#consumer{cseq = CSeq +1, batch_sent = BatchSent +1},
+            UpdatedConsumer = Consumer#consumer{qseq = QSeq, seq = Seq},
 
             %% update consumers orddict
             UpdatedConsumers = orddict:store(ConsumerRef, UpdatedConsumer, Consumers),
 
-            %% update consumer queue
-            UpdatedConsumerQ =
-                case UpdatedConsumer#consumer.batch_sent == Batch of
-                    true ->
-                        ConsumerQ;
-                    false ->
-                        queue:in(ConsumerRef, ConsumerQ)
-                end,
-
             %% update state
-            State#state
-            {
-                current_seq = CurrentSeq +1, consumers = UpdatedConsumers, consumer_queue = UpdatedConsumerQ
-            };
+            State#state{seq = Seq2, consumers = UpdatedConsumers};
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),

@@ -49,8 +49,7 @@
     qsize_bytes = 0,
     word_size=erlang:system_info(wordsize),
     remotes = [],
-    all_remote_names = [],
-    remotes_to_restart = []
+    all_remote_names = []
 }).
 
 -record(remote,
@@ -134,8 +133,8 @@ push(NumItems, Bin, Meta, PreCompleted) ->
     end.
 
 
-ack(Name, Seqs) ->
-    gen_server:cast(?SERVER, {ack, Name, Seqs}).
+ack(Name, Seq) ->
+    gen_server:cast(?SERVER, {ack, Name, Seq}).
 
 report_drops(N) ->
     gen_server:cast(?SERVER, {report_drops, N}).
@@ -212,8 +211,8 @@ handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
     State2 = maybe_flip_overload(State),
     {noreply, push(NumItems, Bin, Meta, PreCompleted, State2)};
 
-handle_cast({ack, Name, Seqs}, State) ->
-       {noreply, ack_seqs(Name, Seqs, State)};
+handle_cast({ack, Name, Seq}, State) ->
+       {noreply, ack_seq(Name, Seq, State)};
 
 %%TODO: should we include remote drops?
 handle_cast({report_drops, N}, State) ->
@@ -246,6 +245,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% ================================================================================================================== %%
 %% Register
 %% TODO: what happens if a remote name change occurs? (same as before it would be a problem!)
+%% TODO: what if a reference_rtq dies, and comes back up but we have been unable to push to it! (we need to monitor?)
 %% ================================================================================================================== %%
 register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
     UpdatedRemotes =
@@ -362,7 +362,7 @@ push(NumItems, Bin, Meta, PreCompleted, State) ->
             State3 = update_remotes_queue_size(State2, Size, Send),
 
             %% push to reference queues
-            State4 = push_to_remotes(Send, QSeq2, State3),
+            State4 = push_to_remotes(Send, QEntry, State3),
 
             %% (trim consumers) find out if consumers have reach maximum capacity
             State5 = maybe_trim_remote_queues(State4),
@@ -398,16 +398,16 @@ set_local_forwards_meta(LocalForwards, Meta) ->
 set_skip_meta(Meta) ->
     orddict:store(skip_count, 0, Meta).
 
-push_to_remotes([], _Seq, State) ->
+push_to_remotes([], _QEntry, State) ->
     State;
-push_to_remotes([RemoteName | Rest], Seq, State = #state{remotes = Remotes}) ->
+push_to_remotes([RemoteName | Rest], QEntry, State = #state{remotes = Remotes}) ->
     case lists:keyfind(RemoteName, #remote.name, Remotes) of
         {_, Remote} ->
-            riak_repl2_reference_rtq:push(Remote#remote.pid, Seq);
+            riak_repl2_reference_rtq:push(Remote#remote.pid, QEntry);
         _ ->
             ok
     end,
-    push_to_remotes(Rest, Seq, State).
+    push_to_remotes(Rest, QEntry, State).
 
 %% ==================================================== %%
 %% Trimming Remote Queues
@@ -537,19 +537,6 @@ trim_single_queue_entry(Seq, State = #state{qtab = QTab, all_remote_names = AllR
 %% ================================================================================================================== %%
 %% Acking the queue. Either adds to a remote to the 'Completed' list, or deletes the object.
 %% ================================================================================================================== %%
-ack_seqs(Name, Seqs, State = #state{remotes = Remotes}) ->
-    case lists:keytake(Name, #remote.name, Remotes) of
-        false ->
-            State;
-        {value, Remote, Remotes2} ->
-            {UpdatedRemote, UpdatedState} =
-                lists:foldl(
-                    fun(Seq, {AccRemote, AccState}) ->
-                        ack_seq(Seq, AccRemote, AccState)
-                    end, {Remote, State}, Seqs),
-            UpdatedState#state{remotes = [UpdatedRemote |Remotes2]}
-    end.
-
 ack_seq(Seq, Remote = #remote{max_ack = MaxAck}, State) ->
     #state{qtab = QTab, qsize_bytes = QSize, all_remote_names = AllRemoteNames} = State,
     NewRemote1 =

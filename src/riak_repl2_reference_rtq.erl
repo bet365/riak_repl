@@ -7,7 +7,7 @@
     start_link/1,
     push/2,
     ack/3,
-    register/3,
+    register/2,
     status/1
 ]).
 
@@ -57,8 +57,8 @@ push(Pid, QEntry) ->
 ack(Pid, Ref, Seq) ->
     gen_server:cast(Pid, {ack, Ref, Seq}).
 
-register(Pid, HelperPid, Ref)->
-    gen_server:call(Pid, {register, HelperPid, Ref}, infinity).
+register(Pid, Ref)->
+    gen_server:call(Pid, {register, Ref}, infinity).
 
 status(Pid) ->
     try
@@ -118,7 +118,7 @@ handle_call({register, Ref}, Pid, State = #state{consumers = Consumers, consumer
             NewConsumers = orddict:store(Ref, C, Consumers),
             NewQueue = queue:in(Ref, Queue),
             erlang:send(self(), maybe_pull),
-            {reply, ok, State#state{consumer_queue = NewConsumers, consumer_queue = NewQueue}}
+            {reply, ok, State#state{consumers = NewConsumers, consumer_queue = NewQueue}}
     end;
 
 handle_call(status, _From, State) ->
@@ -141,6 +141,7 @@ handle_cast(_Request, State) ->
 handle_info(maybe_pull, State) ->
     {noreply, maybe_pull(State)};
 
+%% TODO: 'DOWN' messages!
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -258,8 +259,8 @@ deliver_object(ConsumerRef, Consumer, Seq2, QEntry, State) ->
             %% send to rtsource helper
             ok = riak_repl2_rtsource_helper:send_object(Pid, Entry),
             ok
-        catch Type:Error ->
-            {error, Type, Error}
+        catch T:E ->
+            {error, T, E}
         end,
 
     case OkError of
@@ -276,6 +277,6 @@ deliver_object(ConsumerRef, Consumer, Seq2, QEntry, State) ->
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
-            maybe_deliver_object(QEntry, State)
+            maybe_deliver_object(Seq2, QEntry, State)
     end.
 

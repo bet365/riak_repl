@@ -8,10 +8,16 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/5,
+-export(
+[
+    start_link/6,
     stop/1,
     v1_ack/2,
-    status/1, status/2, send_heartbeat/1]).
+    status/1,
+    status/2,
+    send_heartbeat/1,
+    send_object/2
+]).
 
 -include("riak_repl.hrl").
 
@@ -25,16 +31,16 @@
                 transport,  % erlang module to use for transport
                 socket,     % socket to pass to transport
                 proto,      % protocol version negotiated
-                deliver_fun,% Deliver function
                 sent_seq,   % last sequence sent
                 v1_offset = 0,
                 v1_seq_map = [],
                 objects = 0, % number of objects sent - really number of pulls as could be multiobj
-                ack_ref
+                ack_ref,
+                reference_q
 }).
 
-start_link(Remote, Transport, Socket, Version, AckRef) ->
-    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, AckRef], []).
+start_link(Remote, Transport, Socket, Version, AckRef, ReferenceQ) ->
+    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, AckRef, ReferenceQ], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -55,26 +61,26 @@ send_heartbeat(Pid) ->
     %% as it is responsible for checking heartbeat
     gen_server:cast(Pid, send_heartbeat).
 
-init([Remote, Transport, Socket, Version, AckRef]) ->
-    Me = self(),
-    Deliver = fun(Result) -> gen_server:call(Me, {pull, Result}, infinity) end,
+send_object(Pid, Obj) ->
+    gen_server:call(Pid, {send_object, Obj}, ?LONG_TIMEOUT).
+
+
+init([Remote, Transport, Socket, Version, AckRef, ReferenceQ]) ->
     State = #state{remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, deliver_fun = Deliver, ack_ref = AckRef},
-    async_pull(State),
+        socket = Socket, ack_ref = AckRef, reference_q = ReferenceQ},
+    riak_repl2_reference_rtq:register(ReferenceQ, AckRef),
     {ok, State}.
 
-handle_call({pull, {error, Reason}}, _From, State) ->
-    riak_repl_stats:rt_source_errors(),
-    {stop, {queue_error, Reason}, ok, State};
-handle_call({pull, {Seq, NumObjects, _BinObjs, _Meta} = Entry}, From,
+handle_call({send_object, {Seq, NumObjects, _BinObjs, _Meta} = Entry}, From,
     State = #state{transport = T, socket = S, objects = Objects}) ->
     %% unblock the rtq as fast as possible
     gen_server:reply(From, ok),
     State2 = maybe_send(T, S, Entry, State),
-    async_pull(State2),
     {noreply, State2#state{sent_seq = Seq, objects = Objects + NumObjects}};
+
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State};
+
 handle_call(status, _From, State =
     #state{sent_seq = SentSeq, objects = Objects}) ->
     {reply, [{sent_seq, SentSeq},
@@ -113,9 +119,7 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 
-%% Trigger an async pull from the realtime queue
-async_pull(_State=#state{remote = Remote, deliver_fun = Deliver}) ->
-    riak_repl2_rtq:pull(Remote, Deliver).
+
 
 maybe_send(Transport, Socket, QEntry, State) ->
     {_Seq, _NumObjects, _BinObjs, Meta} = QEntry,
@@ -177,7 +181,5 @@ merge_forwards_and_routed_meta({_, _, _, Meta} = QEntry, Remote) ->
     Routed2 = lists:usort(Routed ++ LocalForwards ++ [Self]),
     Meta3 = orddict:store(routed_clusters, Routed2, Meta2),
     Meta4 = orddict:erase(?BT_META_BLACKLIST, Meta3),
-    Meta5 = orddict:erase(acked_clusters, Meta4),
-    Meta6 = orddict:erase(filtered_clusters, Meta5),
-    setelement(4, QEntry, Meta6).
+    setelement(4, QEntry, Meta4).
 

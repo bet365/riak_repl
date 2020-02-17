@@ -46,7 +46,8 @@
     source_nodes,
     sink_nodes,
     remove_endpoint,
-    endpoints
+    endpoints,
+    reference_q
 }).
 
 %%%===================================================================
@@ -99,6 +100,7 @@ init([Remote]) ->
     process_flag(trap_exit, true),
 
     _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
+    ReferenceQ = riak_repl2_reference_rtq:start_link(Remote),
     E = dict:new(),
     MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
     M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
@@ -111,7 +113,7 @@ init([Remote]) ->
             case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, legacy) of
                 {ok, Ref} ->
                     {ok, #state{version = legacy, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = [], sink_nodes = []}};
+                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = [], sink_nodes = [], reference_q = ReferenceQ}};
                 {error, Reason}->
                     lager:warning("Error connecting to remote, verions: legacy"),
                     {stop, Reason}
@@ -128,7 +130,7 @@ init([Remote]) ->
                                                end,
 
                     {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes}};
+                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes, reference_q = ReferenceQ}};
                 {error, Reason}->
                     lager:warning("Error connecting to remote, verions: v1"),
                     {stop, Reason}
@@ -137,10 +139,10 @@ init([Remote]) ->
 
 %%%=====================================================================================================================
 handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _From,
-    State = #state{remote = Remote, endpoints = E, version = V}) ->
+    State = #state{remote = Remote, endpoints = E, version = V, reference_q = RefQ}) ->
 
     lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
-    case riak_repl2_rtsource_conn:start_link(Remote) of
+    case riak_repl2_rtsource_conn:start_link(Remote, RefQ) of
         {ok, RtSourcePid} ->
             case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) of
                 ok ->

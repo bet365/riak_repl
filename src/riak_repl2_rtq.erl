@@ -19,7 +19,13 @@
     all_queues_empty/0,
     shutdown/0,
     stop/0,
-    is_running/0
+    is_running/0,
+
+    summarize/0,
+    dumpq/0,
+    evict/1,
+    evict/2,
+    ack_sync/2
 ]).
 
 % private api
@@ -106,15 +112,12 @@ stop() ->
 is_running() ->
     gen_server:call(?SERVER, is_running, infinity).
 
-%% TODO, replace with drain_queue (we can leave this for now?) YES!
 is_empty(Name) ->
     gen_server:call(?SERVER, {is_empty, Name}, infinity).
 
 all_queues_empty() ->
     gen_server:call(?SERVER, all_queues_empty, infinity).
-%%%=====================================================================================================================
-%%% Casts
-%%%=====================================================================================================================
+
 push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 push(NumItems, Bin, Meta) ->
@@ -128,55 +131,64 @@ push(NumItems, Bin, Meta, PreCompleted) ->
             gen_server:cast(?SERVER, {push, NumItems, Bin, Meta, PreCompleted})
     end.
 
-
 ack(Name, Seq) ->
     gen_server:cast(?SERVER, {ack, Name, Seq}).
 
 report_drops(N) ->
     gen_server:cast(?SERVER, {report_drops, N}).
 
-%%%===================================================================
-%%% gen_server callbacks
-%%%===================================================================
+%%%========================================================================
+%%% Backward Compatability Functions (will eventually be removed/ changed)
+%%%========================================================================
+summarize() ->
+    gen_server:call(?SERVER, summarize, infinity).
 
+dumpq() ->
+    gen_server:call(?SERVER, dumpq, infinity).
+
+evict(Seq) ->
+    gen_server:call(?SERVER, {evict, Seq}, infinity).
+
+evict(Seq, Key) ->
+    gen_server:call(?SERVER, {evict, Seq, Key}, infinity).
+
+ack_sync(Name, Seq) ->
+    gen_server:call(?SERVER, {ack_sync, Name, Seq}, infinity).
+
+
+%%%===================================================================
+%%% gen_server calls
+%%%===================================================================
 init(Options) ->
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
     {ok, #state{overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
-handle_call({register, Name}, Pid, State = #state{qtab = QTab}) ->
+handle_call({register, Name}, Pid, State = #state{qtab = QTab, qseq = QSeq}) ->
     NewState = register_remote(Name, Pid, State),
-    {reply, QTab, NewState};
-
+    {reply, {QSeq, QTab}, NewState};
 
 handle_call({unregister, Name}, _From, State) ->
     {Reply, NewState} =  unregister_q(Name, State),
     {reply, Reply, NewState};
 
-%% TODO decide if want some information from reference rtq
 handle_call(status, _From, State) ->
     Status = make_status(State),
     {reply, Status, State};
 
-%% this is okay
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
     %% this will allow the realtime repl hook to determine if it should send
     %% to another host
     _ = riak_repl2_rtq_proxy:start(),
     {reply, ok, State#state{shutting_down = true}};
 
-%% this is okay
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
-%% this is okay
 handle_call(is_running, _From, State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
-
-%%%=====================================================================================================================
-%% TODO, replace with drain_queue functionality for repl_migration
 handle_call({is_empty, Name}, _From, State = #state{remotes = Remotes}) ->
     Result = is_queue_empty(Name, Remotes),
     {reply, Result, State};
@@ -185,22 +197,57 @@ handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
     Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(Name, Remotes) end, Remotes),
     {reply, Result, State};
 
-%% TODO decide if this code stays (it is legacy) [they are needed for backward compatibility]
-% either old code or old node has sent us a old push, upvert it.
+
+%%%=====================================================================================================================
+%% Calls: Backward Compatibility
+%%%=====================================================================================================================
 handle_call({push, NumItems, Bin}, From, State) ->
     handle_call({push, NumItems, Bin, [], []}, From, State);
 handle_call({push, NumItems, Bin, Meta, []}, From, State) ->
     handle_call({push, NumItems, Bin, Meta, []}, From, State);
 handle_call({push, NumItems, Bin, Meta, Completed}, _From, State) ->
     State2 = maybe_flip_overload(State),
-    {reply, ok, push(NumItems, Bin, Meta, Completed, State2)}.
+    {reply, ok, push(NumItems, Bin, Meta, Completed, State2)};
+
+handle_call(summarize, _From, State = #state{qtab = QTab}) ->
+    Fun = fun({Seq, _NumItems, Bin, _Meta, _Completed}, Acc) ->
+        Obj = riak_repl_util:from_wire(Bin),
+        {Key, Size} = summarize_object(Obj),
+        Acc ++ [{Seq, Key, Size}]
+          end,
+    {reply, ets:foldl(Fun, [], QTab), State};
+
+handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
+    {reply, ets:tab2list(QTab), State};
+
+handle_call({evict, Seq}, _From, State = #state{qtab = QTab}) ->
+    ets:delete(QTab, Seq),
+    {reply, ok, State};
+handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
+    case ets:lookup(QTab, Seq) of
+        [{Seq, _, Bin, _, _}] ->
+            Obj = riak_repl_util:from_wire(Bin),
+            case Key =:= riak_object:key(Obj) of
+                true ->
+                    ets:delete(QTab, Seq),
+                    {reply, ok, State};
+                false ->
+                    {reply, {wrong_key, Seq, Key}, State}
+            end;
+        _ ->
+            {reply, {not_found, Seq}, State}
+    end;
+
+handle_call({ack_sync, Name, Seq}, _From, State) ->
+    {reply, ok, ack_seq(Name, Seq, State)};
+
+handle_call(_Msg, _From, State) ->
+    {reply, ok, State}.
 %%%=====================================================================================================================
 
-% have to have backward compatability for cluster upgrades
-handle_cast({push, NumItems, Bin}, State) ->
-    handle_cast({push, NumItems, Bin, [], []}, State);
-handle_cast({push, NumItems, Bin, Meta}, State) ->
-    handle_cast({push, NumItems, Bin, Meta, []}, State);
+%%%===================================================================
+%%% gen_server casts
+%%%===================================================================
 handle_cast({push, _NumItems, _Bin, _Meta, _Completed}, State=#state{remotes=[]}) ->
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
@@ -210,15 +257,26 @@ handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
 handle_cast({ack, Name, Seq}, State) ->
        {noreply, ack_seq(Name, Seq, State)};
 
-%%TODO: should we include remote drops?
+
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
     Drops = State#state.overload_drops + N,
     State2 = State#state{qseq = QSeq, overload_drops = Drops},
     State3 = maybe_flip_overload(State2),
-    {noreply, State3}.
+    {noreply, State3};
 
+%%%=====================================================================================================================
+%% Casts: Backward Compatibility
+%%%=====================================================================================================================
+% have to have backward compatability for cluster upgrades
+handle_cast({push, NumItems, Bin}, State) ->
+    handle_cast({push, NumItems, Bin, [], []}, State);
+handle_cast({push, NumItems, Bin, Meta}, State) ->
+    handle_cast({push, NumItems, Bin, Meta, []}, State);
 
+handle_cast(_Msg, State) ->
+    {noreply, State}.
+%%%=====================================================================================================================
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -240,14 +298,11 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% ================================================================================================================== %%
 %% Register
-%% TODO: what happens if a remote name change occurs? (same as before it would be a problem!)
-%% TODO: what if a reference_rtq dies, and comes back up but we have been unable to push to it! (we need to monitor?)
-%% TODO: return QSeq, CSeq, QTab
 %% ================================================================================================================== %%
 register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
     UpdatedRemotes =
         case lists:keytake(Name, #remote.name, Remotes) of
-            {value, R = #remote{name = Name, pid = Pid}, Remotes2} ->
+            {value, #remote{name = Name, pid = Pid}, _} ->
                 %% rtsource_rtq has re-registered (under the same pid)
                 Remotes;
             {value, R = #remote{name = Name, pid = Pid2}, Remotes2} ->
@@ -324,7 +379,7 @@ make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
 %% ================================================================================================================== %%
 %% Push
 %% ================================================================================================================== %%
-push(NumItems, Bin, Meta, PreCompleted, State) ->
+push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) ->
     #state
     {
         qtab = QTab,
@@ -402,7 +457,6 @@ push_to_remotes([RemoteName | Rest], QEntry, State = #state{remotes = Remotes}) 
 
 %% ==================================================== %%
 %% Trimming Remote Queues
-%% TODO: should we inform reference queue if we trim?
 %% ==================================================== %%
 maybe_trim_remote_queues(State = #state{remotes = Remotes, qtab = QTab}) ->
     case remotes_needs_trim(Remotes, [], []) of
@@ -426,13 +480,13 @@ remote_need_trim(Remote = #remote{rsize_bytes = RBytes}) ->
     RBytes > get_remote_max_bytes(Remote).
 
 
-trim_remote_queues([], _, State) ->
-    State;
 trim_remote_queues([], '$end_of_table', State) ->
     State;
 trim_remote_queues(Remotes, '$end_of_table', State = #state{remotes = OkRemotes}) ->
     lager:error("Remotes requires trimming but we reached the end of table ~p", [Remotes]),
     State#state{remotes = Remotes ++ OkRemotes};
+trim_remote_queues([], _, State) ->
+    State;
 trim_remote_queues(Remotes, Seq, State = #state{remotes = OkRemotes, qseq = QTab, all_remote_names = AllRemoteNames}) ->
     case ets:lookup(QTab, Seq) of
         [] ->
@@ -487,7 +541,6 @@ trim_remote_single_entry(Completed, Remote, ShrinkSize) ->
 
 %% ==================================================== %%
 %% Trimming The Queue
-%% TODO: should we inform reference queue if we trim?
 %% ==================================================== %%
 maybe_trim_queue(State) ->
     maybe_trim_queue(State, 0).
@@ -687,5 +740,14 @@ get_remote_max_bytes(Remote = #remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}) of
         undefined -> get_remote_max_bytes(Remote);
         MaxBytes -> MaxBytes
-    end,
-    -endif.
+    end.
+-endif.
+
+
+%% ================================================================================================================== %%
+%% Backward Compatibility Functions
+%% ================================================================================================================== %%
+
+summarize_object(Obj) ->
+    ObjFmt = riak_core_capability:get({riak_kv, object_format}, v0),
+    {riak_object:key(Obj), riak_object:approximate_size(ObjFmt, Obj)}.

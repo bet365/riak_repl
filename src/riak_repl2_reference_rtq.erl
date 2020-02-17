@@ -7,7 +7,8 @@
     start_link/1,
     push/2,
     ack/3,
-    register/3
+    register/3,
+    status/1
 ]).
 
 %% gen_server callbacks
@@ -32,8 +33,7 @@
     reference_tab = ets:new(?MODULE, [protected, ordered_set]),
     rseq = 0, %% the last sequence number in the reference queue
     seq = 0, %% the next sequence number to send
-    total_sent = 0,
-    total_acked = 0
+    ack_counter = 0 %% number of objects acked by sink
 }).
 
 % Consumers
@@ -60,6 +60,15 @@ ack(Pid, Ref, Seq) ->
 register(Pid, HelperPid, Ref)->
     gen_server:call(Pid, {register, HelperPid, Ref}, infinity).
 
+status(Pid) ->
+    try
+        gen_server:call(Pid, status)
+
+    catch
+        _:_  ->
+            []
+    end.
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -67,11 +76,12 @@ register(Pid, HelperPid, Ref)->
 
 init([Name]) ->
     %% register to riak_repl2_rtq
-    {Seq, QSeq, QTab} = riak_repl2_rtq:register(Name),
+    {QSeq, QTab} = riak_repl2_rtq:register(Name),
 
     State = #state{name = Name, qtab = QTab},
+
     %% decide if we need to populate
-    NewState = populate_reference_table(Seq, QSeq, State),
+    NewState = populate_reference_table(ets:first(QTab), QSeq, State),
 
     {ok, NewState}.
 
@@ -111,6 +121,11 @@ handle_call({register, Ref}, Pid, State = #state{consumers = Consumers, consumer
             {reply, ok, State#state{consumer_queue = NewConsumers, consumer_queue = NewQueue}}
     end;
 
+handle_call(status, _From, State) ->
+    #state{ack_counter = Acked, rseq = RSeq, seq = Seq} = State,
+    Stats = [{pending, RSeq - Seq}, {unacked, Seq - Acked}, {acked, Acked}],
+    {reply, Stats, State};
+
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -139,7 +154,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-ack_seq(Ref, Seq, State = #state{consumers = Consumers, name = Name, reference_tab = RefTab}) ->
+ack_seq(Ref, Seq, State = #state{consumers = Consumers, name = Name, reference_tab = RefTab, ack_counter = AC}) ->
     case orddict:fetch(Ref, Consumers) of
         {ok, #consumer{seq = Seq, qseq = QSeq} = Consumer} ->
             %% Should this be a call?
@@ -152,9 +167,11 @@ ack_seq(Ref, Seq, State = #state{consumers = Consumers, name = Name, reference_t
             UpdatedConsumer = Consumer#consumer{seq = undefined, qseq = undefined},
 
             %% store in state and return
-            State#state{consumers = orddict:store(Ref, UpdatedConsumer, Consumers)};
+            State#state{consumers = orddict:store(Ref, UpdatedConsumer, Consumers), ack_counter = AC +1};
         _ ->
-            %% this consumer is suppsoed to be dead, or sequence number did not match!
+            %% this consumer is supposed to be dead, or sequence number did not match!
+            %% what should we do? kill the process? (A retry to another process has already been sent!)
+            lager:error("reference queue got ack from helper: Ref, there is a lingering process", [Ref]),
             State
     end.
 

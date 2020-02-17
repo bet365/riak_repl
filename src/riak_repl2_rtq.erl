@@ -56,12 +56,8 @@
 {
     pid,
     name,
-    total_skipped = 0,
-    total_filtered = 0,
-    total_acked = 0,
     total_drops = 0,
-    rsize_bytes = 0,
-    max_ack = 0
+    rsize_bytes = 0
 }).
 
 %%%===================================================================
@@ -110,7 +106,7 @@ stop() ->
 is_running() ->
     gen_server:call(?SERVER, is_running, infinity).
 
-%% TODO, replace with drain_queue
+%% TODO, replace with drain_queue (we can leave this for now?) YES!
 is_empty(Name) ->
     gen_server:call(?SERVER, {is_empty, Name}, infinity).
 
@@ -246,6 +242,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Register
 %% TODO: what happens if a remote name change occurs? (same as before it would be a problem!)
 %% TODO: what if a reference_rtq dies, and comes back up but we have been unable to push to it! (we need to monitor?)
+%% TODO: return QSeq, CSeq, QTab
 %% ================================================================================================================== %%
 register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
     UpdatedRemotes =
@@ -305,22 +302,16 @@ unregister_cleanup(Seq, Remote, State = #state{qtab = QTab, all_remote_names = A
 %% ================================================================================================================== %%
 %% Status
 %% ================================================================================================================== %%
-make_status(State = #state{qtab = QTab, qseq = QSeq, remotes = Remotes}) ->
+make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
     MaxBytes = get_queue_max_bytes(),
     RemoteStats =
         lists:foldl(
             fun(Remote, Acc) ->
-
-                #remote{name = Name, total_skipped = Skipped, total_filtered = Filtered, total_acked = Acked,
-                    total_drops = Drops, rsize_bytes = RSize, max_ack = MaxAck} = Remote,
-
-                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {pending, QSeq - MaxAck},
-                    {unacked, QSeq - Skipped - Filtered - Acked - Drops}, {skipped, Skipped}, {filtered, Filtered},
-                    {acked, Acked}, {drops, Drops}],
-
-                [{Name, Stats} | Acc]
+                #remote{name = Name, total_drops = Drops, rsize_bytes = RSize, pid = Pid} = Remote,
+                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {drops, Drops}],
+                RefStats = riak_repl2_reference_rtq:status(Pid),
+                [{Name, Stats ++ RefStats} | Acc]
             end, [], Remotes),
-
     [{bytes, qbytes(QTab, State)},
     {max_bytes, MaxBytes},
     {remotes, RemoteStats},
@@ -537,25 +528,18 @@ trim_single_queue_entry(Seq, State = #state{qtab = QTab, all_remote_names = AllR
 %% ================================================================================================================== %%
 %% Acking the queue. Either adds to a remote to the 'Completed' list, or deletes the object.
 %% ================================================================================================================== %%
-ack_seq(Seq, Remote = #remote{max_ack = MaxAck}, State) ->
+ack_seq(Seq, Remote, State) ->
     #state{qtab = QTab, qsize_bytes = QSize, all_remote_names = AllRemoteNames} = State,
-    NewRemote1 =
-        case Seq > MaxAck of
-            true ->
-                Remote#remote{max_ack = Seq};
-            false ->
-                Remote
-        end,
     case ets:lookup(QTab, Seq) of
         [] ->
             %% TODO:
             %% the queue has been trimmed due to reaching its maximum size
             %% but this has been sent and acked! - so we can reduce the dropped counter
-            {NewRemote1, State};
+            {Remote, State};
         [{_, _, Bin, _, Completed}] ->
-            NewCompleted = [NewRemote1#remote.name | Completed],
+            NewCompleted = [Remote#remote.name | Completed],
             ShrinkSize = ets_obj_size(Bin, State),
-            NewRemote2 = update_remote_queue_size(NewRemote1, -ShrinkSize),
+            NewRemote2 = update_remote_queue_size(Remote, -ShrinkSize),
             case AllRemoteNames -- NewCompleted of
                 [] ->
                     ets:delete(QTab, Seq),
@@ -567,7 +551,7 @@ ack_seq(Seq, Remote = #remote{max_ack = MaxAck}, State) ->
             end;
         UnExpectedObj ->
             lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
-            {NewRemote1, QSize}
+            {Remote, QSize}
     end.
 %% ================================================================================================================== %%
 

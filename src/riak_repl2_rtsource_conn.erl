@@ -42,7 +42,7 @@
 -endif.
 
 %% API
--export([start_link/2,
+-export([start_link/1,
          stop/1,
          get_helper_pid/1,
          status/1, status/2,
@@ -92,13 +92,12 @@
                 hb_sent_q,   % queue of heartbeats now() that were sent
                 hb_rtt,    % RTT in milliseconds for last completed heartbeat
                 cont = <<>>, % continuation from previous TCP buffer
-                ack_ref,
-                reference_q
+                ack_ref
 }).
 
 %% API - start trying to send realtime repl to remote site
-start_link(Remote, ReferenceQ) ->
-    gen_server:start_link(?MODULE, [Remote, ReferenceQ], []).
+start_link(Remote) ->
+    gen_server:start_link(?MODULE, [Remote], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -150,9 +149,9 @@ get_socketname_primary(Pid) ->
 %% gen_server callbacks
 
 %% Initialize
-init([Remote, ReferenceQ]) ->
+init([Remote]) ->
     Ref = make_ref(),
-  {ok, #state{remote = Remote, ack_ref = Ref, reference_q = ReferenceQ}}.
+  {ok, #state{remote = Remote, ack_ref = Ref}}.
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, routine}, ok, State};
@@ -215,7 +214,7 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
 handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
-            State = #state{remote = Remote, ack_ref = Ref, reference_q = RefQ}) ->
+            State = #state{remote = Remote, ack_ref = AckRef}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
@@ -223,7 +222,7 @@ handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             lager:debug("RT source connection negotiated ~p wire format from proto ~p", [Ver, Proto]),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, Ref, RefQ),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, AckRef),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             lager:debug("Keeping stats for " ++ SocketTag),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source,
@@ -336,7 +335,7 @@ recv(TcpBin, State) ->
         hb_sent_q = HBSentQ,
         hb_timeout_tref = HBTRef,
         ack_ref = AckRef,
-        reference_q = ReferenceQ
+        remote = Remote
     } = State,
     %% hb_timeout_tref might be undefined if we have are getting
     %% acks/heartbeats back-to-back and we haven't sent a heartbeat yet.
@@ -344,12 +343,12 @@ recv(TcpBin, State) ->
     case riak_repl2_rtframe:decode(TcpBin) of
         {ok, undefined, Cont} ->
             {noreply, State#state{cont = Cont}};
-        {ok, {ack, Seq}, Cont} when ProtoMajor >= 2 ->
+        {ok, {ack, CSeq}, Cont} when ProtoMajor >= 2 ->
 
             %% TODO: report this better per-remote (is this needed anymore?)
             riak_repl_stats:objects_sent(),
 
-            ok = riak_repl2_reference_rtq:ack(ReferenceQ, AckRef, Seq),
+            ok = riak_repl2_reference_rtq:ack(Remote, AckRef, CSeq),
             %% reset heartbeat timer, since we've seen activity from the peer
             case HBTRef of
                 undefined ->

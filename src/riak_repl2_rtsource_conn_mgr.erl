@@ -99,41 +99,51 @@ get_rtsource_conn_pids(Pid) ->
 init([Remote]) ->
     process_flag(trap_exit, true),
 
-    _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
-    ReferenceQ = riak_repl2_reference_rtq:start_link(Remote),
+%%    _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
     E = dict:new(),
     MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
     M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
     RebalanceTimer = app_helper:get_env(riak_repl, realtime_rebalance_on_failure, 5),
 
 
+    case whereis(riak_repl2_reference_rtq:name(Remote)) of
+        undefined ->
+            lager:error("undefined reference rtq for remote: ~p", [Remote]),
+            {stop, {error, "undefined reference rtq"}};
+        ReferenceQ ->
+            erlang:monitor(process, whereis(ReferenceQ)),
+            case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
+                legacy ->
+                    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, legacy) of
+                        {ok, Ref} ->
+                            {ok, #state{version = legacy, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
+                                rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = [], sink_nodes = [], reference_q = ReferenceQ}};
+                        {error, Reason}->
+                            lager:warning("Error connecting to remote, verions: legacy"),
+                            {stop, Reason}
+                    end;
+                v1 ->
+                    %% TODO: this shall change here! so we mimic the old behaviour while using the new
+                    %% TODO: it will use v2 code, and place v1 data into riak_repl2_rtsource_conn_data_mgr
+                    riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), []),
+                    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, multi_connection) of
+                        {ok, Ref} ->
+                            {SourceNodes, SinkNodes} = case get_source_and_sink_nodes(Remote) of
+                                                           no_leader ->
+                                                               {[], []};
+                                                           {X,Y} ->
+                                                               {X,Y}
+                                                       end,
 
-    case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
-        legacy ->
-            case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, legacy) of
-                {ok, Ref} ->
-                    {ok, #state{version = legacy, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = [], sink_nodes = [], reference_q = ReferenceQ}};
-                {error, Reason}->
-                    lager:warning("Error connecting to remote, verions: legacy"),
-                    {stop, Reason}
-            end;
-        v1 ->
-            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), []),
-            case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, multi_connection) of
-                {ok, Ref} ->
-                    {SourceNodes, SinkNodes} = case get_source_and_sink_nodes(Remote) of
-                                                   no_leader ->
-                                                       {[], []};
-                                                   {X,Y} ->
-                                                       {X,Y}
-                                               end,
-
-                    {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
-                        rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes, reference_q = ReferenceQ}};
-                {error, Reason}->
-                    lager:warning("Error connecting to remote, verions: v1"),
-                    {stop, Reason}
+                            {ok, #state{version = v1, remote = Remote, connection_ref = Ref, endpoints = E, rebalance_delay_fun = M,
+                                rebalance_timer=RebalanceTimer*1000, max_delay=MaxDelaySecs, source_nodes = SourceNodes, sink_nodes = SinkNodes, reference_q = ReferenceQ}};
+                        {error, Reason}->
+                            lager:warning("Error connecting to remote, verions: v1"),
+                            {stop, Reason}
+                    end;
+                v2 ->
+                    %% TODO: this will be the new realtime connections! we no longer use v1 code
+                    ok
             end
     end.
 

@@ -97,36 +97,24 @@ ensure_rt(WantEnabled0, WantStarted0) ->
             application:set_env(riak_repl, rtenabled, true)
     end,
 
-    %% For each connection to validate, call maybe_rebalance_delayed to handle 
-    %% the potential need to rebalance connections.
-    ToValidate = Started -- ToStop,
-    _ = [case lists:keyfind(Remote, 1, Connections) of
-             {_, PID} ->
-                 riak_repl2_rtsource_conn_mgr:maybe_rebalance_delayed(PID);
-             false ->
-                 ok
-         end || Remote <- ToValidate ],
-
     case ToEnable ++ ToDisable ++ ToStart ++ ToStop of
         [] ->
             [];
         _ ->
-            %% Do enables/starts first to capture maximum amount of rtq
 
-            %% Create a registration to begin queuing, rtsource_sup:ensure_started
-            %% will bring up an rtsource process that will re-register
-            _ = [riak_repl2_rtq:register(Remote) || Remote <- ToEnable],
+            %% start the reference queue which will register to the rtq and populate its reference table
+            _ = [riak_repl2_reference_rtq_sup:enable(Remote) || Remote <- ToEnable],
+
+            %% start rtsource_conn_mgr to create connections and consumers
+            %% TODO: change to START
             _ = [riak_repl2_rtsource_conn_sup:enable(Remote) || Remote <- ToStart],
 
-            %% Stop running sources, re-register to get rid of pending
-            %% deliver functions
-            _ = [begin
-                     _ = riak_repl2_rtsource_conn_sup:disable(Remote),
-                     riak_repl2_rtq:register(Remote)
-                 end || Remote <- ToStop],
+            %% stop rtsource_conn_mgr to kill all connections (but remain registered to the queue)
+            %% TODO: change to STOP
+            _ = [riak_repl2_rtsource_conn_sup:disable(Remote) || Remote <- ToStop],
 
-            %% Unregister disabled sources, freeing up the queue
-            _ = [riak_repl2_rtq:unregister(Remote) || Remote <- ToDisable],
+            %% stop the reference queue for a remote which will delete its reference table and unregister from the rtq
+            _ = [riak_repl2_reference_rtq_sup:disable(Remote) || Remote <- ToDisable],
 
             [{enabled, ToEnable},
              {started, ToStart},

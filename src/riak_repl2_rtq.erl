@@ -60,7 +60,6 @@
 
 -record(remote,
 {
-    pid,
     name,
     total_drops = 0,
     rsize_bytes = 0
@@ -165,8 +164,8 @@ init(Options) ->
     {ok, #state{overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
-handle_call({register, Name}, Pid, State = #state{qtab = QTab, qseq = QSeq}) ->
-    NewState = register_remote(Name, Pid, State),
+handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq}) ->
+    NewState = register_remote(Name, State),
     {reply, {QSeq, QTab}, NewState};
 
 handle_call({unregister, Name}, _From, State) ->
@@ -299,18 +298,15 @@ code_change(_OldVsn, State, _Extra) ->
 %% ================================================================================================================== %%
 %% Register
 %% ================================================================================================================== %%
-register_remote(Name, Pid, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
+register_remote(Name, State = #state{remotes = Remotes, all_remote_names = AllRemoteNames}) ->
     UpdatedRemotes =
         case lists:keytake(Name, #remote.name, Remotes) of
-            {value, #remote{name = Name, pid = Pid}, _} ->
-                %% rtsource_rtq has re-registered (under the same pid)
+            {value, #remote{name = Name}, _} ->
+                %% rtsource_rtq has re-registered
                 Remotes;
-            {value, R = #remote{name = Name, pid = Pid2}, Remotes2} ->
-                %% rtosurce_rtq hash re-registered (new pid, it must have died)
-                [R#remote{pid = Pid2} | Remotes2];
             false ->
                 %% New registration, start from the beginning
-                [#remote{name = Name, pid = Pid} | Remotes]
+                [#remote{name = Name} | Remotes]
         end,
     UpdatedAllRemoteNames =
         case lists:member(Name, AllRemoteNames) of
@@ -362,9 +358,9 @@ make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
     RemoteStats =
         lists:foldl(
             fun(Remote, Acc) ->
-                #remote{name = Name, total_drops = Drops, rsize_bytes = RSize, pid = Pid} = Remote,
+                #remote{name = Name, total_drops = Drops, rsize_bytes = RSize} = Remote,
                 Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {drops, Drops}],
-                RefStats = riak_repl2_reference_rtq:status(Pid),
+                RefStats = riak_repl2_reference_rtq:status(Name),
                 [{Name, Stats ++ RefStats} | Acc]
             end, [], Remotes),
     [{bytes, qbytes(QTab, State)},
@@ -408,13 +404,13 @@ push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) -
             State3 = update_remotes_queue_size(State2, Size, Send),
 
             %% push to reference queues
-            State4 = push_to_remotes(Send, QEntry, State3),
+            push_to_remotes(Send, QEntry),
 
             %% (trim consumers) find out if consumers have reach maximum capacity
-            State5 = maybe_trim_remote_queues(State4),
+            State4 = maybe_trim_remote_queues(State3),
 
             %% (trim queue) find out if queue reached maximum capacity
-            maybe_trim_queue(State5)
+            maybe_trim_queue(State4)
     end;
 push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, PreCompleted),
@@ -444,16 +440,12 @@ set_local_forwards_meta(LocalForwards, Meta) ->
 set_skip_meta(Meta) ->
     orddict:store(skip_count, 0, Meta).
 
-push_to_remotes([], _QEntry, State) ->
-    State;
-push_to_remotes([RemoteName | Rest], QEntry, State = #state{remotes = Remotes}) ->
-    case lists:keyfind(RemoteName, #remote.name, Remotes) of
-        {_, Remote} ->
-            riak_repl2_reference_rtq:push(Remote#remote.pid, QEntry);
-        _ ->
-            ok
-    end,
-    push_to_remotes(Rest, QEntry, State).
+push_to_remotes([], _QEntry) ->
+    ok;
+push_to_remotes([RemoteName | Rest], QEntry) ->
+    %% TODO try catch this? (its a cast)
+    riak_repl2_reference_rtq:push(RemoteName, QEntry),
+    push_to_remotes(Rest, QEntry).
 
 %% ==================================================== %%
 %% Trimming Remote Queues

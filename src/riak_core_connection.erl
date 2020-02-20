@@ -43,13 +43,13 @@
 
 -record(state, {
     transport, socket, protocol, protovers, socket_opts, mod, mod_args,
-    cluster_name, local_capabilities, remote_capabilities, ip, port, primary
+    cluster_name, local_capabilities, remote_capabilities, ip, port
 }).
 
 %% public API
--export([connect/3,
-         sync_connect/3]).
--export([start_link/3, start_link/8, start/3, start/8]).
+-export([connect/2,
+         sync_connect/2]).
+-export([start_link/2, start_link/7, start/2, start/7]).
 %% gen_fsm
 -export([init/1]).
 -export([
@@ -115,13 +115,13 @@ symbolic_clustername() ->
 %%
 %% connect returns the pid() of the asynchronous process that will attempt the connection.
 
--spec(connect(ip_addr(), boolean(), clientspec()) -> pid()).
-connect(IPPort, Primary, ClientSpec) ->
-    start(IPPort, Primary, ClientSpec).
+-spec(connect(ip_addr(), clientspec()) -> pid()).
+connect(IPPort, ClientSpec) ->
+    start(IPPort, ClientSpec).
 
--spec sync_connect(ip_addr(), boolean(), clientspec()) -> ok | {error, atom()}.
-sync_connect(IPPort, Primary, ClientSpec) ->
-    case start(IPPort, Primary, ClientSpec) of
+-spec sync_connect(ip_addr(), clientspec()) -> ok | {error, atom()}.
+sync_connect(IPPort, ClientSpec) ->
+    case start(IPPort, ClientSpec) of
         {ok, Pid} ->
             Mon = erlang:monitor(process, Pid),
             receive
@@ -142,26 +142,26 @@ sync_connect(IPPort, Primary, ClientSpec) ->
             Else
     end.
 
-start_link({Ip, Port}, Primary, ClientSpec) ->
+start_link({Ip, Port}, ClientSpec) ->
     {{Protocol, ProtoVers}, {TcpOptions, CallbackMod, CallbackArgs}} = ClientSpec,
-    start_link(Ip, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs).
+    start_link(Ip, Port, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs).
 
-start_link(Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs) ->
-    start_maybe_link(Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs, start_link).
+start_link(Ip, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs) ->
+    start_maybe_link(Ip, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs, start_link).
 
-start({IP, Port}, Primary, ClientSpec) ->
+start({IP, Port}, ClientSpec) ->
     {{Protocol, ProtoVers}, {TcpOptions, CallbackMod, CallbackArgs}} = ClientSpec,
-    start(IP, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs).
+    start(IP, Port, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs).
 
-start(Ip, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs) ->
-    start_maybe_link(Ip, Port, Primary, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs, start).
+start(Ip, Port, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs) ->
+    start_maybe_link(Ip, Port, Protocol, ProtoVers, TcpOptions, CallbackMod, CallbackArgs, start).
 
-start_maybe_link(Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs, StartFunc) ->
-    gen_fsm:StartFunc(?MODULE, {Ip, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}, []).
+start_maybe_link(Ip, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs, StartFunc) ->
+    gen_fsm:StartFunc(?MODULE, {Ip, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}, []).
 
 %% gen_fsm callbacks
 
-init({IP, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}) ->
+init({IP, Port, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}) ->
     case gen_tcp:connect(IP, Port, ?CONNECT_OPTIONS, ?CONNECTION_SETUP_TIMEOUT) of
         {ok, Socket} ->
             ok = ranch_tcp:setopts(Socket, ?CONNECT_OPTIONS),
@@ -181,8 +181,7 @@ init({IP, Port, Primary, Protocol, ProtoVers, SocketOptions, Mod, ModArgs}) ->
                            cluster_name = MyName,
                            local_capabilities = MyCaps,
                            ip = IP,
-                           port = Port,
-                           primary = Primary},
+                           port = Port},
             {ok, wait_for_capabilities, State};
         Else ->
             lager:warning("Could not connect ~p:~p due to ~p", [IP, Port, Else]),
@@ -241,8 +240,7 @@ handle_info({_TransTag, Socket, Data}, wait_for_protocol, State = #state{socket 
                                            IpPort,
                                            NegotiatedProto,
                                            ModArgs,
-                                           State#state.remote_capabilities,
-                                           State#state.primary),
+                                           State#state.remote_capabilities),
             {stop, normal, State};
         Else ->
             lager:warning("Invalid version returned: ~p", [Else]),

@@ -3,7 +3,7 @@
 
 -behaviour(gen_server).
 %% API
--export([start_link/2, start_link/3, connected/7, connect_failed/3,
+-export([start_link/2, start_link/3, connected/6, connect_failed/3,
     start_fullsync/1, stop_fullsync/1, fullsync_complete/1,
     cluster_name/1, legacy_status/2, soft_link/1]).
 
@@ -31,7 +31,7 @@ start_link(Partition, IP, Owner) ->
     gen_server:start_link(?MODULE, [Partition, IP, Owner], []).
 
 %% connection manager callbacks
-connected(Socket, Transport, Endpoint, Proto, Pid, Props, _Primary) ->
+connected(Socket, Transport, Endpoint, Proto, Pid, Props) ->
     Transport:controlling_process(Socket, Pid),
     gen_server:call(Pid,
         {connected, Socket, Transport, Endpoint, Proto, Props}, ?LONG_TIMEOUT).

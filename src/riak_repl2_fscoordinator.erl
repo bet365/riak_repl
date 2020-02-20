@@ -126,7 +126,7 @@
 %% connection manager Function Exports
 %% ------------------------------------------------------------------
 
--export([connected/7,connect_failed/3]).
+-export([connected/6,connect_failed/3]).
 
 %% ------------------------------------------------------------------
 %% stat caching mechanism export
@@ -245,7 +245,7 @@ register_remote_locator() ->
 %% ------------------------------------------------------------------
 
 %% @hidden
-connected(Socket, Transport, Endpoint, Proto, Pid, _Props, _Primary) ->
+connected(Socket, Transport, Endpoint, Proto, Pid, _Props) ->
     Transport:controlling_process(Socket, Pid),
     gen_server:cast(Pid, {connected, Socket, Transport, Endpoint, Proto}).
 

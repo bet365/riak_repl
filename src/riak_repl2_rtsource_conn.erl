@@ -48,7 +48,7 @@
          status/1, status/2,
          get_address/1,
          get_socketname_primary/1,
-         connected/7,
+         connected/6,
          legacy_status/1, legacy_status/2]).
 
 
@@ -78,7 +78,6 @@
 
 -record(state, {remote,    % remote name
                 address,   % {IP, Port}
-                primary,
                 transport, % transport module
                 socket,    % socket to use with transport
                 peername,  % cached when socket becomes active
@@ -120,12 +119,12 @@ legacy_status(Pid) ->
 legacy_status(Pid, Timeout) ->
     gen_server:call(Pid, legacy_status, Timeout).
 
-connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) ->
+connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
         gen_server:call(RtSourcePid,
-          {connected, Socket, Transport, IPPort, Proto, Primary},
+          {connected, Socket, Transport, IPPort, Proto},
           ?LONG_TIMEOUT)
     catch
         _:Reason ->
@@ -155,11 +154,11 @@ init([Remote]) ->
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, routine}, ok, State};
-handle_call(address, _From, State = #state{address=A, primary=P}) ->
-    {reply, {A,P}, State};
-handle_call(get_socketname_primary, _From, State=#state{socket = S, primary = P}) ->
+handle_call(address, _From, State = #state{address=A}) ->
+    {reply, A, State};
+handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
   {ok, Peername} = inet:sockname(S),
-  {reply, {Peername, P}, State};
+  {reply, Peername, State};
 handle_call(status, _From, State =
                 #state{remote = R, address = _A, transport = T, socket = S,
                        helper_pid = H,
@@ -233,8 +232,7 @@ handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
                                  proto = Proto,
                                  peername = peername(Transport, Socket),
                                  helper_pid = HelperPid,
-                                 ver = Ver,
-                                 primary = Primary},
+                                 ver = Ver},
             {ok, Peername} = inet:sockname(Socket),
             lager:info("Established realtime connection to site ~p address ~s, [data socket: ~p]",
                        [Remote, peername(State2), Peername]),
@@ -315,11 +313,10 @@ handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
 
-terminate(Reason, #state{socket = Socket, transport = Transport, address = A, primary = P, helper_pid = H}) ->
+terminate(Reason, #state{socket = Socket, transport = Transport, address = A, helper_pid = H}) ->
     exit(H, shutdown),
     catch Transport:close(Socket),
-    Key = {A,P},
-    lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, Key]),
+    lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, A]),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

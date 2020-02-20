@@ -200,8 +200,8 @@ predicate_by_protocol(_X, _MatchId) ->
     false.
 
 %% Public interface to accumulate stats
-update(Stat, Addrs, ProtocolId) ->
-    gen_server:cast(?SERVER, {update, Stat, Addrs, ProtocolId}).
+update(Stat, Addr, ProtocolId) ->
+    gen_server:cast(?SERVER, {update, Stat, Addr, ProtocolId}).
 
 %% gen_server
 
@@ -212,8 +212,8 @@ init([]) ->
 handle_call(_Req, _From, State) ->
     {reply, ok, State}.
 
-handle_cast({update, Stat, Addrs, ProtocolId}, State) ->
-    update_list(Stat, Addrs, ProtocolId),
+handle_cast({update, Stat, Addr, ProtocolId}, State) ->
+    do_update(Stat, Addr, ProtocolId),
     {noreply, State};
 handle_cast(_Req, State) ->
     {noreply, State}.
@@ -226,12 +226,6 @@ terminate(_Reason, _State) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-
-update_list(_Stat, [], _ProtocolId) ->
-    ok;
-update_list(Stat, [Addr|Rest], ProtocolId) ->
-    do_update(Stat, Addr, ProtocolId),
-    update(Stat, Rest, ProtocolId).
 
 %% Update a stat for given IP-Address, Cluster, and Protocol-id
 do_update({conn_error, Error}, IPAddr, Protocol) ->

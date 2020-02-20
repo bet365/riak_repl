@@ -111,7 +111,7 @@ init([Remote]) ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
-            erlang:monitor(process, whereis(ReferenceQ)),
+            erlang:monitor(process, ReferenceQ),
             case riak_core_capability:get({riak_repl, realtime_connections}, legacy) of
                 legacy ->
                     case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, legacy) of
@@ -149,10 +149,10 @@ init([Remote]) ->
 
 %%%=====================================================================================================================
 handle_call({connected, Socket, Transport, IPPort, Proto, _Props, Primary}, _From,
-    State = #state{remote = Remote, endpoints = E, version = V, reference_q = RefQ}) ->
+    State = #state{remote = Remote, endpoints = E, version = V}) ->
 
     lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
-    case riak_repl2_rtsource_conn:start_link(Remote, RefQ) of
+    case riak_repl2_rtsource_conn:start_link(Remote) of
         {ok, RtSourcePid} ->
             case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) of
                 ok ->

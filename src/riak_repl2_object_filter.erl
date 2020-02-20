@@ -132,7 +132,9 @@ realtime_blacklist(Meta) ->
              case orddict:find(?BT_META_BLACKLIST, Meta) of
                  {ok, Blacklist} -> Blacklist;
                  _ -> []
-             end
+             end;
+         _ ->
+             []
      end.
 
 %%%===================================================================

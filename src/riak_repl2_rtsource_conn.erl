@@ -316,10 +316,10 @@ handle_info(Msg, State) ->
     {noreply, State}.
 
 terminate(Reason, #state{socket = Socket, transport = Transport, address = A, primary = P, helper_pid = H}) ->
-    catch riak_repl2_rtsource_helper:stop(H),
+    exit(H, shutdown),
+    catch Transport:close(Socket),
     Key = {A,P},
     lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, Key]),
-    Transport:close(Socket),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->

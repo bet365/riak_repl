@@ -27,6 +27,15 @@
 -define(SERVER(RemoteName), name(RemoteName)).
 -define(DEFAULT_RETRY_LIMIT, 3).
 
+%% Queues
+-record(queue,
+{
+    table = ets:new(?MODULE, [protected, ordered_set]),
+    start_seq = 0, %% the next sequence number in queue
+    end_seq = 0    %% the last sequence number in the queue
+
+}).
+
 -record(state,
 {
     name = undefined,
@@ -38,16 +47,8 @@
     consumer_monitors = orddict:new(),
     consumer_fifo = queue:new(),
     drops = 0,
-    ack_counter = 0 %% number of objects acked by sink
-}).
-
-%% Queues
--record(queue,
-{
-    table = ets:new(?MODULE, [protected, ordered_set]),
-    start_seq = 0, %% the next sequence number in queue
-    end_seq = 0    %% the last sequence number in the queue
-
+    ack_counter = 0, %% number of objects acked by sink
+    retries = 0
 }).
 
 %% Consumers
@@ -100,9 +101,9 @@ init([RemoteName]) ->
     gen_server:cast(?SERVER(RemoteName), initialise),
     {ok, #state{name = RemoteName}}.
 
-handle_call({register, Ref}, Pid, State) ->
+handle_call({register, Ref}, {Pid, _Tag}, State) ->
     #state{name = Name, consumers = Consumers, consumer_fifo = ConsumerFIFO, consumer_monitors = ConsumerMonitors} = State,
-    case orddict:fetch(Ref, Consumers) of
+    case orddict:find(Ref, Consumers) of
         {ok, _} ->
             lager:error("Name: ~p, Ref: ~p, Pid: ~p. Already exisiting reference to consumer", [State#state.name, Ref, Pid]),
             {reply, {error, ref_exists}, State};
@@ -180,9 +181,9 @@ maybe_retry(MonitorRef, Pid, State) ->
         reference_queue = RefQ, retry_queue = RetryQ,
         name = Name, status = Status, drops = Drops
     } = State,
-    case orddict:fetch(MonitorRef, ConsumerMonitors) of
+    case orddict:find(MonitorRef, ConsumerMonitors) of
         {ok, Ref} ->
-            case orddict:fetch(Ref, Consumers) of
+            case orddict:find(Ref, Consumers) of
                 {ok, Consumer = #consumer{pid = Pid}} ->
                     #consumer{seq = Seq, qseq = QSeq, retry_counter = RetryCounter} = Consumer,
                     NewRetryCounter = RetryCounter +1,
@@ -265,17 +266,22 @@ ack_seq(Ref, CSeq, State) ->
     #state
     {
         consumers = Consumers, name = Name, ack_counter = AC,
-        reference_queue = RefQ, retry_queue = RetryQ
+        reference_queue = RefQ, retry_queue = RetryQ, consumer_fifo = ConsumerFIFO
     } = State,
-    case orddict:fetch(Ref, Consumers) of
+    case orddict:find(Ref, Consumers) of
         {ok, #consumer{status = Status, seq = Seq, qseq = QSeq, pid = Pid} = C} when C#consumer.cseq == CSeq ->
             riak_repl2_rtq:ack(Name, QSeq),
             delete_object_from_queue(Seq, RefQ, RetryQ, Status),
             UpdatedConsumer = #consumer{pid = Pid},
-            State#state{consumers = orddict:store(Ref, UpdatedConsumer, Consumers), ack_counter = AC +1};
+            UpdatedConsumers = orddict:store(Ref, UpdatedConsumer, Consumers),
+            UpdatedConsumerFIFO = queue:in(Ref, ConsumerFIFO),
+            NewState =
+                State#state{consumers =UpdatedConsumers, consumer_fifo = UpdatedConsumerFIFO, ack_counter = AC +1},
+            maybe_pull(NewState);
 
-        {ok, #consumer{pid = Pid}} ->
+        {ok, #consumer{pid = Pid} = C} ->
             lager:error("Sequence number from consumer did not match that stored sequence number in reference queue"),
+            lager:error("CSeq: ~p, Consumer: ~p", [CSeq, C]),
             exit(Pid, shutdown),
             State;
         error ->
@@ -289,7 +295,8 @@ ack_seq(Ref, CSeq, State) ->
 do_push(QEntry, State = #state{status = Status, reference_queue = RefQ}) ->
     {QSeq, _NumItem, _Bin, _Meta, _Completed} = QEntry,
     NewRefQ = insert_object_to_queue(QSeq, RefQ),
-    NewState = State#state{reference_queue = RefQ},
+    NewState = State#state{reference_queue = NewRefQ},
+
     #queue{start_seq = RefStartSeq, end_seq = RefEndSeq} = NewRefQ,
     ShouldSend = (RefStartSeq +1) == RefEndSeq,
     RetryCounter = 0,
@@ -334,13 +341,13 @@ maybe_get_object(State = #state{status = retry, retry_queue = RetryQ}) ->
 
 maybe_get_object(StartSeq2, #state{status = active, qtab = QTab, reference_queue = RefQ} = State) ->
     #queue{table = RefTab} = RefQ,
-    case ets:lookup(StartSeq2, RefTab) of
+    case ets:lookup(RefTab, StartSeq2) of
         [] ->
             %% entry removed from reference table? This would not happen
             lager:error("something removed reference queue entry!"),
             maybe_get_object(State#state{reference_queue = RefQ#queue{start_seq = StartSeq2}});
         [{StartSeq2, QSeq}] ->
-            case ets:lookup(QSeq, QTab) of
+            case ets:lookup(QTab, QSeq) of
                 [] ->
                     %% entry removed, this can happen if the queue was trimmed!
                     maybe_get_object(State#state{reference_queue = RefQ#queue{start_seq = StartSeq2}});
@@ -351,13 +358,13 @@ maybe_get_object(StartSeq2, #state{status = active, qtab = QTab, reference_queue
     end;
 maybe_get_object(StartSeq2, #state{status = retry, qtab = QTab, retry_queue = RetryQ} = State) ->
     #queue{table = RetryTab} = RetryQ,
-    case ets:lookup(StartSeq2, RetryTab) of
+    case ets:lookup(RetryTab, StartSeq2) of
         [] ->
             %% entry removed from reference table? This would not happen
             lager:error("something removed retry queue entry!"),
             maybe_get_object(State#state{retry_queue = RetryQ#queue{start_seq = StartSeq2}});
         [{StartSeq2, {QSeq, RetryCounter}}] ->
-            case ets:lookup(QSeq, QTab) of
+            case ets:lookup(QTab, QSeq) of
                 [] ->
                     %% entry removed, this can happen if the queue was trimmed!
                     maybe_get_object(State#state{retry_queue = RetryQ#queue{start_seq = StartSeq2}});
@@ -370,12 +377,12 @@ maybe_deliver_object(Seq2, RetryCounter, QEntry, State = #state{consumer_fifo = 
     case queue:out(ConsumerFIFO) of
         {empty, NewFIFO} ->
             State#state{consumer_fifo = NewFIFO};
-        {{value, ConsumerRef}, NewQ} ->
-            maybe_deliver_object(ConsumerRef, NewQ, Seq2, RetryCounter, QEntry, State)
+        {{value, ConsumerRef}, NewFIFO} ->
+            maybe_deliver_object(ConsumerRef, NewFIFO, Seq2, RetryCounter, QEntry, State)
     end.
 
 maybe_deliver_object(ConsumerRef, NewFIFO, Seq2, RetryCounter, QEntry, #state{consumers = Consumers} = State) ->
-    case orddict:fetch(ConsumerRef, Consumers) of
+    case orddict:find(ConsumerRef, Consumers) of
         error ->
             %% consumer must have died and was removed from consumers
             %% however its ref was still in the queue!
@@ -470,7 +477,7 @@ get_retry_limit(_) ->
 -else.
 get_retry_limit(#state{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {retry_limit, Name}) of
-        undefined -> get_retry_limit(Name);
+        undefined -> app_helper:get_env(riak_repl, retry_limit, ?DEFAULT_RETRY_LIMIT);
         RetryLimit -> RetryLimit
     end.
 -endif.

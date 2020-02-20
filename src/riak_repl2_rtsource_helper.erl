@@ -22,7 +22,7 @@
 -include("riak_repl.hrl").
 
 -define(SERVER, ?MODULE).
-
+-define(SHORT_TIMEOUT, 1000).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
     terminate/2, code_change/3]).
@@ -31,7 +31,7 @@
                 transport,  % erlang module to use for transport
                 socket,     % socket to pass to transport
                 proto,      % protocol version negotiated
-                sent_seq,   % last sequence sent
+                sent_seq = 0,   % last sequence sent
                 v1_offset = 0,
                 v1_seq_map = [],
                 objects = 0, % number of objects sent - really number of pulls as could be multiobj
@@ -61,7 +61,7 @@ send_heartbeat(Pid) ->
     gen_server:cast(Pid, send_heartbeat).
 
 send_object(Pid, Obj) ->
-    gen_server:call(Pid, {send_object, Obj}, ?LONG_TIMEOUT).
+    gen_server:call(Pid, {send_object, Obj}, ?SHORT_TIMEOUT).
 
 
 init([Remote, Transport, Socket, Version, AckRef]) ->
@@ -70,10 +70,10 @@ init([Remote, Transport, Socket, Version, AckRef]) ->
     riak_repl2_reference_rtq:register(Remote, AckRef),
     {ok, State}.
 
-handle_call({send_object, {Seq, NumObjects, _BinObjs, _Meta} = Entry}, From,
-    State = #state{transport = T, socket = S, objects = Objects}) ->
-    State2 = maybe_send(T, S, Entry, From, State),
-    {noreply, State2#state{sent_seq = Seq, objects = Objects + NumObjects}};
+handle_call({send_object, Entry}, From,
+    State = #state{transport = T, socket = S}) ->
+    NewState = maybe_send(T, S, Entry, From, State),
+    {noreply, NewState};
 
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State};
@@ -125,6 +125,8 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
     {Seq2, _NumObjects, _BinObjs, Meta} = QEntry2,
     case State#state.proto of
         {Major, _Minor} when Major >= 3 ->
+            %% unblock the rtq as fast as possible
+            gen_server:reply(From, {ok, Seq2}),
             encode_and_send(QEntry2, Remote, Transport, Socket, State);
         _ ->
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
@@ -140,13 +142,13 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
             end
     end.
 
-encode_and_send(QEntry, Remote, Transport, Socket, State) ->
+encode_and_send(QEntry, Remote, Transport, Socket, State = #state{objects = Objects}) ->
     QEntry2 = merge_forwards_and_routed_meta(QEntry, Remote),
-    {Seq, _, _, _} = QEntry2,
+    {Seq, NumObjects, _, _} = QEntry2,
     {Encoded, State2} = encode(QEntry2, State),
     lager:debug("Forwarding to ~p with new data: ~p derived from ~p", [State#state.remote, QEntry2, QEntry]),
     Transport:send(Socket, Encoded),
-    State2#state{sent_seq = Seq}.
+    State2#state{sent_seq = Seq, objects = Objects + NumObjects}.
 
 
 encode({Seq, _NumObjs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->

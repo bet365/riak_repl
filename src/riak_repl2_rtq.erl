@@ -359,7 +359,7 @@ make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
         lists:foldl(
             fun(Remote, Acc) ->
                 #remote{name = Name, total_drops = Drops, rsize_bytes = RSize} = Remote,
-                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {drops, Drops}],
+                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Remote)}, {drops, Drops}],
                 RefStats = riak_repl2_reference_rtq:status(Name),
                 [{Name, Stats ++ RefStats} | Acc]
             end, [], Remotes),
@@ -556,6 +556,7 @@ queue_needs_trim(#state{qsize_bytes = QBytes}) ->
     QBytes > get_queue_max_bytes().
 
 
+
 trim_single_queue_entry(Seq, State = #state{qtab = QTab, all_remote_names = AllRemoteNames}) ->
     case ets:lookup(QTab, Seq) of
         [{_, _, Bin, _, Completed}] ->
@@ -573,30 +574,36 @@ trim_single_queue_entry(Seq, State = #state{qtab = QTab, all_remote_names = AllR
 %% ================================================================================================================== %%
 %% Acking the queue. Either adds to a remote to the 'Completed' list, or deletes the object.
 %% ================================================================================================================== %%
-ack_seq(Seq, Remote, State) ->
-    #state{qtab = QTab, qsize_bytes = QSize, all_remote_names = AllRemoteNames} = State,
+ack_seq(RemoteName, Seq, State) ->
+    #state{qtab = QTab, all_remote_names = AllRemoteNames, remotes = Remotes} = State,
     case ets:lookup(QTab, Seq) of
         [] ->
             %% TODO:
             %% the queue has been trimmed due to reaching its maximum size
             %% but this has been sent and acked! - so we can reduce the dropped counter
-            {Remote, State};
-        [{_, _, Bin, _, Completed}] ->
-            NewCompleted = [Remote#remote.name | Completed],
-            ShrinkSize = ets_obj_size(Bin, State),
-            NewRemote2 = update_remote_queue_size(Remote, -ShrinkSize),
-            case AllRemoteNames -- NewCompleted of
-                [] ->
-                    ets:delete(QTab, Seq),
-                    NewState = update_queue_size(State, -ShrinkSize),
-                    {NewRemote2, NewState};
-                _ ->
-                    ets:update_element(QTab, Seq, {5, NewCompleted}),
-                    {NewRemote2, State}
+            State;
+        [{Seq, _, Bin, _, Completed}] ->
+            case lists:keytake(RemoteName, #remote.name, Remotes) of
+                {value, Remote, Remotes2}  ->
+                    NewCompleted = [RemoteName | Completed],
+                    ShrinkSize = ets_obj_size(Bin, State),
+                    NewRemote = update_remote_queue_size(Remote, -ShrinkSize),
+                    NewState = State#state{remotes = [NewRemote | Remotes2]},
+                    case AllRemoteNames -- NewCompleted of
+                        [] ->
+                            ets:delete(QTab, Seq),
+                            update_queue_size(NewState, -ShrinkSize);
+                        _ ->
+                            ets:update_element(QTab, Seq, {5, NewCompleted}),
+                            NewState
+                    end;
+                false ->
+                    lager:error("Ack received for a remote that is not registered"),
+                    State
             end;
         UnExpectedObj ->
             lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
-            {Remote, QSize}
+            State
     end.
 %% ================================================================================================================== %%
 
@@ -677,19 +684,20 @@ update_remote_queue_size(Remote = #remote{rsize_bytes = RBytes}, Diff) ->
 
 
 
-update_remotes_total_drops(State = #state{remotes = Remotes}, Diff, RemoteNames) ->
+update_remotes_total_drops(State = #state{remotes = Remotes}, DropCounter, RemoteNames) ->
     UpdatedRemotes = lists:map(
         fun(Remote) ->
             case lists:member(Remote#remote.name, RemoteNames) of
                 true ->
-                    update_remote_total_drops(Remote, Diff);
+                    update_remote_total_drops(Remote, DropCounter);
                 false ->
                     Remote
             end
         end, Remotes),
     State#state{remotes = UpdatedRemotes}.
-update_remote_total_drops(Remote = #remote{total_drops = Drops}, Diff) ->
-    Remote#remote{total_drops = Drops + Diff}.
+
+update_remote_total_drops(Remote = #remote{total_drops = Drops}, DropCounter) ->
+    Remote#remote{total_drops = Drops + DropCounter}.
 
 
 
@@ -724,13 +732,13 @@ qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
 
 get_queue_max_bytes() ->
     case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
-        undefined -> get_queue_max_bytes();
+        undefined -> app_helper:get_env(riak_repl, rtq_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.
 
-get_remote_max_bytes(Remote = #remote{name = Name}) ->
+get_remote_max_bytes(#remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}) of
-        undefined -> get_remote_max_bytes(Remote);
+        undefined -> app_helper:get_env(riak_repl, rtq_remote_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.
 -endif.

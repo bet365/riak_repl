@@ -1,5 +1,6 @@
 -module(riak_repl2_rtsource_conn_mgr).
 -behaviour(gen_server).
+-include("riak_repl.hrl").
 
 %% API
 -export([start_link/1]).
@@ -13,20 +14,19 @@
     code_change/3]).
 
 -export([
-    connected/7,
+    connected/6,
     connect_failed/3,
-    maybe_rebalance_delayed/1,
-    should_rebalance/3,
+    maybe_rebalance/1,
     stop/1,
+
     get_all_status/1,
     get_all_status/2,
-    get_source_and_sink_nodes/1,
     get_endpoints/1,
     get_rtsource_conn_pids/1
 ]).
 
 -define(SERVER, ?MODULE).
-
+-define(DEFAULT_NO_CONNECTIONS, 400).
 -define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]},
     {?TCP_OPTIONS, ?SERVER, self()}}).
 
@@ -36,33 +36,27 @@
     {active, false}]).
 
 -record(state, {
-    version,
-    remote, % remote sink cluster name
-    connection_ref, % reference handed out by connection manager
-    rb_timeout_tref, % Rebalance timeout timer reference
-    rebalance_delay_fun,
-    rebalance_timer,
-    max_delay,
-    source_nodes,
-    sink_nodes,
-    remove_endpoint,
-    endpoints,
-    reference_q
+    remote = undefined,                         %% remote sink cluster name
+    connecting = orddict:new(),                 %% number of of pending connections per ip addr
+    connection_counts = orddict:new(),          %% number of established connections per ip addr
+    balanced_connection_counts = orddict:new(), %% same as above but what the counts should be under a correct balance
+    connection_monitors = orddict:new(),        %% monitor references mapped to {pid, addr}
+    rb_timeout_tref,                            %% rebalance timeout timer reference
+    reference_rtq
 }).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-
 start_link(Remote) ->
     gen_server:start_link(?MODULE, [Remote], []).
 
-connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props, Primary) ->
+connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props) ->
     Transport:controlling_process(Socket, RTSourceConnMgrPid),
     try
     gen_server:call(RTSourceConnMgrPid,
-        {connected, Socket, Transport, IPPort, Proto, _Props, Primary})
+        {connected, Socket, Transport, IPPort, Proto, _Props})
     catch
         _:Reason ->
             lager:warning("Unable to contact RT Source Conn Manager (~p). Killing it to force a reconnect", RTSourceConnMgrPid),
@@ -73,8 +67,8 @@ connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props, Primary)
 connect_failed(_ClientProto, Reason, RTSourceConnMgrPid) ->
     gen_server:cast(RTSourceConnMgrPid, {connect_failed, Reason}).
 
-maybe_rebalance_delayed(Pid) ->
-    gen_server:cast(Pid, rebalance_delayed).
+maybe_rebalance(Pid) ->
+    gen_server:cast(Pid, maybe_rebalance).
 
 stop(Pid) ->
     gen_server:call(Pid, stop).
@@ -97,65 +91,35 @@ get_rtsource_conn_pids(Pid) ->
 
 
 init([Remote]) ->
-
-%%    _ = riak_repl2_rtq:register(Remote), % re-register to reset stale deliverfun
-    E = dict:new(),
-    MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
-    M = fun(X) -> round(X * crypto:rand_uniform(0, 1000)) end,
-    RebalanceTimer = app_helper:get_env(riak_repl, realtime_rebalance_on_failure, 5),
-
-
+%%    MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
+%%    M = fun(X) -> 10 + round(X * crypto:rand_uniform(0, 1000)) end,
     case whereis(riak_repl2_reference_rtq:name(Remote)) of
         undefined ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
             erlang:monitor(process, ReferenceQ),
-            %% TODO: doesn't matter if legacy, v1, or v2 we shall be just using v2
-            {ok, #state{}}
+            {State, TriggerRebalance} = connect_to_sink(Remote),
+            case TriggerRebalance of
+                true ->
+                    gen_server:cast(self(), maybe_rebalance);
+                _ ->
+                    ok
+            end,
+            {ok, State}
     end.
 
 %%%=====================================================================================================================
 handle_call({connected, Socket, Transport, IPPort, Proto, _Props}, _From,
-    State = #state{remote = Remote, endpoints = E, version = V}) ->
+    State = #state{remote = Remote}) ->
 
     lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
     case riak_repl2_rtsource_conn:start_link(Remote) of
         {ok, RtSourcePid} ->
-            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props, Primary) of
+            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props) of
                 ok ->
 
-                    % check remove_endpoint
-                    NewState = case State#state.remove_endpoint of
-                                   undefined ->
-                                       State;
-                                   RC ->
-                                       E2 = remove_connections([RC], E, Remote, V),
-                                       State#state{endpoints = E2, remove_endpoint = undefined}
-                               end,
-
-                    case dict:find({IPPort, Primary}, NewState#state.endpoints) of
-                        {ok, OldRtSourcePid} ->
-                            exit(OldRtSourcePid, {shutdown, rebalance, {IPPort,Primary}}),
-                            lager:info("duplicate connections found, removing the old one ~p", [{IPPort,Primary}]);
-                        error ->
-                            ok
-                    end,
-
-                    %% Save {EndPoint, Pid}; Pid will come from the supervisor starting a child
-                    NewEndpoints = dict:store({IPPort, Primary}, RtSourcePid, NewState#state.endpoints),
-
-                    case V of
-                        legacy ->
-                            lager:info("Adding remote connection, however not sending to data_mgr as we are running legacy code base"),
-                            ok;
-                        v1 ->
-                            % save to ring
-                            lager:info("Adding remote connections to data_mgr: ~p", [dict:fetch_keys(NewEndpoints)]),
-                            riak_repl2_rtsource_conn_data_mgr:write(realtime_connections, Remote, node(), dict:fetch_keys(NewEndpoints))
-                    end,
-
-                    {reply, ok, NewState#state{endpoints = NewEndpoints}};
+                    {reply, ok, State};
 
                 Error ->
                     lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
@@ -164,6 +128,13 @@ handle_call({connected, Socket, Transport, IPPort, Proto, _Props}, _From,
         ER ->
             {reply, ER, State}
     end;
+
+
+
+
+
+
+
 
 handle_call(all_status, _From, State=#state{endpoints = E}) ->
     AllKeys = dict:fetch_keys(E),
@@ -382,3 +353,83 @@ same_ipaddr({{_IP1,_Port1},_}, {{_IP2,_Port2}, _}) ->
 same_ipaddr(X,Y) ->
     lager:warning("(legacy) ipaddrs have unexpected format! ~p, ~p", [X,Y]),
     false.
+
+
+
+
+
+
+%% TODO: make this a generic rebalance function (use BalanacedConnection -- (ConnectionCounts ++ PendingConnections))
+rebalance_connections(State) ->
+    #state{connection_counts = ConnectionCounts, remote = Remote} = State,
+    case calculate_balanced_connections(State) of
+        [] ->
+            problem;
+        BalancedConnections ->
+            PendingConnections =
+                orddict:fold(fun connect_to_sink_n_times/3, {orddict:new(), Remote}, BalancedConnections),
+            #state
+                {
+                    remote = Remote,
+                    balanced_connection_counts = BalancedConnections,
+                    connecting = PendingConnections
+                }
+    end.
+
+calculate_balanced_connections(State) ->
+    #state{remote = Remote} = State,
+    TotalNumberOfConnections = get_number_of_connections(Remote),
+    case riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote) of
+        [] ->
+            orddict:new();
+        SinkNodes ->
+            NumberOfSinkNodes = length(SinkNodes),
+            TotalExtraConnections = TotalNumberOfConnections rem NumberOfSinkNodes,
+            AverageNumberOfConnections = (TotalNumberOfConnections - TotalNumberOfConnections) div NumberOfSinkNodes,
+
+            {BalancedConnectionCounts, _} =
+                lists:foldl(
+                    fun(Addr, {Acc, Counter}) ->
+                        case Counter =< TotalExtraConnections of
+                            true ->
+                                {orddict:store(Addr, AverageNumberOfConnections +1, Acc), Counter +1};
+                            false ->
+                                {orddict:store(Addr, AverageNumberOfConnections, Acc), Counter +1}
+                        end
+                    end, {orddict:new(), 1}, lists:seq(1, SinkNodes)
+                ),
+            BalancedConnectionCounts
+    end.
+
+
+connect_to_sink_n_times(_Addr, 0, {PendingConnections, Remote}) ->
+    {PendingConnections, Remote};
+connect_to_sink_n_times(Addr, N, {PendingConnections, Remote}) ->
+    connect_to_sink_n_times(Addr, N-1, connect_to_sink(Addr, PendingConnections, Remote)).
+
+connect_to_sink(Addr, PendingConnections, Remote) ->
+    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, [Addr]}) of
+        {ok, _Ref} ->
+            Count =
+                case orddict:find(Addr, PendingConnections) of
+                    error -> 0;
+                    C -> C
+                end,
+            PendingConnections2 = orddict:store(Addr, Count +1, PendingConnections),
+            {PendingConnections2, Remote};
+        _->
+            {PendingConnections, Remote}
+    end.
+
+-ifdef(TEST).
+get_number_of_connections(_) ->
+    app_helper:get_env(riak_repl, number_of_connections, ?DEFAULT_NO_CONNECTIONS).
+
+-else.
+
+get_number_of_connections(Name) ->
+    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {number_of_connections, Name}) of
+        undefined -> app_helper:get_env(riak_repl, number_of_connections, ?DEFAULT_NO_CONNECTIONS);
+        NumberOfConnections -> NumberOfConnections
+    end.
+-endif.

@@ -748,9 +748,6 @@ shuffle_with_seed(List, Seed) ->
     <<_:10,S1:50,S2:50,S3:50>> = crypto:hash(sha, term_to_binary(Seed)),
     shuffle_with_seed(List, {S1,S2,S3}).
 
-add_primary_value(List) ->
-    [{IPPort, false} || IPPort <- List].
-
 shuffle_remote_ipaddrs([]) ->
     {ok, []};
 shuffle_remote_ipaddrs(RemoteUnsorted) ->
@@ -768,9 +765,9 @@ shuffle_remote_ipaddrs(RemoteUnsorted) ->
             SplitPos = ((MyPos-1) rem length(RemoteAddrs)),
             case lists:split(SplitPos,RemoteAddrs) of
                 {BeforeBuddy,[Buddy|AfterBuddy]} ->
-                    {ok, add_primary_value([Buddy | shuffle_with_seed(AfterBuddy ++ BeforeBuddy, node())])}
+                    {ok, [Buddy | shuffle_with_seed(AfterBuddy ++ BeforeBuddy, node())]}
             end;
         false ->
-            {ok, add_primary_value(shuffle_with_seed(lists:sort(RemoteUnsorted), node()))}
+            {ok, shuffle_with_seed(lists:sort(RemoteUnsorted), node())}
     end.
 

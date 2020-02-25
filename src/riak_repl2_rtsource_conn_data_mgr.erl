@@ -388,7 +388,6 @@ remove_nodes([Node|Nodes], Remote, ConnectionsDict) ->
 
 
 become_leader(State, LeaderNode) when State#state.is_leader == false ->
-    send_leader_data(),
     erlang:send_after(1000, self(), reset_restoration_flag),
     State#state{is_leader = true, leader_node = LeaderNode, restoration = true};%% active_nodes = ActiveNodes};
 become_leader(State, LeaderNode) ->
@@ -396,16 +395,9 @@ become_leader(State, LeaderNode) ->
 
 
 become_proxy(State, LeaderNode) when State#state.is_leader == true ->
-    send_leader_data(),
     State#state{is_leader = false, leader_node = LeaderNode, connections = dict:new(), restoration = false};
 become_proxy(State, LeaderNode) ->
-    send_leader_data(),
     State#state{is_leader = false, leader_node = LeaderNode}.
-
-send_leader_data() ->
-    AllEndpoints = [{Remote, dict:fetch_keys(riak_repl2_rtsource_conn_mgr:get_endpoints(Pid))} || {Remote, Pid} <- riak_repl2_rtsource_conn_sup:enabled()],
-    _ = [gen_server:cast(?SERVER, {restore_realtime_connections, Remote, node(), ConnectionList}) || {Remote, ConnectionList} <- AllEndpoints],
-    ok.
 
 
 

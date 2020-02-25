@@ -42,14 +42,17 @@
 -endif.
 
 %% API
--export([start_link/1,
-         stop/1,
-         get_helper_pid/1,
-         status/1, status/2,
-         get_address/1,
-         get_socketname_primary/1,
-         connected/6,
-         legacy_status/1, legacy_status/2]).
+-export([
+    start_link/1,
+    stop/1,
+    get_helper_pid/1,
+    status/1, status/2,
+    get_address/1,
+    get_socketname_primary/1,
+    connected/6,
+    legacy_status/1,
+    legacy_status/2
+]).
 
 
 %% gen_server callbacks
@@ -212,7 +215,7 @@ handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
          {strategy, realtime},
          {socket, Socket}] ++ RTQStats,
     {reply, {status, Status}, State};
-handle_call({connected, Socket, Transport, EndPoint, Proto, Primary}, _From,
+handle_call({connected, Socket, Transport, EndPoint, Proto}, _From,
             State = #state{remote = Remote, ack_ref = AckRef}) ->
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler

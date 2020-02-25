@@ -15,13 +15,12 @@
 
 -export([
     connected/6,
-    connect_failed/3,
+    connect_failed/4,
     maybe_rebalance/1,
     stop/1,
 
     get_all_status/1,
     get_all_status/2,
-    get_endpoints/1,
     get_rtsource_conn_pids/1
 ]).
 
@@ -37,12 +36,13 @@
 
 -record(state, {
     remote = undefined,                         %% remote sink cluster name
-    connecting = orddict:new(),                 %% number of of pending connections per ip addr
+    connections_monitors = orddict:new(),       %% monitor references mapped to {pid, addr}
+    connections = orddict:new(),                %% addr's mapped to another orddict with {ref, pid}
+    pending_connection_counts = orddict:new(),  %% number of of pending connections per ip addr
     connection_counts = orddict:new(),          %% number of established connections per ip addr
-    balanced_connection_counts = orddict:new(), %% same as above but what the counts should be under a correct balance
-    connection_monitors = orddict:new(),        %% monitor references mapped to {pid, addr}
+    reject_connection_counts = orddict:new(),   %% number of connectios per ipaddr that need to be rejected
     rb_timeout_tref,                            %% rebalance timeout timer reference
-    reference_rtq
+    reference_rtq                               %% reference queue pid
 }).
 
 %%%===================================================================
@@ -52,11 +52,11 @@
 start_link(Remote) ->
     gen_server:start_link(?MODULE, [Remote], []).
 
-connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props) ->
+connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, Props) ->
     Transport:controlling_process(Socket, RTSourceConnMgrPid),
     try
     gen_server:call(RTSourceConnMgrPid,
-        {connected, Socket, Transport, IPPort, Proto, _Props})
+        {connected, Socket, Transport, IPPort, Proto, Props})
     catch
         _:Reason ->
             lager:warning("Unable to contact RT Source Conn Manager (~p). Killing it to force a reconnect", RTSourceConnMgrPid),
@@ -64,8 +64,8 @@ connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, _Props) ->
             ok
     end.
 
-connect_failed(_ClientProto, Reason, RTSourceConnMgrPid) ->
-    gen_server:cast(RTSourceConnMgrPid, {connect_failed, Reason}).
+connect_failed(_ClientProto, Reason, RTSourceConnMgrPid, Addr) ->
+    gen_server:cast(RTSourceConnMgrPid, {connect_failed, Reason, Addr}).
 
 maybe_rebalance(Pid) ->
     gen_server:cast(Pid, maybe_rebalance).
@@ -78,9 +78,6 @@ get_all_status(Pid) ->
 get_all_status(Pid, Timeout) ->
     gen_server:call(Pid, all_status, Timeout).
 
-get_endpoints(Pid) ->
-    gen_server:call(Pid, get_endpoints).
-
 get_rtsource_conn_pids(Pid) ->
     gen_server:call(Pid, get_rtsource_conn_pids).
 
@@ -91,93 +88,55 @@ get_rtsource_conn_pids(Pid) ->
 
 
 init([Remote]) ->
-%%    MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 120),
-%%    M = fun(X) -> 10 + round(X * crypto:rand_uniform(0, 1000)) end,
     case whereis(riak_repl2_reference_rtq:name(Remote)) of
         undefined ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
             erlang:monitor(process, ReferenceQ),
-            {State, TriggerRebalance} = connect_to_sink(Remote),
-            case TriggerRebalance of
-                true ->
-                    gen_server:cast(self(), maybe_rebalance);
-                _ ->
-                    ok
-            end,
-            {ok, State}
+            State = #state{remote = Remote, reference_rtq = ReferenceQ},
+            NewState = rebalance_connections(State),
+            {ok, NewState}
     end.
 
 %%%=====================================================================================================================
-handle_call({connected, Socket, Transport, IPPort, Proto, _Props}, _From,
-    State = #state{remote = Remote}) ->
-
-    lager:info("Adding a connection and starting rtsource_conn ~p", [Remote]),
-    case riak_repl2_rtsource_conn:start_link(Remote) of
-        {ok, RtSourcePid} ->
-            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props) of
-                ok ->
-
-                    {reply, ok, State};
-
-                Error ->
-                    lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
-                    {reply, Error, State}
-            end;
-        ER ->
-            {reply, ER, State}
+handle_call({connected, Socket, Transport, Addr, Proto, Props}, _From, State) ->
+    #state{reject_connection_counts = RejectConnections} = State,
+    case orddict:find(Addr, RejectConnections) of
+        error ->
+            accept_connection(Socket, Transport, Addr, Proto, Props, State);
+        {ok, Count} ->
+            reject_connection(Socket, Transport, Addr, Count, State)
     end;
 
-
-
-
-
-
-
-
-handle_call(all_status, _From, State=#state{endpoints = E}) ->
-    AllKeys = dict:fetch_keys(E),
+handle_call(all_status, _From, State=#state{connections_monitors = ConnectionsMonitors}) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
-    {reply, lists:flatten(collect_status_data(AllKeys, Timeout, [], E)), State};
+    {reply, lists:flatten(collect_status_data(ConnectionsMonitors, Timeout)), State};
 
-handle_call(get_rtsource_conn_pids, _From, State = #state{endpoints = E}) ->
-    Result = lists:foldl(fun({_,Pid}, Acc) -> Acc ++ [Pid] end, [], dict:to_list(E)),
+handle_call(get_rtsource_conn_pids, _From, State = #state{connections_monitors = ConnectionMonitors}) ->
+    Result = orddict:fold(fun(_, {Pid, _}, Acc) -> [Pid | Acc] end, [], ConnectionMonitors),
     {reply, Result, State};
 
 handle_call(stop, _From, State) ->
     {stop, shutdown, ok, State};
-
-handle_call(get_endpoints, _From, State=#state{endpoints = E}) ->
-    {reply, E, State};
 
 handle_call(Request, _From, State) ->
     lager:warning("unhandled call: ~p", [Request]),
     {reply, ok, State}.
 
 %%%=====================================================================================================================
+handle_cast({connect_failed, Reason, Addr}, State) ->
+    #state{remote = Remote} = State,
+    lager:warning("Realtime replication connection to site ~p; address: ~p; failed - ~p\n", [Remote, Addr, Reason]),
+    {noreply, connection_failed(Addr, State)};
 
-%% Connection manager failed to make connection
-handle_cast({connect_failed, Reason}, State = #state{remote = Remote, endpoints = E}) ->
-    lager:warning("Realtime replication connection to site ~p failed - ~p\n", [Remote, Reason]),
-    NewState =
-        case dict:fetch_keys(E) of
-            [] ->
-                cancel_timer(State#state.rb_timeout_tref),
-                RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
-                State#state{rb_timeout_tref = RbTimeoutTref};
-            _ ->
-                State
-        end,
-    {noreply, NewState};
-
-handle_cast(rebalance_delayed, State=#state{version = Version}) ->
-    case Version of
-        legacy ->
-            {noreply, maybe_rebalance_legacy(State, delayed)};
-        v1 ->
-            {noreply, maybe_rebalance(State, delayed)}
-    end;
+handle_cast(maybe_rebalance, State=#state{rb_timeout_tref = undefined}) ->
+    MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 60),
+    TimeDelay =  10 + round(MaxDelaySecs * crypto:rand_uniform(0, 1000)),
+    RbTimeoutTref = erlang:send_after(TimeDelay, self(), rebalance_now),
+    {noreply, State#state{rb_timeout_tref = RbTimeoutTref}};
+handle_cast(maybe_rebalance, State) ->
+    {noreply, State};
 
 handle_cast(Request, State) ->
     lager:warning("unhandled cast: ~p", [Request]),
@@ -185,65 +144,10 @@ handle_cast(Request, State) ->
 
 %%%=====================================================================================================================
 
-%% TODO: this needs to change to 'DOWN'
-handle_info({'EXIT', Pid, Reason}, State = #state{endpoints = E, remote = Remote, version = Version}) ->
-    NewState = case lists:keyfind(Pid, 2, dict:to_list(E)) of
-                   {Key, Pid} ->
-                       NewEndpoints = dict:erase(Key, E),
-                       State2 = State#state{endpoints = NewEndpoints},
-                       {IPPort, Primary} = Key,
+%% TODO: 'DOWN' message from rtsource_conn monitors
 
-                       case Version of
-                           legacy ->
-                               ok;
-                           v1 ->
-                               riak_repl2_rtsource_conn_data_mgr:delete(realtime_connections, Remote, node(), IPPort, Primary)
-                       end,
-
-                       case Reason of
-                           normal ->
-                               lager:info("riak_repl2_rtsource_conn terminated due to reason nomral, Endpoint: ~p", [Key]);
-                           {shutdown, routine} ->
-                               lager:info("riak_repl2_rtsource_conn terminated due to reason routine shutdown, Endpoint: ~p", [Key]);
-                           {shutdown, heartbeat_timeout} ->
-                               lager:info("riak_repl2_rtsource_conn terminated due to reason heartbeat timeout, Endpoint: ~p", [Key]);
-                           {shutdown, Error} ->
-                               lager:info("riak_repl2_rtsource_conn terminated due to reason ~p, Endpoint: ~p", [Error, Key]);
-                           OtherError ->
-                               lager:warning("riak_repl2_rtsource_conn terminated due to reason ~p, Endpoint: ~p", [OtherError, Key])
-                       end,
-
-                       case dict:fetch_keys(NewEndpoints) of
-                           [] ->
-                               cancel_timer(State2#state.rb_timeout_tref),
-                               RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
-                               State2#state{rb_timeout_tref = RbTimeoutTref};
-                           _ ->
-                               State2
-                       end;
-                   false ->
-                       case Reason of
-                           {shutdown, rebalance, RemovedKey} ->
-                               lager:info("riak_repl2_rtsource_conn terminated due to rebalancing, Endpoint: ~p", [RemovedKey]);
-                           _ ->
-                               lager:warning("riak_repl2_rtsource_conn terminated due to reason ~p, [NOT IN ENDPOINTS]", [Reason])
-                       end,
-                       State
-               end,
-    {noreply, NewState};
-
-handle_info(rebalance_now, State=#state{version = Version}) ->
-    case Version of
-        legacy ->
-            {noreply, maybe_rebalance_legacy(State#state{rb_timeout_tref = undefined}, now)};
-        v1 ->
-            {noreply, maybe_rebalance(State#state{rb_timeout_tref = undefined}, now)}
-    end;
-
-handle_info(upgrade_connection_version, State) ->
-    cancel_timer(State#state.rb_timeout_tref),
-    RbTimeoutTref = erlang:send_after(0, self(), rebalance_now),
-    {noreply, State#state{version = v1, rb_timeout_tref = RbTimeoutTref}};
+handle_info(rebalance_now, State) ->
+    {noreply, rebalance_connections(State#state{rb_timeout_tref = undefined})};
 
 handle_info(Info, State) ->
     lager:warning("unhandled info: ~p", [Info]),
@@ -251,10 +155,15 @@ handle_info(Info, State) ->
 
 %%%=====================================================================================================================
 
-terminate(Reason, _State=#state{remote = Remote, endpoints = E}) ->
+terminate(Reason, _State=#state{remote = Remote, connections_monitors = ConnectionMonitors}) ->
     lager:info("rtrsource conn mgr terminating, Reason: ~p", [Reason]),
     riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-    [catch riak_repl2_rtsource_conn:stop(Pid) || {{{_IP, _Port},_Primary},Pid} <- dict:to_list(E)],
+    orddict:fold(
+        fun(_, {Pid, Ref}, _) ->
+            erlang:demonitor(Ref),
+            catch riak_repl2_rtsource_conn:stop(Pid),
+            ok
+        end, ok, ConnectionMonitors),
     ok.
 
 %%%=====================================================================================================================
@@ -267,125 +176,242 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-
-cancel_timer(undefined) -> ok;
-cancel_timer(TRef)      -> _ = erlang:cancel_timer(TRef).
-
-collect_status_data([], _Timeout, Data, _E) ->
-    Data;
-collect_status_data([Key | Rest], Timeout, Data, E) ->
-    Pid = dict:fetch(Key, E),
-    NewData = riak_repl2_rtsource_conn:status(Pid, Timeout),
-    collect_status_data(Rest, Timeout, [NewData|Data], E).
-
-%% ------------------------------------------------------------------------------------------------------------------ %%
-%%                                                 Legacy Code                                                        %%
-%% ------------------------------------------------------------------------------------------------------------------ %%
-
-maybe_rebalance_legacy(State=#state{rebalance_delay_fun = Fun, max_delay = M}, delayed) ->
-    case State#state.rb_timeout_tref of
-        undefined ->
-            RbTimeoutTref = erlang:send_after(Fun(M), self(), rebalance_now),
-            State#state{rb_timeout_tref = RbTimeoutTref};
-        _ ->
-            %% Already sent a "rebalance_now"
-            State
-    end;
-
-maybe_rebalance_legacy(State, now) ->
-    case should_rebalance_legacy(State) of
-        no ->
-            State;
-        {yes, UsefulAddrs} ->
-            reconnect_legacy(State, UsefulAddrs)
+%%%=====================================================================================================================
+%% Connection Failed
+%%%=====================================================================================================================
+connection_failed(Addr, State) ->
+    #state
+    {reject_connection_counts = RejectConnectionCounts} = State,
+    case orddict:find(Addr, RejectConnectionCounts) of
+        error ->
+            maybe_rebalance(self()),
+            update_pending_connections(Addr, State);
+        {ok, Count} ->
+            update_reject_connections_count(Count, Addr, State)
     end.
 
-should_rebalance_legacy(#state{endpoints = E, remote=Remote}) ->
-    ConnectedAddr = case dict:fetch_keys(E) of
-                        [] ->
-                            [];
-                        [C] ->
-                            C;
-                        MultipleConns ->
-                            lager:warning("(legacy) multiple connections found and should not have been"),
-                            hd(MultipleConns)
-                    end,
-    {ok, ShuffledAddrs} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
-    case (ShuffledAddrs /= []) andalso same_ipaddr(ConnectedAddr, hd(ShuffledAddrs)) of
-        true ->
-            no; % we're already connected to the ideal buddy
-        false ->
-            %% compute the addrs that are "better" than the currently connected addr
-            BetterAddrs = lists:filter(fun(A) -> not same_ipaddr(ConnectedAddr, A) end,
-                ShuffledAddrs),
-            %% remove those that are blacklisted anyway
-            UsefulAddrs = riak_core_connection_mgr:filter_blacklisted_ipaddrs(BetterAddrs),
-            lager:debug("(legacy) betterAddrs: ~p, UsefulAddrs ~p", [BetterAddrs, UsefulAddrs]),
-            case UsefulAddrs of
-                [] ->
-                    no;
-                UsefulAddrs ->
-                    {yes, UsefulAddrs}
+%%%=====================================================================================================================
+%% Accept Connection
+%%%=====================================================================================================================
+accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
+    #state{remote = Remote} = State,
+    case riak_repl2_rtsource_conn:start_link(Remote) of
+        {ok, RtSourcePid} ->
+            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, Props) of
+                ok ->
+                    Ref = erlang:monitor(process, RtSourcePid),
+                    State1 = update_connections(State, {connected, Ref, RtSourcePid, IPPort}),
+                    State2 = update_connections_monitors(State1, {connected, Ref, RtSourcePid, IPPort}),
+                    State3 = update_connection_counts(State2, IPPort),
+                    State4 = update_pending_connections(State3, IPPort),
+                    {reply, ok, State4};
+                Error ->
+                    lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
+                    maybe_rebalance(self()),
+                    {reply, Error, State}
+            end;
+        ER ->
+            maybe_rebalance(self()),
+            {reply, ER, State}
+    end.
+
+%%%=====================================================================================================================
+%% Reject Connection
+%%%=====================================================================================================================
+reject_connection(Socket, Transport, Addr, Count, State) ->
+    catch Transport:close(Socket),
+    update_reject_connections_count(Addr, Count, State).
+
+%%%=====================================================================================================================
+%% Update Connection States
+%%%=====================================================================================================================
+update_connections(State, {connected, Ref, Pid, Addr}) ->
+    #state{connections = Connections} = State,
+    NewConnections =
+        case orddict:find(Addr, Connections) of
+            error ->
+                NewAddrDict = orddict:from_list([{Ref, Pid}]),
+                orddict:store(Addr, NewAddrDict, Connections);
+            {ok, Dict} ->
+                NewAddrDict = orddict:store(Ref, Pid, Dict),
+                orddict:store(Addr, NewAddrDict, Connections)
+        end,
+    State#state{connections = NewConnections}.
+
+update_connections_monitors(State, {connected, Ref, Pid, Addr}) ->
+    #state{connections_monitors = ConnectionMonitors} = State,
+    NewConnectionMonitors = orddict:store(Ref, {Pid, Addr}, ConnectionMonitors),
+    State#state{connections_monitors = NewConnectionMonitors}.
+
+update_pending_connections(State, Addr) ->
+    #state{pending_connection_counts = PendingConnections} = State,
+    NewPendingConnections =
+        case orddict:find(Addr, PendingConnections) of
+            error ->
+                lager:error("we have a new connection that is not in pending connections (accept connection)"),
+                PendingConnections;
+            {ok, N} ->
+                orddict:store(Addr, N-1, PendingConnections)
+        end,
+    State#state{pending_connection_counts = NewPendingConnections}.
+
+update_connection_counts(State, Addr) ->
+    #state{connection_counts = ConnectionCoutns} = State,
+    case orddict:find(Addr, ConnectionCoutns) of
+        error ->
+            State#state{connection_counts = orddict:store(Addr, 1, ConnectionCoutns)};
+        {ok, Count} ->
+            State#state{connection_counts = orddict:store(Addr, Count +1, ConnectionCoutns)}
+    end.
+
+update_reject_connections_count(Count, Addr, State) ->
+    #state{reject_connection_counts = RejectConnectionCounts} = State,
+    NewRejectConnectionCounts =
+        case Count - 1 == 0 of
+            true ->
+                orddict:erase(Addr, RejectConnectionCounts);
+            false ->
+                orddict:store(Addr, Count -1, RejectConnectionCounts)
+        end,
+    State#state{reject_connection_counts = NewRejectConnectionCounts}.
+
+%%%=====================================================================================================================
+%% Rebalance Connections
+%%%=====================================================================================================================
+rebalance_connections(State) ->
+    #state{
+        connection_counts = ConnectionCounts,
+        pending_connection_counts = PendingConnectionCounts
+    } = State,
+    case calculate_balanced_connections(State) of
+        [] ->
+            lager:warning("No available sink nodes to connect too (rebalance connections)"),
+            maybe_rebalance(self()),
+            State;
+        BalancedConnections ->
+
+            %% calculate total connections conencted/pending
+            MergedConnectionCounts =
+                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, ConnectionCounts, PendingConnectionCounts),
+
+            %% Calculate connection to be establish/ terminate
+            RebalanceConnectionCounts =
+                orddict:merge(fun(_, V1, V2) -> V1 - V2 end, BalancedConnections, MergedConnectionCounts),
+
+            %% rebalance the connections to match the rebalance connection counts
+            orddict:fold(fun connect_or_terminate/3, State, RebalanceConnectionCounts)
+    end.
+
+
+
+
+connect_or_terminate(_Addr, 0, State) ->
+    State;
+connect_or_terminate(Addr, N, State) when N < 0 ->
+    {NewState, NewN} = reject_pending_connections(Addr, N, State),
+    terminate_sink_n_times(Addr, NewN, NewState);
+connect_or_terminate(Addr, N, State) when N > 0 ->
+    connect_to_sink_n_times(Addr, N, State).
+
+
+
+connect_to_sink_n_times(_Addr, 0, State) ->
+    State;
+connect_to_sink_n_times(Addr, N, State) ->
+    connect_to_sink_n_times(Addr, N-1, connect_to_sink(Addr, State)).
+
+connect_to_sink(Addr, State) ->
+    #state{pending_connection_counts = PendingConnectionCounts, remote = Remote} = State,
+    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, [Addr]}) of
+        {ok, _Ref} ->
+            Count =
+                case orddict:find(Addr, PendingConnectionCounts) of
+                    error -> 0;
+                    {ok, Count0} -> Count0
+                end,
+            NewPendingConnections = orddict:store(Addr, Count +1, PendingConnectionCounts),
+            State#state{pending_connection_counts = NewPendingConnections};
+        _->
+            State
+    end.
+
+
+reject_pending_connections(_Addr, 0, State) ->
+    State;
+reject_pending_connections(Addr, N, State) ->
+    #state{
+        pending_connection_counts = PendingConnectionCounts,
+        reject_connection_counts = RejectConnectionCounts
+    } = State,
+    case orddict:find(Addr, PendingConnectionCounts) of
+        error ->
+            State;
+        {ok, V} ->
+            case V >= N of
+                true ->
+                    NewPendingConnectionCounts = orddict:store(Addr, V - N, PendingConnectionCounts),
+                    NewRejectConnectionCounts = orddict:store(Addr, N, RejectConnectionCounts),
+                    NewState =
+                        State#state
+                        {
+                            pending_connection_counts = NewPendingConnectionCounts,
+                            reject_connection_counts = NewRejectConnectionCounts
+                        },
+                    {NewState, 0};
+                false ->
+                    NewPendingConnectionCounts = orddict:store(Addr, 0, PendingConnectionCounts),
+                    NewRejectConnectionCounts = orddict:store(Addr, N - V, RejectConnectionCounts),
+                    NewState =
+                        State#state
+                        {
+                            pending_connection_counts = NewPendingConnectionCounts,
+                            reject_connection_counts = NewRejectConnectionCounts
+                        },
+                    {NewState, N - V}
+
             end
     end.
 
-reconnect_legacy(State=#state{endpoints=Endpoints, remote=Remote, version = Version}, BetterAddrs) ->
-    lager:info("(legacy) trying reconnect to one of: ~p", [BetterAddrs]),
+terminate_sink_n_times(_Addr, 0, State) ->
+    State;
+terminate_sink_n_times(Addr, N, State) ->
+    #state{connections = Connections} = State,
+    case orddict:find(Addr, Connections) of
+        error ->
+            State;
+        {ok, Addresses} ->
+            case length(Addresses) >= N of
+                true ->
+                    {Termiante, Rest} = lists:split(N, Addresses),
+                    %% TODO: do we want this to change so its a graceful shutdown for the reference queue
+                    %% TODO: as in we will wait for an ack if there is one incoming
+                    lists:foreach(fun({_Ref, Pid}) -> exit(Pid, rebalance) end, Termiante),
+                    NewConnections = orddict:store(Addr, Rest, Connections),
+                    State#state{connections = NewConnections};
+                false ->
+                    lager:error("we have been asked to kill more connections than exist! (terminate_sink_n_times)"),
+                    %% TODO: do we want this to change so its a graceful shutdown for the reference queue
+                    %% TODO: as in we will wait for an ack if there is one incoming
+                    lists:foreach(fun({_Ref, Pid}) -> exit(Pid, rebalance) end, Addresses),
+                    NewConnections = orddict:store(Addr, [], Connections),
+                    State#state{connections = NewConnections}
+            end
 
-    % remove current connection
-    Keys = dict:fetch_keys(Endpoints),
-    NewEndpoints = remove_connections(Keys, Endpoints, Remote, Version),
 
-    lager:debug("(legacy) re-connecting to remote ~p", [Remote]),
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, BetterAddrs}) of
-        {ok, Ref} ->
-            lager:debug("(legacy) connecting ref ~p", [Ref]),
-            State#state{connection_ref = Ref, endpoints = NewEndpoints};
-        {error, Reason}->
-            lager:warning("(legacy) error connecting to remote ~p (ignoring as we're reconnecting)", [Reason]),
-            State#state{endpoints = NewEndpoints}
+
     end.
 
-same_ipaddr({{IP,Port},_}, {{IP,Port},_}) ->
-    true;
-same_ipaddr({{_IP1,_Port1},_}, {{_IP2,_Port2}, _}) ->
-    false;
-same_ipaddr(X,Y) ->
-    lager:warning("(legacy) ipaddrs have unexpected format! ~p, ~p", [X,Y]),
-    false.
-
-
-
-
-
-
-%% TODO: make this a generic rebalance function (use BalanacedConnection -- (ConnectionCounts ++ PendingConnections))
-rebalance_connections(State) ->
-    #state{connection_counts = ConnectionCounts, remote = Remote} = State,
-    case calculate_balanced_connections(State) of
-        [] ->
-            problem;
-        BalancedConnections ->
-            PendingConnections =
-                orddict:fold(fun connect_to_sink_n_times/3, {orddict:new(), Remote}, BalancedConnections),
-            #state
-                {
-                    remote = Remote,
-                    balanced_connection_counts = BalancedConnections,
-                    connecting = PendingConnections
-                }
-    end.
 
 calculate_balanced_connections(State) ->
     #state{remote = Remote} = State,
     TotalNumberOfConnections = get_number_of_connections(Remote),
     case riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote) of
-        [] ->
-            orddict:new();
-        SinkNodes ->
+        {ok, []} ->
+            [];
+        {ok, SinkNodes} ->
             NumberOfSinkNodes = length(SinkNodes),
             TotalExtraConnections = TotalNumberOfConnections rem NumberOfSinkNodes,
-            AverageNumberOfConnections = (TotalNumberOfConnections - TotalNumberOfConnections) div NumberOfSinkNodes,
+            AverageNumberOfConnections = (TotalNumberOfConnections - TotalExtraConnections) div NumberOfSinkNodes,
 
             {BalancedConnectionCounts, _} =
                 lists:foldl(
@@ -396,30 +422,19 @@ calculate_balanced_connections(State) ->
                             false ->
                                 {orddict:store(Addr, AverageNumberOfConnections, Acc), Counter +1}
                         end
-                    end, {orddict:new(), 1}, lists:seq(1, SinkNodes)
-                ),
+                    end, {orddict:new(), 1}, SinkNodes),
             BalancedConnectionCounts
     end.
+%%%=====================================================================================================================
 
-
-connect_to_sink_n_times(_Addr, 0, {PendingConnections, Remote}) ->
-    {PendingConnections, Remote};
-connect_to_sink_n_times(Addr, N, {PendingConnections, Remote}) ->
-    connect_to_sink_n_times(Addr, N-1, connect_to_sink(Addr, PendingConnections, Remote)).
-
-connect_to_sink(Addr, PendingConnections, Remote) ->
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, [Addr]}) of
-        {ok, _Ref} ->
-            Count =
-                case orddict:find(Addr, PendingConnections) of
-                    error -> 0;
-                    C -> C
-                end,
-            PendingConnections2 = orddict:store(Addr, Count +1, PendingConnections),
-            {PendingConnections2, Remote};
-        _->
-            {PendingConnections, Remote}
-    end.
+collect_status_data(ConnectionMonitors, Timeout) ->
+    orddict:fold(
+        fun(_, {Pid, _}, Acc) ->
+            case riak_repl2_rtsource_conn:status(Pid, Timeout) of
+                [] -> Acc;
+                Status -> [Status | Acc]
+            end
+        end, [], ConnectionMonitors).
 
 -ifdef(TEST).
 get_number_of_connections(_) ->

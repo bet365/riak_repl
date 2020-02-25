@@ -52,7 +52,7 @@
          status/1,
          status/2,
          connected/6,
-         connect_failed/3,
+         connect_failed/4,
          stop/1]).
 
 %% gen_fsm callbacks
@@ -129,8 +129,8 @@ connected(Socket, Transport, Addr, {?REMOTE_CLUSTER_PROTO_ID, _MyVer ={CommonMaj
                        {connected_to_remote, Socket, Transport, Addr, Props,
                         {CommonMajor, min(LocalMinor,RemoteMinor)}}).
 
--spec connect_failed({term(), term()}, {error, term()}, {_, atom() | pid() | port() | {atom(), _} | {via, _, _}}) -> ok.
-connect_failed({_Proto, _Vers}, {error, _}=Error, {_Remote, Client}) ->
+-spec connect_failed({term(), term()}, {error, term()}, {_, atom() | pid() | port() | {atom(), _} | {via, _, _}}, term()) -> ok.
+connect_failed({_Proto, _Vers}, {error, _}=Error, {_Remote, Client}, _Addr) ->
     %% increment stats for "client failed to connect"
     riak_repl_stats:client_connect_errors(),
     %% tell client we bombed and why

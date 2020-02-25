@@ -126,7 +126,7 @@
 %% connection manager Function Exports
 %% ------------------------------------------------------------------
 
--export([connected/6,connect_failed/3]).
+-export([connected/6,connect_failed/4]).
 
 %% ------------------------------------------------------------------
 %% stat caching mechanism export
@@ -250,7 +250,7 @@ connected(Socket, Transport, Endpoint, Proto, Pid, _Props) ->
     gen_server:cast(Pid, {connected, Socket, Transport, Endpoint, Proto}).
 
 %% @hidden
-connect_failed(_ClientProto, Reason, SourcePid) ->
+connect_failed(_ClientProto, Reason, SourcePid, _Addr) ->
     gen_server:cast(SourcePid, {connect_failed, self(), Reason}).
 
 %% ------------------------------------------------------------------

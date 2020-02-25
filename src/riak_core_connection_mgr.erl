@@ -489,7 +489,7 @@ start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strat
             lager:debug("Connection Manager located no endpoints for: ~p. Will retry.", [Target]),
             %% schedule a retry and exit
             schedule_retry(Interval, Ref, State);
-        {ok, EpAddrs } ->
+        {ok, EpAddrs} ->
             lager:debug("Connection Manager located endpoints: ~p", [EpAddrs]),
             AllEps = update_endpoints(EpAddrs, State#state.endpoints),
             TryAddrs = filter_blacklisted_endpoints(EpAddrs, AllEps),
@@ -639,12 +639,12 @@ update_endpoint(Addr, Fun, State = #state{endpoints = EPs}) ->
             State#state{endpoints = orddict:store(Addr,EP2,EPs)}
     end.
 
-fail_request(Reason, #req{ref = Ref, spec = Spec},
+fail_request(Reason, #req{cur = Addr, ref = Ref, spec = Spec},
              State = #state{pending = Pending}) ->
     %% Tell the module it failed
     {Proto, {_TcpOptions, Module,Args}} = Spec,
     lager:debug("module ~p getting connect_failed", [Module]),
-    Module:connect_failed(Proto, {error, Reason}, Args),
+    Module:connect_failed(Proto, {error, Reason}, Args, Addr),
     %% Remove the request from the pending list
     State#state{pending = lists:keydelete(Ref, #req.ref, Pending)}.
 
@@ -709,9 +709,7 @@ fullsync_locator(Name, _Policy) ->
 realtime_locator(_, {use_only, Addrs}) ->
     {ok, Addrs};
 realtime_locator(Name, legacy) ->
-    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name);
-realtime_locator(Name, _Policy) ->
-    riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name).
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
 
 proxy_get_locator(Name, _Policy) ->
     riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).

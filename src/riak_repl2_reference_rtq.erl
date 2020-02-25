@@ -10,6 +10,7 @@
     push/2,
     ack/3,
     register/2,
+    shutdown/1,
     status/1
 ]).
 
@@ -39,6 +40,7 @@
 -record(state,
 {
     name = undefined,
+    shuting_down = false,
     status = active, %% can be active | retry (this tells us which table to get info from)
     qtab = undefined,
     reference_queue = #queue{},
@@ -82,6 +84,9 @@ ack(RemoteName, Ref, CSeq) ->
 
 register(RemoteName, Ref)->
     gen_server:call(?SERVER(RemoteName), {register, Ref}, infinity).
+
+shutdown(RemoteName) ->
+    gen_server:call(?SERVER(RemoteName), shutting_down, infinity).
 
 status(RemoteName) ->
     try
@@ -132,6 +137,12 @@ handle_call(status, _From, State) ->
     Stats = [{pending, Pending}, {unacked, Unacked}, {acked, Acked}],
     {reply, Stats, State};
 
+handle_call(shutting_down, _From, State) ->
+    DefaultTimeout = app_helper:get_env(riak_repl, queue_migration_timeout, 5),
+    Time = DefaultTimeout * 1000,
+    erlang:send_after(Time, self(), set_shutting_down),
+    {reply, ok, State};
+
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -156,6 +167,9 @@ handle_cast(_Request, State) ->
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
     {noreply, maybe_retry(MonitorRef, Pid, State)};
 
+handle_info(set_shutting_down, State) ->
+    {noreply, State#state{shuting_down = true}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -174,7 +188,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-maybe_retry(MonitorRef, Pid, State) ->
+maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
     #state
     {
         consumer_monitors = ConsumerMonitors, consumers = Consumers,
@@ -222,7 +236,9 @@ maybe_retry(MonitorRef, Pid, State) ->
             %% we got a down message with a monitor reference that we are not aware of
             lager:error("'DOWN' message recieved with a monitor ref we are not aware of"),
             State
-    end.
+    end;
+maybe_retry(_MonitorRef, _Pid, State = #state{shuting_down = true}) ->
+    State.
 
 
 insert_object_to_queue(QSeq, Queue) ->
@@ -292,7 +308,7 @@ ack_seq(Ref, CSeq, State) ->
     end.
 
 
-do_push(QEntry, State = #state{status = Status, reference_queue = RefQ}) ->
+do_push(QEntry, State = #state{status = Status, reference_queue = RefQ, shuting_down = false}) ->
     {QSeq, _NumItem, _Bin, _Meta, _Completed} = QEntry,
     NewRefQ = insert_object_to_queue(QSeq, RefQ),
     NewState = State#state{reference_queue = NewRefQ},
@@ -309,16 +325,20 @@ do_push(QEntry, State = #state{status = Status, reference_queue = RefQ}) ->
             NewState;
         {retry, _} ->
             maybe_pull(NewState)
-    end.
+    end;
+do_push(_QEntry, State = #state{shuting_down = true}) ->
+    State.
 
 
-maybe_pull(State) ->
+maybe_pull(State = #state{shuting_down = false}) ->
     case maybe_get_object(State) of
         {ok, Seq2, RetryCounter, QEntry, NewState} ->
             maybe_deliver_object(Seq2, RetryCounter, QEntry, NewState);
         {error, State} ->
             State
-    end.
+    end;
+maybe_pull(State = #state{shuting_down = true}) ->
+    State.
 
 maybe_get_object(State = #state{status = active, reference_queue = RefQ}) ->
     #queue{start_seq = StartSeq, end_seq = EndSeq} = RefQ,

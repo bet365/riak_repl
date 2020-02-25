@@ -6,7 +6,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0,migrate_queue/0, migrate_queue/1]).
+-export([start_link/0,migrate_queue/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -21,34 +21,30 @@ start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 migrate_queue() ->
-     DefaultTimeout = app_helper:get_env(riak_repl, queue_migration_timeout, 5),
-    gen_server:call(?SERVER, {wait_for_queue, DefaultTimeout}, infinity).
-migrate_queue(Timeout) ->
-    %% numeric timeout only... probably need to support infinity
-    gen_server:call(?SERVER, {wait_for_queue, Timeout}, infinity).
+    gen_server:call(?SERVER, migrate_queue, infinity).
+
 
 init([]) ->
     lager:info("Riak replication migration server started"),
     {ok, #state{elapsed_sleep=0}}.
 
-handle_call({wait_for_queue, MaxTimeout}, From, State) ->
-    lager:info("Realtime Repl queue migration sleeping"),
-    %% TODO: is there a better way to do the next line? just call
-    %% handle_info?
-    erlang:send_after(100, self(), {sleep, MaxTimeout}),
+handle_call(migrate_queue, From, State) ->
+    erlang:send(self(), drain_queue),
     {noreply, State#state{caller = From, elapsed_sleep = 0}}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) ->
-    case riak_repl2_rtq:all_queues_empty() of
+
+    case riak_repl2_rtq:is_empty() of
         true ->
             gen_server:reply(State#state.caller, ok),
             lager:info("Queue empty, no replication queue migration required");
         false ->
             case (ElapsedSleep >= MaxTimeout) of
                 true ->
+
                     lager:info("Realtime queue has not completely drained"),
                     _ = case riak_repl_util:get_peer_repl_nodes() of
                         [] ->
@@ -57,7 +53,7 @@ handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) -
                             error;
                         [Peer|_Rest] ->
                             %% TODO create new function for draining queue, using register will not start at the begining!
-                            {ok, _} = riak_repl2_rtq:register(qm),
+
                             WireVer = riak_repl_util:peer_wire_format(Peer),
                             lager:info("Migrating replication queue data to ~p with wire version ~p",
                                        [Peer, WireVer]),
@@ -66,11 +62,14 @@ handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) -
                             ok
                     end,
                     gen_server:reply(State#state.caller, ok);
+
+
                 false ->
                     lager:info("Waiting for realtime repl queue to drain"),
                     erlang:send_after(1000, self(), {sleep, MaxTimeout})
             end
     end,
+
     NewState = State#state{elapsed_sleep = ElapsedSleep + 1000},
     {noreply, NewState}.
 

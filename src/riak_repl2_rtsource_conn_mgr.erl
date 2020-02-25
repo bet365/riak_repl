@@ -18,7 +18,6 @@
     connect_failed/4,
     maybe_rebalance/1,
     stop/1,
-
     get_all_status/1,
     get_all_status/2,
     get_rtsource_conn_pids/1

@@ -15,11 +15,13 @@
     push/2,
     ack/2,
     status/0,
-    is_empty/1,
-    all_queues_empty/0,
     shutdown/0,
     stop/0,
     is_running/0,
+
+
+    drain_queue/0,
+    is_empty/0,
 
     summarize/0,
     dumpq/0,
@@ -111,12 +113,6 @@ stop() ->
 is_running() ->
     gen_server:call(?SERVER, is_running, infinity).
 
-is_empty(Name) ->
-    gen_server:call(?SERVER, {is_empty, Name}, infinity).
-
-all_queues_empty() ->
-    gen_server:call(?SERVER, all_queues_empty, infinity).
-
 push(NumItems, Bin) ->
     push(NumItems, Bin, []).
 push(NumItems, Bin, Meta) ->
@@ -135,6 +131,12 @@ ack(Name, Seq) ->
 
 report_drops(N) ->
     gen_server:cast(?SERVER, {report_drops, N}).
+
+drain_queue() ->
+    gen_server:call(?SERVER, drain_queue).
+
+is_empty() ->
+    gen_server:call(?SERVER, is_empty, infinity).
 
 %%%========================================================================
 %%% Backward Compatability Functions (will eventually be removed/ changed)
@@ -237,6 +239,12 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
             {reply, {not_found, Seq}, State}
     end;
 
+handle_call(drain_queue, _From, State = #state{shutting_down = true}) ->
+    Reply = drain_queue(State),
+    {reply, Reply, State};
+handle_call(drain_queue, _From, State = #state{shutting_down = false}) ->
+    {reply, {error, queue_not_shutting_down}, State};
+
 handle_call({ack_sync, Name, Seq}, _From, State) ->
     {reply, ok, ack_seq(Name, Seq, State)};
 
@@ -255,7 +263,6 @@ handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
 
 handle_cast({ack, Name, Seq}, State) ->
        {noreply, ack_seq(Name, Seq, State)};
-
 
 handle_cast({report_drops, N}, State) ->
     QSeq = State#state.qseq + N,
@@ -279,15 +286,10 @@ handle_cast(_Msg, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-%%TODO: this needs fixing
 terminate(Reason, State) ->
-  lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
-    %% when started from tests, we may not be registered
+    lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
     catch(erlang:unregister(?SERVER)),
-    flush_pending_pushes(),
-%%    _ = [deliver_error(DeliverFun, {terminate, Reason}) || DeliverFun <- lists:flatten(DList)],
-    ok.
-
+    flush_pending_pushes().
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -605,6 +607,21 @@ ack_seq(RemoteName, Seq, State) ->
             lager:warning("Unexpected object in RTQ, ~p", [UnExpectedObj]),
             State
     end.
+
+%% ================================================================================================================== %%
+%% Drain Queue
+%% ================================================================================================================== %%
+drain_queue(#state{qtab = QTab}) ->
+    case ets:last(QTab) of
+        'end_of_table' ->
+            empty;
+        Seq ->
+            [QEntry] = ets:lookup(QTab, Seq),
+            ets:delete(QTab, Seq),
+            QEntry
+    end.
+
+
 %% ================================================================================================================== %%
 
 %%%===================================================================

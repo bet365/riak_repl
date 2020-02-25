@@ -5,7 +5,8 @@
     start_link/0,
     enable/1,
     disable/1,
-    enabled/0
+    enabled/0,
+    shutdown/0
 ]).
 -export([init/1]).
 
@@ -32,6 +33,12 @@ disable(Remote) ->
 enabled() ->
     [ {Remote, ReferenceQ} || {Remote, ReferenceQ, _, [riak_repl2_reference_rtq]}
         <- supervisor:which_children(?MODULE), is_pid(ReferenceQ)].
+
+shutdown() ->
+    lists:foreach(
+        fun({Remote, _, [riak_repl2_reference_rtq]}) ->
+            riak_repl2_reference_rtq:shutdown(Remote)
+        end, supervisor:which_children(?MODULE)).
 
 %%%===================================================================
 %%% Supervisor callbacks

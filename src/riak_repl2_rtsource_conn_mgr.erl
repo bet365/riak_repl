@@ -93,7 +93,6 @@ init([Remote]) ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
-            erlang:monitor(process, ReferenceQ),
             State = #state{remote = Remote, reference_rtq = ReferenceQ},
             NewState = rebalance_connections(State),
             {ok, NewState}
@@ -143,8 +142,47 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 %%%=====================================================================================================================
-
-%% TODO: 'DOWN' message from rtsource_conn monitors
+handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
+    #state
+    {
+        connections_monitors = ConnectionMonitors,
+        connections = Connections,
+        connection_counts = ConnectionCounts
+    } = State,
+    NewState =
+        case orddict:find(MonitorRef, ConnectionMonitors) of
+            error ->
+                lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
+                State;
+            {ok, {Pid, Addr}} ->
+                case orddict:find(Addr, Connections) of
+                    error ->
+                        lager:error("could not find Addr: ~p in Connections (handle_info 'DOWN')", Addr),
+                        State;
+                    {ok, Addresses} ->
+                        NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
+                        NewAddresses = orddict:erase(MonitorRef, Addresses),
+                        NewConnections = orddict:store(Addr, NewAddresses, Connections),
+                        NewConnectionCoutns =
+                            case orddict:find(Addr, ConnectionCounts) of
+                                error ->
+                                    lager:error("could not find count in ConnectionCounts for addr: ~p", [Addr]),
+                                    ConnectionCounts;
+                                {ok, Count} ->
+                                    orddict:store(Addr, Count -1, ConnectionCounts)
+                            end,
+                        State#state{
+                            connections_monitors = NewConnectionMonitors,
+                            connections = NewConnections,
+                            connection_counts = NewConnectionCoutns
+                        }
+                end;
+            {ok, {Pid2, Addr}} ->
+                lager:error("found monitor ref: ~p with different pid:~p, (orginal pid: ~p) associated to it for addr: ~p (handle_info 'DOWN')", [MonitorRef, Pid2, Pid, Addr]),
+                State
+        end,
+    maybe_rebalance(self()),
+    {noreply, NewState};
 
 handle_info(rebalance_now, State) ->
     {noreply, rebalance_connections(State#state{rb_timeout_tref = undefined})};

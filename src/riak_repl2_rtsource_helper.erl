@@ -129,6 +129,7 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
             gen_server:reply(From, {ok, Seq2}),
             encode_and_send(QEntry2, Remote, Transport, Socket, State);
         _ ->
+            %% TODO: see if we can remove this code completely (minus the bucket-type stuff)
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
                 false ->
                     %% unblock the rtq as fast as possible
@@ -151,6 +152,7 @@ encode_and_send(QEntry, Remote, Transport, Socket, State = #state{objects = Obje
     State2#state{sent_seq = Seq, objects = Objects + NumObjects}.
 
 
+%% TODO: see if we can remove this code completely!
 encode({Seq, _NumObjs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->
     Skips = orddict:fetch(skip_count, Meta),
     Offset = State#state.v1_offset + Skips,
@@ -160,6 +162,7 @@ encode({Seq, _NumObjs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver < {
     Encoded = riak_repl2_rtframe:encode(objects, {Seq2, BinObjs2}),
     State2 = State#state{v1_offset = Offset, v1_seq_map = V1Map},
     {Encoded, State2};
+
 encode({Seq, _NumbOjbs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver >= {2,0} ->
     {riak_repl2_rtframe:encode(objects_and_meta, {Seq, BinObjs, Meta}), State}.
 

@@ -338,7 +338,7 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
         {DoneFun, BinObjs, Meta} ->
             case riak_repl_bucket_type_util:bucket_props_match(Meta) of
                 true ->
-                    riak_repl2_rtsink_helper:write_objects(Helper, BinObjs, DoneFun, Ver);
+                    riak_repl2_rtsink_helper:write_objects_v3(Helper, BinObjs, DoneFun, Ver);
                 false ->
                     BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
                     lager:debug("Bucket type:~p is not equal on both the source and sink; not writing object.",
@@ -350,7 +350,7 @@ do_write_objects(Seq, BinObjsMeta, State = #state{max_pending = MaxPending,
             end;
         {DoneFun, BinObjs} ->
             %% this is for backwards compatibility with Repl version before metadata support (> 1.4)
-            riak_repl2_rtsink_helper:write_objects(Helper, BinObjs, DoneFun, Ver)
+            riak_repl2_rtsink_helper:write_objects_v3(Helper, BinObjs, DoneFun, Ver)
     end,
     State2 = case AckedSeq of
                  undefined ->

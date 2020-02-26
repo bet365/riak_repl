@@ -503,7 +503,7 @@ get_retry_limit(_) ->
 
 -else.
 get_retry_limit(#state{name = Name}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {retry_limit, Name}) of
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {retry_limit, Name}) of
         undefined -> app_helper:get_env(riak_repl, retry_limit, ?DEFAULT_RETRY_LIMIT);
         RetryLimit -> RetryLimit
     end.

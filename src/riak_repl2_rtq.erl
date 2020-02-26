@@ -748,13 +748,13 @@ qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     (Words * WordSize) + QSizeBytes.
 
 get_queue_max_bytes() ->
-    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes) of
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes) of
         undefined -> app_helper:get_env(riak_repl, rtq_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.
 
 get_remote_max_bytes(#remote{name = Name}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Name}) of
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
         undefined -> app_helper:get_env(riak_repl, rtq_remote_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.

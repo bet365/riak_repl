@@ -11,6 +11,7 @@
     ack/3,
     register/2,
     shutdown/1,
+    shutdown/2,
     status/1
 ]).
 
@@ -41,6 +42,7 @@
 {
     name = undefined,
     shuting_down = false,
+    shutting_down_ref = undefined,
     status = active, %% can be active | retry (this tells us which table to get info from)
     qtab = undefined,
     reference_queue = #queue{},
@@ -87,6 +89,8 @@ register(RemoteName, Ref)->
 
 shutdown(RemoteName) ->
     gen_server:call(?SERVER(RemoteName), shutting_down, infinity).
+shutdown(RemoteName, Time) ->
+    gen_server:call(?SERVER(RemoteName), {shutting_down, Time}, infinity).
 
 status(RemoteName) ->
     try
@@ -137,11 +141,14 @@ handle_call(status, _From, State) ->
     Stats = [{pending, Pending}, {unacked, Unacked}, {acked, Acked}],
     {reply, Stats, State};
 
-handle_call(shutting_down, _From, State) ->
-    DefaultTimeout = app_helper:get_env(riak_repl, queue_migration_timeout, 5),
-    Time = DefaultTimeout * 1000,
-    erlang:send_after(Time, self(), set_shutting_down),
-    {reply, ok, State};
+handle_call(shutting_down, _From, State = #state{shutting_down_ref = undefined}) ->
+    {reply, ok, State#state{shuting_down = true}};
+handle_call(shutting_down, _From, State = #state{shutting_down_ref = Ref}) ->
+    erlang:cancel_timer(Ref),
+    {reply, ok, State#state{shuting_down = true}};
+handle_call({shutting_down, Time}, _From, State) ->
+    Ref = erlang:send_after(Time, self(), set_shutting_down),
+    {reply, ok, State#state{shutting_down_ref = Ref}};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.

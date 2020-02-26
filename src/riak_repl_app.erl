@@ -346,9 +346,6 @@ prep_stop(_State) ->
         lager:info("Redirecting realtime replication traffic"),
         riak_repl2_rtq:shutdown(),
 
-        %% give the queue a chance to clear its self
-        riak_repl2_reference_rtq_sup:shutdown(),
-
         lager:info("Stopping application riak_repl - marked service down.\n", []),
 
         case riak_repl_migration:start_link() of

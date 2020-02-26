@@ -29,90 +29,102 @@ init([]) ->
     {ok, #state{elapsed_sleep=0}}.
 
 handle_call(migrate_queue, From, State) ->
-    erlang:send(self(), drain_queue),
+    %% give the reference queue's a chance to clear themselves down
+    DefaultTimeout = app_helper:get_env(riak_repl, queue_migration_timeout, 5),
+    Time = DefaultTimeout * 1000,
+    riak_repl2_reference_rtq_sup:shutdown(Time),
+    erlang:send(self(), {check_queue, Time}),
     {noreply, State#state{caller = From, elapsed_sleep = 0}}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({sleep, MaxTimeout}, State = #state{elapsed_sleep = ElapsedSleep}) ->
 
+handle_info({check_queue, Time}, State = #state{elapsed_sleep = ElapsedSleep}) ->
     case riak_repl2_rtq:is_empty() of
         true ->
             gen_server:reply(State#state.caller, ok),
-            lager:info("Queue empty, no replication queue migration required");
+            lager:info("Queue empty, no replication queue migration required"),
+            {noreply, State};
         false ->
-            case (ElapsedSleep >= MaxTimeout) of
+            case ElapsedSleep >= Time of
                 true ->
-
                     lager:info("Realtime queue has not completely drained"),
-                    _ = case riak_repl_util:get_peer_repl_nodes() of
-                        [] ->
-                            lager:error("No nodes available to migrate replication data"),
-                            riak_repl_stats:rt_source_errors(),
-                            error;
-                        [Peer|_Rest] ->
-                            %% TODO create new function for draining queue, using register will not start at the begining!
-
-                            WireVer = riak_repl_util:peer_wire_format(Peer),
-                            lager:info("Migrating replication queue data to ~p with wire version ~p",
-                                       [Peer, WireVer]),
-                            drain_queue(riak_repl2_rtq:is_empty(qm), Peer, WireVer),
-                            lager:info("Done migrating replication queue"),
-                            ok
-                    end,
-                    gen_server:reply(State#state.caller, ok);
-
-
+                    %% issue shutdown to all reference queues (we are about to migrate them)
+                    riak_repl2_reference_rtq_sup:shutdown(Time),
+                    erlang:send(self(), migrate_queue),
+                    {noreply, State};
                 false ->
                     lager:info("Waiting for realtime repl queue to drain"),
-                    erlang:send_after(1000, self(), {sleep, MaxTimeout})
+                    erlang:send_after(1000, self(), {check_queue, Time}),
+                    {noreply, State#state{elapsed_sleep = ElapsedSleep + 1000}}
             end
-    end,
 
-    NewState = State#state{elapsed_sleep = ElapsedSleep + 1000},
-    {noreply, NewState}.
+    end;
+
+handle_info(migrate_queue, State) ->
+    _ = case riak_repl_util:get_peer_repl_nodes() of
+            [] ->
+                lager:error("No nodes available to migrate replication data"),
+                riak_repl_stats:rt_source_errors(),
+                error;
+            [Peer|_Rest] ->
+                WireVer = riak_repl_util:peer_wire_format(Peer),
+                lager:info("Migrating replication queue data to ~p with wire version ~p", [Peer, WireVer]),
+                drain_queue(Peer, WireVer),
+                lager:info("Done migrating replication queue"),
+                ok
+        end,
+    gen_server:reply(State#state.caller, ok),
+    {noreply, State}.
+
+
+
+
 
 %% Drain the realtime queue and push all objects into a Peer node's input RT queue.
 %% If the handoff node does not understand the new repl wire format, then we need
 %% to downconvert the items into the old "w0" format, otherwise the other node will
 %% send an unsupported object format to its eventual sink node. This is painful to
 %% trace back to here.
-drain_queue(false, Peer, PeerWireVer) ->
-    % would have made this a standard function, but I need a closure for the
-    % value Peer
-    riak_repl2_rtq:pull_sync(qm,
-             fun ({Seq, NumItem, W1BinObjs, Meta, Completed}) ->
-                try
-                    BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
-                    CastObj = case PeerWireVer of
-                        w0 ->
-                            {push, NumItem, BinObjs};
-                        w1 ->
-                            case riak_core_capability:get({riak_repl, ack_list}, false) of
-                                false ->
-                                    %% remove data from meta
-                                    {push, NumItem, BinObjs, Meta};
-                                true ->
-                                    {push, NumItem, BinObjs, Meta, Completed}
-                            end
-                    end,
-                    gen_server:cast({riak_repl2_rtq,Peer}, CastObj),
-                    %% Note - the next line is casting, not calling.
-                    riak_repl2_rtq:ack(qm, Seq)
-                catch
-                    _:_ ->
-                        % probably too much spam in the logs for this warning
-                        %lager:warning("Dropped object during replication queue migration"),
-                        % is this the correct stat?
-                        riak_repl_stats:objects_dropped_no_clients(),
-                        riak_repl_stats:rt_source_errors()
-                end,
-             ok end),
-    drain_queue(riak_repl2_rtq:is_empty(qm), Peer, PeerWireVer);
+drain_queue(Peer, PeerWireVer) ->
+    case riak_repl2_rtq:drain_queue() of
+        empty ->
+            ok;
+        QEntry ->
+            migrate_single_object(QEntry, PeerWireVer, Peer),
+            drain_queue(Peer, PeerWireVer)
+    end.
 
-drain_queue(true, _Peer, _Ver) ->
-   done.
+
+migrate_single_object({_Seq, NumItem, W1BinObjs, Meta, Completed}, PeerWireVer, Peer) ->
+        try
+            BinObjs = riak_repl_util:maybe_downconvert_binary_objs(W1BinObjs, PeerWireVer),
+            CastObj =
+                case PeerWireVer of
+                    w0 ->
+                      {push, NumItem, BinObjs};
+                    w1 ->
+                          case riak_core_capability:get({riak_repl, ack_list}, false) of
+                              false ->
+                                  %% remove data from meta
+                                  {push, NumItem, BinObjs, Meta};
+                              true ->
+                                  {push, NumItem, BinObjs, Meta, Completed}
+                          end
+                  end,
+            gen_server:cast({riak_repl2_rtq, Peer}, CastObj)
+        catch
+            _:_ ->
+                % probably too much spam in the logs for this warning
+                %lager:warning("Dropped object during replication queue migration"),
+                % is this the correct stat?
+                riak_repl_stats:objects_dropped_no_clients(),
+                riak_repl_stats:rt_source_errors()
+        end.
+
+
+
 
 terminate(_Reason, _State) ->
     ok.

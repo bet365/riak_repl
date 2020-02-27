@@ -74,7 +74,7 @@
 %% prefered version list: [{2,0}, {1,5}, {1,1}, {1,0}]
 
 
--define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]},
+-define(CLIENT_SPEC, {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]},
                       {?TCP_OPTIONS, ?MODULE, self()}}).
 
 -record(state,
@@ -155,51 +155,7 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
   {reply, Peername, State};
 
 handle_call(status, _From, State) ->
-    #state
-    {
-        remote = R,
-        transport = T,
-        socket = S,
-        helper_pid = H,
-        hb_rtt = HBRTT
-    } = State,
-
-    Props =
-        case T of
-            undefined ->
-                [{connected, false}];
-            _ ->
-                HBStats = case get_heartbeat_enabled(State) of
-                              true ->
-                                  [{hb_rtt, HBRTT}];
-                              false ->
-                                  []
-                          end,
-                SocketStats = riak_core_tcp_mon:socket_status(S),
-                [
-                    {connected, true},
-                     {transport, T},
-                     {socket, riak_core_tcp_mon:format_socket_stats(SocketStats, [])},
-                     {helper_pid, riak_repl_util:safe_pid_to_list(H)}
-                ] ++ HBStats
-        end,
-    HelperProps =
-        case H of
-            undefined ->
-                [];
-            _ ->
-                try
-                    DefaultTimeout = app_helper:get_env(riak_repl, status_timeout, 5000) - 1000,
-                    Timeout = app_helper:get_env(riak_repl, status_helper_timeout, DefaultTimeout),
-                    riak_repl2_rtsource_helper:status(H, Timeout)
-                catch
-                    _:{timeout, _} ->
-                        [{helper, timeout}]
-                end
-      end,
-    FormattedPid = riak_repl_util:safe_pid_to_list(self()),
-    Status = [{sink, R}, {pid, FormattedPid}] ++ Props ++ HelperProps,
-    {reply, Status, State};
+    {reply, get_status(State), State};
 
 handle_call({connected, Socket, Transport, EndPoint, Proto}, _From, State) ->
     #state{remote = Remote, ack_ref = AckRef} = State,
@@ -317,6 +273,52 @@ peername(Transport, Socket) ->
 
 peername(#state{peername = P}) ->
     P.
+
+get_status(State) ->
+    #state
+    {
+        remote = R,
+        transport = T,
+        socket = S,
+        helper_pid = H,
+        hb_rtt = HBRTT
+    } = State,
+
+    Props =
+        case T of
+            undefined ->
+                [{connected, false}];
+            _ ->
+                HBStats = case get_heartbeat_enabled(State) of
+                              true ->
+                                  [{hb_rtt, HBRTT}];
+                              false ->
+                                  []
+                          end,
+                SocketStats = riak_core_tcp_mon:socket_status(S),
+                [
+                    {connected, true},
+                    {transport, T},
+                    {socket, riak_core_tcp_mon:format_socket_stats(SocketStats, [])},
+                    {helper_pid, riak_repl_util:safe_pid_to_list(H)}
+                ] ++ HBStats
+        end,
+    HelperProps =
+        case H of
+            undefined ->
+                [];
+            _ ->
+                try
+                    DefaultTimeout = app_helper:get_env(riak_repl, status_timeout, 5000) - 1000,
+                    Timeout = app_helper:get_env(riak_repl, status_helper_timeout, DefaultTimeout),
+                    riak_repl2_rtsource_helper:status(H, Timeout)
+                catch
+                    _:{timeout, _} ->
+                        [{helper, timeout}]
+                end
+        end,
+    FormattedPid = riak_repl_util:safe_pid_to_list(self()),
+    [{sink, R}, {pid, FormattedPid}] ++ Props ++ HelperProps.
 
 %% ================================================================================================================== %%
 %% Recieve functionality from sink
@@ -573,6 +575,7 @@ riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = RemoteNa
     ?assertEqual(RemoteText, peername(State)).
 
 %% Connect to the 'fake' sink
+%% TODO: this is a useless test now! we no longer use legacy status!
 connect(RemoteName) ->
     % ?debugFmt("enter connect(~p)", [RemoteName]),
 

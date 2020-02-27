@@ -119,17 +119,22 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 maybe_send(Transport, Socket, QEntry, From, State) ->
-    #state{sent_seq = Seq, remote = Remote} = State,
+    #state{sent_seq = Seq, remote = Remote, proto = {Major, _}} = State,
     Seq2 = Seq +1,
     QEntry2 = setelement(1, QEntry, Seq2),
     {Seq2, _NumObjects, _BinObjs, Meta} = QEntry2,
-    case State#state.proto of
-        {Major, _Minor} when Major >= 3 ->
+    case Major of
+        4 ->
+            %% unblock the rtq as fast as possible
+            gen_server:reply(From, {ok, Seq2}),
+            NewState = encode_and_send(QEntry2, Remote, Transport, Socket, State),
+            %% send rtsource_conn message to know to expect the seq number
+            NewState;
+        3 ->
             %% unblock the rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
             encode_and_send(QEntry2, Remote, Transport, Socket, State);
         _ ->
-            %% TODO: see if we can remove this code completely (minus the bucket-type stuff)
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
                 false ->
                     %% unblock the rtq as fast as possible
@@ -145,23 +150,16 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
 
 encode_and_send(QEntry, Remote, Transport, Socket, State = #state{objects = Objects}) ->
     QEntry2 = merge_forwards_and_routed_meta(QEntry, Remote),
-    {Seq, NumObjects, _, _} = QEntry2,
     {Encoded, State2} = encode(QEntry2, State),
-    lager:debug("Forwarding to ~p with new data: ~p derived from ~p", [State#state.remote, QEntry2, QEntry]),
     Transport:send(Socket, Encoded),
+    {Seq, NumObjects, _, _} = QEntry2,
     State2#state{sent_seq = Seq, objects = Objects + NumObjects}.
 
 
-%% TODO: see if we can remove this code completely!
-encode({Seq, _NumObjs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->
-    Skips = orddict:fetch(skip_count, Meta),
-    Offset = State#state.v1_offset + Skips,
-    Seq2 = Seq - Offset,
-    V1Map = orddict:store(Seq2, Seq, State#state.v1_seq_map),
+encode({Seq, _NumObjs, BinObjs, _Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->
     BinObjs2 = riak_repl_util:maybe_downconvert_binary_objs(BinObjs, w0),
-    Encoded = riak_repl2_rtframe:encode(objects, {Seq2, BinObjs2}),
-    State2 = State#state{v1_offset = Offset, v1_seq_map = V1Map},
-    {Encoded, State2};
+    Encoded = riak_repl2_rtframe:encode(objects, {Seq, BinObjs2}),
+    {Encoded, State};
 
 encode({Seq, _NumbOjbs, BinObjs, Meta}, State = #state{proto = Ver}) when Ver >= {2,0} ->
     {riak_repl2_rtframe:encode(objects_and_meta, {Seq, BinObjs, Meta}), State}.

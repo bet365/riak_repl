@@ -13,7 +13,7 @@
 %% API
 -export([start_link/1,
          stop/1,
-         write_objects_v3/4,
+         write_objects/4,
          write_objects_v4/5]).
 
 %% gen_server callbacks
@@ -35,8 +35,8 @@ start_link(Parent) ->
 stop(Pid) ->
     gen_server:call(Pid, stop, infinity).
 
-write_objects_v3(Pid, BinObjs, DoneFun, Ver) ->
-    gen_server:cast(Pid, {write_objects_v3, BinObjs, DoneFun, Ver}).
+write_objects(Pid, BinObjs, DoneFun, Ver) ->
+    gen_server:cast(Pid, {write_objects, BinObjs, DoneFun, Ver}).
 
 write_objects_v4(Pid, BinObjs, RtSinkPid, Ref, Ver) ->
     gen_server:cast(Pid, {write_objects_v4, BinObjs, RtSinkPid, Ref, Ver}).
@@ -48,8 +48,8 @@ init([Parent]) ->
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
-handle_cast({write_objects_v3, BinObjs, DoneFun, Ver}, State) ->
-    do_write_objects_v3(BinObjs, DoneFun, Ver),
+handle_cast({write_objects, BinObjs, DoneFun, Ver}, State) ->
+    do_write_objects(BinObjs, DoneFun, Ver),
     {noreply, State};
 
 handle_cast({write_objects_v4, BinObjs, RtSinkPid, Ref, Ver}, State) ->
@@ -74,7 +74,7 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% Receive TCP data - decode framing and dispatch
-do_write_objects_v3(BinObjs, DoneFun, Ver) ->
+do_write_objects(BinObjs, DoneFun, Ver) ->
     Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),

@@ -12,7 +12,6 @@
 [
     start_link/5,
     stop/1,
-    v1_ack/2,
     status/1,
     status/2,
     send_heartbeat/1,
@@ -32,8 +31,6 @@
                 socket,     % socket to pass to transport
                 proto,      % protocol version negotiated
                 sent_seq = 0,   % last sequence sent
-                v1_offset = 0,
-                v1_seq_map = [],
                 objects = 0, % number of objects sent - really number of pulls as could be multiobj
                 ack_ref
 }).
@@ -43,11 +40,6 @@ start_link(Remote, Transport, Socket, Version, AckRef) ->
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
-
-%% @doc v1 sinks require fully sequential sequence numbers sent. The outgoing
-%% Seq's are munged, and thus must be munged back when the sink replies.
-v1_ack(Pid, Seq) ->
-    gen_server:cast(Pid, {v1_ack, Seq}).
 
 status(Pid) ->
     status(Pid, app_helper:get_env(riak_repl, riak_repl2_rtsource_helper_status_to, ?LONG_TIMEOUT)).
@@ -80,25 +72,12 @@ handle_call(stop, _From, State) ->
 
 handle_call(status, _From, State =
     #state{sent_seq = SentSeq, objects = Objects}) ->
-    {reply, [{sent_seq, SentSeq},
-        {objects, Objects}], State}.
+    {reply, [{sent_seq, SentSeq}, {objects, Objects}], State}.
 
+%% TODO: does this need to be spawned?
 handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
-    spawn(fun() ->
-        HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
-        T:send(S, HBIOL)
-          end),
+    spawn(fun() -> HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined), T:send(S, HBIOL) end),
     {noreply, State};
-
-handle_cast({v1_ack, Seq}, State = #state{v1_seq_map = Map}) ->
-    case orddict:find(Seq, Map) of
-        error ->
-            ok;
-        {ok, RealSeq} ->
-            riak_repl2_rtq:ack(State#state.remote, RealSeq)
-    end,
-    Map2 = orddict:erase(Seq, Map),
-    {noreply, State#state{v1_seq_map = Map2}};
 
 handle_cast(Msg, _State) ->
     lager:info("Realtime source helper received unexpected cast - ~p", [Msg]).
@@ -127,21 +106,22 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
         4 ->
             %% unblock the rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
-            NewState = encode_and_send(QEntry2, Remote, Transport, Socket, State),
+            %% TODO: we need to tell rtsource_conn it has been sent (so it know to wait for received message from sink!)
             %% send rtsource_conn message to know to expect the seq number
+            NewState = encode_and_send(QEntry2, Remote, Transport, Socket, State),
             NewState;
         3 ->
-            %% unblock the rtq as fast as possible
+            %% unblock the reference rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
             encode_and_send(QEntry2, Remote, Transport, Socket, State);
         _ ->
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
                 false ->
-                    %% unblock the rtq as fast as possible
+                    %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, {ok, Seq2}),
                     encode_and_send(QEntry2, Remote, Transport, Socket, State);
                 true ->
-                    %% unblock the rtq as fast as possible
+                    %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, bucket_type_not_supported_by_remote),
                     lager:debug("Negotiated protocol version:~p does not support typed buckets, not sending"),
                     State

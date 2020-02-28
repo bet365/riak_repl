@@ -13,7 +13,7 @@
 %% API
 -export([start_link/1,
          stop/1,
-         write_objects/4,
+         write_objects_v3/4,
          write_objects_v4/5]).
 
 %% gen_server callbacks
@@ -35,11 +35,11 @@ start_link(Parent) ->
 stop(Pid) ->
     gen_server:call(Pid, stop, infinity).
 
-write_objects(Pid, BinObjs, DoneFun, Ver) ->
-    gen_server:cast(Pid, {write_objects, BinObjs, DoneFun, Ver}).
+write_objects_v3(Pid, BinObjs, DoneFun, WireVersion) ->
+    gen_server:cast(Pid, {write_objects_v3, BinObjs, DoneFun, WireVersion}).
 
-write_objects_v4(Pid, BinObjs, RtSinkPid, Ref, Ver) ->
-    gen_server:cast(Pid, {write_objects_v4, BinObjs, RtSinkPid, Ref, Ver}).
+write_objects_v4(Pid, BinObjs, Meta, AckPid, WireVersion) ->
+    gen_server:cast(Pid, {write_objects_v4, BinObjs, Meta, AckPid, WireVersion}).
 
 %% Callbacks
 init([Parent]) ->
@@ -74,21 +74,23 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% Receive TCP data - decode framing and dispatch
-do_write_objects(BinObjs, DoneFun, Ver) ->
+do_write_objects(BinObjs, DoneFun, WireVersion) ->
     Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),
     WrapperFun = fun(ObjectFilteringRules) -> DoneFun(ObjectFilteringRules), gen_server:cast(Me, {unmonitor, MRef}) end,
-    ok = riak_repl_fullsync_worker:do_binputs(Worker, BinObjs, WrapperFun, riak_repl2_rtsink_pool, Ver).
+    ok = riak_repl_fullsync_worker:do_binputs(Worker, BinObjs, WrapperFun, riak_repl2_rtsink_pool, WireVersion).
 
 
 
-do_write_objects_v4(BinObjs, RtSinkPid, Ref, Ver) ->
-    Objects = riak_repl_util:from_wire(Ver, BinObjs),
+do_write_objects_v4(BinObjs, Meta, AckPid, WireVersion) ->
+    Objects = riak_repl_util:from_wire(WireVersion, BinObjs),
+    Retries = app_helper:get_env(riak_repl, rtsink_retry_limit, 3),
+    do_repl_put(Objects, Meta, AckPid, WireVersion, Retries).
 
-    %% TODO: deicde if we ack back if 1 fails? (no)
-    %% TODO: decide how we communicate with rtsink_conn (will we have enhanced comms for retries back to source?)
-    %% TODO: finish of this function, and choose in the helper based on PROTO which function to use!
+do_repl_put(_Objects, _Meta, _AckPid, 0) ->
+    failed;
+do_repl_put(Objects, Meta, AckPid, Counter) ->
 
     Results =
         lists:foldl(
@@ -100,15 +102,7 @@ do_write_objects_v4(BinObjs, RtSinkPid, Ref, Ver) ->
 
 
 do_repl_put(Object) ->
-    Bucket = riak_object:bucket(Object),
-    do_repl_put(Object, Bucket, true).
-
-do_repl_put(_Object, _B, false) ->
-    %% Remote and local bucket properties differ so ignore this object
-    lager:warning("Remote and local bucket properties differ for type ~p", [riak_object:type(_Object)]),
-    %% ack to clear the queue on source (we do not want a retry from the source)
-    ack;
-do_repl_put(Object, B, true) ->
+    B = riak_object:bucket(Object),
     K = riak_object:key(Object),
     case repl_helper_recv(Object) of
         ok ->
@@ -129,7 +123,6 @@ do_repl_put(Object, B, true) ->
             end;
         cancel ->
             lager:debug("Skipping repl received object ~p/~p", [B, K]),
-            %% TODO: would this be correct to ack?
             ack
     end.
 
@@ -205,4 +198,27 @@ repl_helper_recv([{App, Mod}|T], Object) ->
             lager:error("Crash while running repl recv helper ""~p from application ~p : ~p:~p", [Mod, App, What, Why]),
             repl_helper_recv(T, Object)
     end.
+
+
+maybe_push(Binary, Meta, ObjectFilteringRules) ->
+    case app_helper:get_env(riak_repl, realtime_cascades, always) of
+        never ->
+            lager:debug("Skipping cascade due to app env setting"),
+            ok;
+        always ->
+            lager:debug("app env either set to always, or in default; doing cascade"),
+            List = riak_repl_util:from_wire(Binary),
+            Meta2 = orddict:erase(skip_count, Meta),
+            Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
+            riak_repl2_rtq:push(length(List), Binary, Meta3)
+    end.
+
+add_object_filtering_blacklist_to_meta(Meta, []) ->
+    lager:error("object filtering rules failed to return the default"),
+    Meta;
+add_object_filtering_blacklist_to_meta(Meta, [Rules]) ->
+    orddict:store(?BT_META_BLACKLIST, Rules, Meta);
+add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
+    lager:error("object filtering, repl binary has more than one object!"),
+    Meta.
 

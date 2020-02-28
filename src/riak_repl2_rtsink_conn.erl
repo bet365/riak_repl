@@ -76,6 +76,7 @@
 %% Register with service manager
 sync_register_service() ->
     %% version {3,0} supports typed bucket replication
+    %% version {4,0} supports retries
     ProtoPrefs = {realtime,[{4,0}, {3,0}, {2,0}, {1,4}, {1,1}, {1,0}]},
     TcpOptions = [{keepalive, true}, % find out if connection is dead, this end doesn't send
                   {packet, 0},
@@ -166,15 +167,22 @@ handle_call(stop, _From, State) ->
 
 
 
-%% Note pattern patch on Ref
-handle_cast({ack_v4, Seq}, State = #state{expected_seq_v4 = Seq}) ->
-    #state{transport = T, socket = S} = State,
-    TcpIOL = riak_repl2_rtframe:encode(ack, Seq),
-    T:send(S, TcpIOL),
+%% Note pattern match on expected_seq_v4, as we do not increment upon receive, we only increment once placed
+%% And now the source only sends us 1 object at a time
+handle_cast(ack_v4, State = #state{expected_seq_v4 = Seq}) ->
+    send_ack(Seq, State),
     {noreply, State#state{expected_seq_v4 = Seq +1}};
-handle_cast({ack_v4, _Seq}, State) ->
-    %% TODO: introduce a mechanism to inform the sink that we have the wrong sequence number!
+
+%% new mechanism to inform the source we struggled to place the object and we are retrying
+%% on N number of failures we will not retry.
+handle_cast({retrying, Seq}, State) ->
+    #state{transport = T, socket = S} = State,
+    TcpIOL = riak_repl2_rtframe:encode(retrying, Seq),
+    T:send(S, TcpIOL),
     {noreply, State};
+
+
+
 
 %% Note pattern patch on Ref
 handle_cast({ack_v3, Ref, Seq, Skips}, State = #state{seq_ref = Ref}) ->
@@ -247,9 +255,11 @@ handle_info(report_bt_drops, State=#state{bt_drops = DropDict}) ->
     Report = app_helper:get_env(riak_repl, bucket_type_drop_report_interval, ?DEFAULT_INTERVAL_MILLIS),
     {noreply, State#state{bt_drops = dict:new(), bt_timer = undefined, bt_interval = Report}}.
 
-terminate(_Reason, State) ->
-    %% TODO: Consider trying to do something graceful with poolboy?
-    catch riak_repl2_rtsink_helper:stop(State#state.helper),
+terminate(_Reason, #state{helper = H, transport = T, socket = S}) ->
+    %% Consider trying to do something graceful with poolboy?
+    %% (in V4 this is no longer a consideration) - we do not use poolboy
+    catch riak_repl2_rtsink_helper:stop(H),
+    catch T:close(S),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -327,7 +337,8 @@ get_status(State) ->
 %% ================================================================================================================== %%
 %% Handle Incoming Data
 %% ================================================================================================================== %%
-recv(TcpBin, State = #state{transport = T, socket = S, write_data_function = WriteDataFunction}) ->
+recv(TcpBin, State) ->
+    #state{transport = T, socket = S} = State,
     case riak_repl2_rtframe:decode(TcpBin) of
         {ok, undefined, Cont} ->
             case State#state.active of
@@ -343,14 +354,23 @@ recv(TcpBin, State = #state{transport = T, socket = S, write_data_function = Wri
             recv(Cont, State#state{hb_last = os:timestamp()});
 
         {ok, {objects_and_meta, _} = Msg, Cont} ->
-            recv(Cont, WriteDataFunction(Msg, State));
+            write_data(Msg, Cont, State);
 
         {ok, {objects, _} = Msg, Cont} ->
-            recv(Cont, WriteDataFunction(Msg, State))
+            write_data(Msg, Cont, State)
 
 
     end.
 
+write_data(Msg, Cont, State) ->
+    #state{ write_data_function = WriteDataFunction} = State,
+    case WriteDataFunction(Msg, State) of
+        {ok, NewState} ->
+            recv(Cont, NewState);
+        {error, Error, NewState} ->
+            {stop, Error, NewState}
+
+    end.
 
 
 report_socket_error(Reason, State = #state{cont = Cont}) ->
@@ -374,14 +394,53 @@ report_socket_close(State = #state{cont = Cont}) ->
 %% ================================================================================================================== %%
 %% Protocol 4
 %% ================================================================================================================== %%
-do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State) ->
-    ok;
-do_write_objects_v4({objects, {Seq, BinObjs}}, State) ->
-    ok.
+do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expected_seq_v4 = Seq}) ->
+    #state{wire_version = WireVersion, helper = Helper} = State,
+    %% inform the sink we have received the object
+    send_recieved(Seq, State),
+
+    case riak_repl_bucket_type_util:bucket_props_match(Meta) of
+        true ->
+            %% This function is now responsible for pushing onto the rtq, and acking back to this process
+            riak_repl2_rtsink_helper:write_objects_v4(Helper, BinObjs, Meta, self(), WireVersion),
+            {ok, State};
+        false ->
+            %% this has been changed from the previous protocol, we do not add this to our rtq anymore
+            BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
+            gen_server:cast(self(), {drop, BucketType}),
+            send_bucket_type_drop(Seq, State),
+            {ok, State#state{expected_seq_v4 = Seq +1}}
+    end;
+do_write_objects_v4({objects_and_meta, {Seq, _BinObjs, _Meta}}, State = #state{expected_seq_v4 = Seq2}) ->
+    case Seq2 = Seq +1 of
+        true ->
+            %% send and ack back for this object as we have already placed it into the cluster
+            send_ack(Seq, State),
+            {ok, State};
+        false ->
+            %% we have received and ack that is not expected, nor the one before (for a possible retry)
+            lager:error("Received wrong sequence number: ~p, Expected sequence number: ~p", [Seq, Seq2]),
+            {error, wrong_seq, State}
+    end.
 
 
+%% new mechanism to inform the source we have received the object, and are starting the placement of the object to the
+%% cluster. If the source does not receive this message in X seconds, it will re-send and then kill the connection on
+%% N attempts.
+send_recieved(Seq, #state{transport = T, socket = S}) ->
+    TcpIOL = riak_repl2_rtframe:encode(recieved, Seq),
+    T:send(S, TcpIOL).
 
+%% standard send ack mechanism
+send_ack(Seq, #state{transport = T, socket = S}) ->
+    TcpIOL = riak_repl2_rtframe:encode(ack, Seq),
+    T:send(S, TcpIOL).
 
+%% new mechanism to inform the source that the object has been dropped due to mis-match of bucket-type properties
+%% the source will stop sending this bucket-type until its been resolved
+send_bucket_type_drop(Seq, #state{transport = T, socket = S}) ->
+    TcpIOL = riak_repl2_rtframe:encode(bt_drop, Seq),
+    T:send(S, TcpIOL).
 
 %% ================================================================================================================== %%
 %% Protocol >= 3 - legacy (this will be deleted in the future)
@@ -415,7 +474,8 @@ do_write_objects_v3({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{exp
             DoneFun(ObjectFilteringRules)
     end,
     State1 = set_seq_number_v3(Seq, State),
-    set_socket_check_pending_v3(State1);
+    State2 = set_socket_check_pending_v3(State1),
+    {ok, State2};
 
 %% old repl version > 1.4 (pre metadata)
 do_write_objects_v3({objects, {Seq, BinObjs}}, State = #state{expect_seq = Seq}) ->
@@ -427,7 +487,8 @@ do_write_objects_v3({objects, {Seq, BinObjs}}, State = #state{expect_seq = Seq})
         end,
     riak_repl2_rtsink_helper:write_objects_v3(Helper, BinObjs, DoneFun, Ver),
     State1 = set_seq_number_v3(Seq, State),
-    set_socket_check_pending_v3(State1);
+    State2 = set_socket_check_pending_v3(State1),
+    {ok, State2};
 
 %% did not get expected sequence number
 do_write_objects_v3({objects, {Seq, _}} = Msg, State) ->

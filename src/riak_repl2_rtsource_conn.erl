@@ -321,7 +321,7 @@ get_status(State) ->
     [{sink, R}, {pid, FormattedPid}] ++ Props ++ HelperProps.
 
 %% ================================================================================================================== %%
-%% Recieve functionality from sink
+%% Receive functionality from sink
 %% ================================================================================================================== %%
 
 recv(TcpBin, State) ->
@@ -333,9 +333,11 @@ handle_incoming_data({ok, undefined, Cont}, _,  State) ->
     {noreply, State#state{cont = Cont}};
 
 %% This is the most upto date protocol to be used if all clusters are up to date with repl
-handle_incoming_data({ok, {ack, CSeq}, Cont}, ProtoMajor, State) when ProtoMajor >= 2 ->
+%% Because we are providing in order sequence numbers, it no longer matters on the ProtoMajor version
+%% we can just ack the reference queue, and it shall deal with it correctly.
+handle_incoming_data({ok, {ack, CSeq}, Cont}, ProtoMajor, State) ->
     #state{hb_timeout_tref = HBTRef, ack_ref = AckRef, remote = Remote} = State,
-    riak_repl_stats:objects_sent(), %% TODO: check if we even need this anymore (no objects sent is a stat in the q's!)
+    riak_repl_stats:objects_sent(),
     ok = riak_repl2_reference_rtq:ack(Remote, AckRef, CSeq),
     %% Reset heartbeat timer, since we've seen activity from the peer
     case HBTRef of
@@ -346,32 +348,13 @@ handle_incoming_data({ok, {ack, CSeq}, Cont}, ProtoMajor, State) when ProtoMajor
             recv(Cont, schedule_heartbeat(State#state{hb_timeout_tref=undefined}))
     end;
 
-%% TODO: this is old code, can we change this?
-handle_incoming_data({ok, {ack, Seq}, Cont}, _, State) ->
-    #state{hb_timeout_tref = HBTRef} = State,
-    riak_repl2_rtsource_helper:v1_ack(State#state.helper_pid, Seq),
-    %% reset heartbeat timer, since we've seen activity from the peer
-    case HBTRef of
-        undefined ->
-            recv(Cont, State);
-        _ ->
-            _ = erlang:cancel_timer(HBTRef),
-            recv(Cont, schedule_heartbeat(State#state{hb_timeout_tref=undefined}))
-    end;
-
 %% This deals with the incoming heartbeats
 handle_incoming_data({ok, heartbeat, Cont}, _, State) ->
     #state{hb_timeout_tref = HBTRef, hb_sent_q = HBSentQ} = State,
-    %% Compute last heartbeat roundtrip in msecs and
-    %% reschedule next.
     {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
-    lager:debug("got heartbeat, hb_sent: ~w", [HBSent]),
     HBRTT = timer:now_diff(now(), HBSent) div 1000,
     _ = cancel_timer(HBTRef),
-    State2 = State#state{hb_sent_q = HBSentQ2,
-        hb_timeout_tref = undefined,
-        hb_rtt = HBRTT},
-    lager:debug("got heartbeat, hb_sent_q_len after heartbeat_recv: ~p", [queue:len(HBSentQ2)]),
+    State2 = State#state{hb_sent_q = HBSentQ2, hb_timeout_tref = undefined, hb_rtt = HBRTT},
     recv(Cont, schedule_heartbeat(State2)).
 
 

@@ -33,7 +33,7 @@
                 proto,      % protocol version negotiated
                 sent_seq = 0,   % last sequence sent
                 objects = 0, % number of objects sent - really number of pulls as could be multiobj
-                rtq_ref,
+                ref,
                 rtsource_conn_pid,
                 shutting_down = false
 }).
@@ -62,16 +62,15 @@ shutting_down(Pid) ->
     gen_server:call(Pid, shutting_down, infinity).
 
 
-init([Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid]) ->
+init([Remote, Transport, Socket, Version, Ref, RtsourceConnPid]) ->
     State = #state{remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, rtq_ref = RTQRef, rtsource_conn_pid = RtsourceConnPid},
-    riak_repl2_reference_rtq:register(Remote, RTQRef),
+        socket = Socket, ref = Ref, rtsource_conn_pid = RtsourceConnPid},
+    riak_repl2_reference_rtq:register(Remote, Ref),
     {ok, State}.
 
 handle_call({send_object, Entry}, From,
     State = #state{transport = T, socket = S}) ->
-    NewState = maybe_send(T, S, Entry, From, State),
-    {noreply, NewState};
+    maybe_send(T, S, Entry, From, State);
 
 handle_call(shutting_down, _From, State) ->
     {reply, ok, State#state{shutting_down = true}};
@@ -108,7 +107,8 @@ code_change(_OldVsn, State, _Extra) ->
 
 maybe_send(_Transport, _Socket, _QEntry, From, State = #state{shutting_down = true}) ->
     gen_server:reply(From, shutting_down),
-    State;
+    %% now we are out of the reference_rtq we can shutdown gracefully
+    {stop, shutdown, State};
 maybe_send(Transport, Socket, QEntry, From, State) ->
     #state
     {
@@ -127,22 +127,22 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
             %% send rtsource_conn message to know to expect the seq number
             object_sent ! RtsourceConnPid,
             %% send object to sink
-            encode_and_send(QEntry2, Remote, Transport, Socket, State);
+            {noreply, encode_and_send(QEntry2, Remote, Transport, Socket, State)};
         3 ->
             %% unblock the reference rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
-            encode_and_send(QEntry2, Remote, Transport, Socket, State);
+            {noreply, encode_and_send(QEntry2, Remote, Transport, Socket, State)};
         _ ->
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
                 false ->
                     %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, {ok, Seq2}),
-                    encode_and_send(QEntry2, Remote, Transport, Socket, State);
+                    {noreply, encode_and_send(QEntry2, Remote, Transport, Socket, State)};
                 true ->
                     %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, bucket_type_not_supported_by_remote),
                     lager:debug("Negotiated protocol version:~p does not support typed buckets, not sending"),
-                    State
+                    {noreply, State}
             end
     end.
 

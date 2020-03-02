@@ -49,7 +49,7 @@
     status/1, status/2,
     get_address/1,
     get_socketname_primary/1,
-    connected/6
+    connected/7
 ]).
 
 
@@ -96,9 +96,10 @@
     cont = <<>>, % continuation from previous TCP buffer
 
     %% Protocol 4
+    conn_mgr_pid,
     received_tref,
     ack_tref,
-    rtq_ref,
+    ref,
     expect_seq_v4 = 1
 }).
 
@@ -120,17 +121,17 @@ status(Pid, Timeout) ->
             []
     end.
 
-connected(Socket, Transport, IPPort, Proto, RtSourcePid, _Props) ->
+connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, _Props) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
         gen_server:call(RtSourcePid, {connected, Socket, Transport, IPPort, Proto}, ?LONG_TIMEOUT)
     catch
         _:Reason ->
-            lager:warning("Unable to contact RT source connection process (~p). Killing it to force reconnect.",
-                [RtSourcePid]),
-            exit(RtSourcePid, {unable_to_contact, Reason}),
-            ok
+            lager:warning("Unable to contact RT source connection process (~p). Reason ~p"
+                          "Killing it to force reconnect.",
+                [RtSourcePid, Reason]),
+            error
     end.
 
 get_helper_pid(RtSourcePid) ->
@@ -148,8 +149,7 @@ get_socketname_primary(Pid) ->
 
 %% Initialize
 init([Remote]) ->
-    Ref = make_ref(),
-  {ok, #state{remote = Remote, rtq_ref = Ref}}.
+  {ok, #state{remote = Remote}}.
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, routine}, ok, State};
@@ -164,15 +164,15 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
-handle_call({connected, Socket, Transport, EndPoint, Proto}, _From, State) ->
-    #state{remote = Remote, rtq_ref = RTQRef} = State,
+handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, {ConnMgrPid, _Tag}, State) ->
+    #state{remote = Remote, conn_mgr_pid = ConnMgrPid} = State,
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
         ok ->
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, RTQRef, self()),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, Ref, self()),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source, SocketTag}, Transport),
             State2 =
@@ -184,7 +184,8 @@ handle_call({connected, Socket, Transport, EndPoint, Proto}, _From, State) ->
                     proto = Proto,
                     peername = peername(Transport, Socket),
                     helper_pid = HelperPid,
-                    ver = Ver
+                    ver = Ver,
+                    ref = Ref
                 },
             case Proto of
                 {realtime, _OurVer, {1, 0}} ->
@@ -377,9 +378,10 @@ handle_incoming_data({ok, heartbeat, Cont}, State) ->
     recv(Cont, schedule_heartbeat(State2));
 
 
-handle_incoming_data({ok, node_shutdown, Cont}, State = #state{helper_pid = Helper}) ->
+handle_incoming_data({ok, node_shutdown, Cont}, State) ->
+    #state{helper_pid = Helper, conn_mgr_pid = ConnMgrPid, address = Addr, ref = Ref} = State,
     %% inform connection manager that this node is shutting down, for rebalancing purposes
-
+    riak_repl2_rtsource_conn_mgr:sink_shutdown(ConnMgrPid, Addr, Ref),
     %% inform helper so it does not accept anymore data
     riak_repl2_rtsource_helper:shutting_down(Helper),
     recv(Cont, State);
@@ -389,7 +391,7 @@ handle_incoming_data({ok, node_shutdown, Cont}, State = #state{helper_pid = Help
 %% we can just ack the reference queue, and it shall deal with it correctly.
 
 %% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
-handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq, rtq_ref = RTQRef, remote = Remote}) ->
+handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq, ref = RTQRef, remote = Remote}) ->
     riak_repl_stats:objects_sent(),
     %% ack the reference queue
     ok = riak_repl2_reference_rtq:ack(Remote, RTQRef, Seq),

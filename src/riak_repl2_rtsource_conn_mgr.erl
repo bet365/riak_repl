@@ -17,6 +17,7 @@
     connected/6,
     connect_failed/4,
     maybe_rebalance/1,
+    sink_shutdown/2,
     stop/1,
     get_all_status/1,
     get_all_status/2,
@@ -80,6 +81,9 @@ get_all_status(Pid, Timeout) ->
 get_rtsource_conn_pids(Pid) ->
     gen_server:call(Pid, get_rtsource_conn_pids).
 
+sink_shutdown(Pid, Addr, Ref) ->
+    gen_server:call(Pid, {sink_shutdown, Addr, Ref}, infinity).
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -114,6 +118,16 @@ handle_call(all_status, _From, State=#state{connections_monitors = ConnectionsMo
 handle_call(get_rtsource_conn_pids, _From, State = #state{connections_monitors = ConnectionMonitors}) ->
     Result = orddict:fold(fun(_, {Pid, _}, Acc) -> [Pid | Acc] end, [], ConnectionMonitors),
     {reply, Result, State};
+
+handle_call({sink_shutdown, Addr, Ref}, {Pid,_Tag}, State) ->
+    NewDict =
+        case orddict:find(Addr, Dict) of
+            error ->
+                orddict:store(Addr, 1, Dict);
+            {ok, Count} ->
+                orddict:store(Addr, Count +1, Dict)
+        end,
+    {reply, ok, State#state{sink_shutting_down = NewDict}};
 
 handle_call(stop, _From, State) ->
     {stop, shutdown, ok, State};
@@ -154,15 +168,20 @@ handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
                 lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
                 State;
             {ok, {Pid, Addr}} ->
+
+                NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
+                State1 = State#state{connections_monitors = NewConnectionMonitors},
+
                 case orddict:find(Addr, Connections) of
                     error ->
+                        %% this would be due to a rebalance!
                         lager:error("could not find Addr: ~p in Connections (handle_info 'DOWN')", Addr),
-                        State;
+                        State1;
                     {ok, Addresses} ->
-                        NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
+
                         NewAddresses = orddict:erase(MonitorRef, Addresses),
                         NewConnections = orddict:store(Addr, NewAddresses, Connections),
-                        NewConnectionCoutns =
+                        NewConnectionCounts =
                             case orddict:find(Addr, ConnectionCounts) of
                                 error ->
                                     lager:error("could not find count in ConnectionCounts for addr: ~p", [Addr]),
@@ -170,17 +189,18 @@ handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
                                 {ok, Count} ->
                                     orddict:store(Addr, Count -1, ConnectionCounts)
                             end,
-                        State#state{
-                            connections_monitors = NewConnectionMonitors,
-                            connections = NewConnections,
-                            connection_counts = NewConnectionCoutns
-                        }
+
+                        %% here we should issue a rebalance!
+                        %% a connection died, and we did not expect it
+                        maybe_rebalance(self()),
+                        State1#state{connections = NewConnections, connection_counts = NewConnectionCounts}
                 end;
             {ok, {Pid2, Addr}} ->
-                lager:error("found monitor ref: ~p with different pid:~p, (orginal pid: ~p) associated to it for addr: ~p (handle_info 'DOWN')", [MonitorRef, Pid2, Pid, Addr]),
-                State
+                lager:error("found monitor ref: ~p with different pid:~p, (orginal pid: ~p) "
+                            "associated to it for addr: ~p (handle_info 'DOWN')", [MonitorRef, Pid2, Pid, Addr]),
+                NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
+                State#state{connections_monitors = NewConnectionMonitors}
         end,
-    maybe_rebalance(self()),
     {noreply, NewState};
 
 handle_info(rebalance_now, State) ->
@@ -234,15 +254,17 @@ accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
     #state{remote = Remote} = State,
     case riak_repl2_rtsource_conn:start_link(Remote) of
         {ok, RtSourcePid} ->
-            case riak_repl2_rtsource_conn:connected(Socket, Transport, IPPort, Proto, RtSourcePid, Props) of
+            Ref = erlang:monitor(process, RtSourcePid),
+            case riak_repl2_rtsource_conn:connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, Props) of
                 ok ->
-                    Ref = erlang:monitor(process, RtSourcePid),
                     State1 = update_connections(State, {connected, Ref, RtSourcePid, IPPort}),
                     State2 = update_connections_monitors(State1, {connected, Ref, RtSourcePid, IPPort}),
                     State3 = update_connection_counts(State2, IPPort),
                     State4 = update_pending_connections(State3, IPPort),
                     {reply, ok, State4};
                 Error ->
+                    erlang:demonitor(Ref),
+                    exit(RtSourcePid, unable_to_connect),
                     lager:warning("rtsource_conn failed to recieve connection ~p", [IPPort]),
                     maybe_rebalance(self()),
                     {reply, Error, State}
@@ -475,13 +497,13 @@ collect_status_data(ConnectionMonitors, Timeout) ->
 
 -ifdef(TEST).
 get_number_of_connections(_) ->
-    app_helper:get_env(riak_repl, number_of_connections, ?DEFAULT_NO_CONNECTIONS).
+    app_helper:get_env(riak_repl, default_number_of_connections, ?DEFAULT_NO_CONNECTIONS).
 
 -else.
 
 get_number_of_connections(Name) ->
-    case riak_core_metadata:get(?RIAK_REPL2_RTQ_CONFIG_KEY, {number_of_connections, Name}) of
-        undefined -> app_helper:get_env(riak_repl, number_of_connections, ?DEFAULT_NO_CONNECTIONS);
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections, Name}) of
+        undefined -> app_helper:get_env(riak_repl, default_number_of_connections, ?DEFAULT_NO_CONNECTIONS);
         NumberOfConnections -> NumberOfConnections
     end.
 -endif.

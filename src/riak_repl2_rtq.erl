@@ -737,10 +737,10 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
 
 get_queue_max_bytes() ->
     %% Default maximum realtime queue size to 100Mb
-    app_helper:get_env(riak_repl, rtq_max_bytes, ?DEFAULT_MAX_BYTES).
+    app_helper:get_env(riak_repl, default_queue_max_bytes, ?DEFAULT_MAX_BYTES).
 
 get_remote_max_bytes(_) ->
-    app_helper:get_env(riak_repl, rtq_remote_max_bytes, ?DEFAULT_MAX_BYTES).
+    app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES).
 
 -else.
 qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
@@ -749,13 +749,13 @@ qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
 
 get_queue_max_bytes() ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes) of
-        undefined -> app_helper:get_env(riak_repl, rtq_max_bytes, ?DEFAULT_MAX_BYTES);
+        undefined -> app_helper:get_env(riak_repl, default_queue_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.
 
 get_remote_max_bytes(#remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
-        undefined -> app_helper:get_env(riak_repl, rtq_remote_max_bytes, ?DEFAULT_MAX_BYTES);
+        undefined -> app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES);
         MaxBytes -> MaxBytes
     end.
 -endif.

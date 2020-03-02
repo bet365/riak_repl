@@ -40,7 +40,7 @@ encode_payload(heartbeat, undefined) ->
 %% ================================================================================================================== %%
 %% Encode Protocol 4
 %% ================================================================================================================== %%
-encode_payload(recieved, Seq) ->
+encode_payload(received, Seq) ->
     [?MSG_RECEIVED, <<Seq:64/unsigned-big-integer>>];
 
 encode_payload(retrying, Seq) ->

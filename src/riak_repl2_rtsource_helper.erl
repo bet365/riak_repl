@@ -10,12 +10,13 @@
 %% API
 -export(
 [
-    start_link/5,
+    start_link/6,
     stop/1,
     status/1,
     status/2,
     send_heartbeat/1,
-    send_object/2
+    send_object/2,
+    shutting_down/1
 ]).
 
 -include("riak_repl.hrl").
@@ -32,11 +33,13 @@
                 proto,      % protocol version negotiated
                 sent_seq = 0,   % last sequence sent
                 objects = 0, % number of objects sent - really number of pulls as could be multiobj
-                ack_ref
+                rtq_ref,
+                rtsource_conn_pid,
+                shutting_down = false
 }).
 
-start_link(Remote, Transport, Socket, Version, AckRef) ->
-    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, AckRef], []).
+start_link(Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid) ->
+    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -55,17 +58,23 @@ send_heartbeat(Pid) ->
 send_object(Pid, Obj) ->
     gen_server:call(Pid, {send_object, Obj}, ?SHORT_TIMEOUT).
 
+shutting_down(Pid) ->
+    gen_server:call(Pid, shutting_down, infinity).
 
-init([Remote, Transport, Socket, Version, AckRef]) ->
+
+init([Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid]) ->
     State = #state{remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, ack_ref = AckRef},
-    riak_repl2_reference_rtq:register(Remote, AckRef),
+        socket = Socket, rtq_ref = RTQRef, rtsource_conn_pid = RtsourceConnPid},
+    riak_repl2_reference_rtq:register(Remote, RTQRef),
     {ok, State}.
 
 handle_call({send_object, Entry}, From,
     State = #state{transport = T, socket = S}) ->
     NewState = maybe_send(T, S, Entry, From, State),
     {noreply, NewState};
+
+handle_call(shutting_down, _From, State) ->
+    {reply, ok, State#state{shutting_down = true}};
 
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State};
@@ -97,8 +106,17 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 
+maybe_send(_Transport, _Socket, _QEntry, From, State = #state{shutting_down = true}) ->
+    gen_server:reply(From, shutting_down),
+    State;
 maybe_send(Transport, Socket, QEntry, From, State) ->
-    #state{sent_seq = Seq, remote = Remote, proto = {Major, _}} = State,
+    #state
+    {
+        sent_seq = Seq,
+        remote = Remote,
+        proto = {Major, _},
+        rtsource_conn_pid = RtsourceConnPid
+    } = State,
     Seq2 = Seq +1,
     QEntry2 = setelement(1, QEntry, Seq2),
     {Seq2, _NumObjects, _BinObjs, Meta} = QEntry2,
@@ -106,10 +124,10 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
         4 ->
             %% unblock the rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
-            %% TODO: we need to tell rtsource_conn it has been sent (so it know to wait for received message from sink!)
             %% send rtsource_conn message to know to expect the seq number
-            NewState = encode_and_send(QEntry2, Remote, Transport, Socket, State),
-            NewState;
+            object_sent ! RtsourceConnPid,
+            %% send object to sink
+            encode_and_send(QEntry2, Remote, Transport, Socket, State);
         3 ->
             %% unblock the reference rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),

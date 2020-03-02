@@ -58,7 +58,7 @@
 %% Consumers
 -record(consumer,
 {
-    status = active,   %% can be active | inactive | retry (this tells us which table to look at)
+    status = active,   %% can be active | retry (this tells us which table to look at)
     retry_counter = 0, %% based on this and config we may drop an object after N number of retries
     pid = undefined,   %% rtsource_helper pid to push objects
     seq = undefined,   %% sequence number for reference queue
@@ -439,6 +439,9 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, RetryCounter, QEntry, State
             NewRefQ = RefQ#queue{start_seq = Seq2},
             maybe_pull(State#state{reference_queue = NewRefQ, drops = Drops +1});
 
+        shutting_down ->
+            maybe_deliver_object(Seq2, RetryCounter, QEntry, State#state{consumer_fifo = NewFIFO});
+
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
@@ -474,6 +477,9 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, RetryCounter, QEntry, State
             NewRetryQ = RetryQ#queue{start_seq = Seq2},
             maybe_pull(NewState#state{retry_queue = NewRetryQ, drops = Drops +1});
 
+        shutting_down ->
+            maybe_deliver_object(Seq2, RetryCounter, QEntry, NewState#state{consumer_fifo = NewFIFO});
+
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
@@ -499,7 +505,7 @@ send_object(Seq2, Seq, Pid, Entry) ->
 -ifdef(TEST).
 
 get_retry_limit(_) ->
-    app_helper:get_env(riak_repl, retry_limit, ?DEFAULT_RETRY_LIMIT).
+    app_helper:get_env(riak_repl, default_retry_limit, ?DEFAULT_RETRY_LIMIT).
 
 -else.
 get_retry_limit(#state{name = Name}) ->

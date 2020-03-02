@@ -397,7 +397,7 @@ report_socket_close(State = #state{cont = Cont}) ->
 do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expected_seq_v4 = Seq}) ->
     #state{wire_version = WireVersion, helper = Helper} = State,
     %% inform the sink we have received the object
-    send_recieved(Seq, State),
+    send_received(Seq, State),
 
     case riak_repl_bucket_type_util:bucket_props_match(Meta) of
         true ->
@@ -428,8 +428,8 @@ do_write_objects_v4({objects_and_meta, {Seq, _BinObjs, _Meta}}, State = #state{e
 %% new mechanism to inform the source we have received the object, and are starting the placement of the object to the
 %% cluster. If the source does not receive this message in X seconds, it will re-send and then kill the connection on
 %% N attempts.
-send_recieved(Seq, #state{transport = T, socket = S}) ->
-    TcpIOL = riak_repl2_rtframe:encode(recieved, Seq),
+send_received(Seq, #state{transport = T, socket = S}) ->
+    TcpIOL = riak_repl2_rtframe:encode(received, Seq),
     T:send(S, TcpIOL).
 
 %% standard send ack mechanism

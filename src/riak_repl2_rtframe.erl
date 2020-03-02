@@ -11,7 +11,7 @@
 %% Protocol 4
 -define(MSG_RECEIVED,           16#40). %% received object
 -define(MSG_RETRYING,           16#50). %% retrying
--define(MSG_BT_DROP,           16#60). %% retrying
+-define(MSG_BT_DROP,            16#60). %% bucket type drop
 -define(MSG_NODE_SHUTDOWN,      16#70). %% node shutdown message (so source doesn't rebalance onto the same node)
 
 

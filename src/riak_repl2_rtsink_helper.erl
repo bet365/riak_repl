@@ -49,7 +49,7 @@ handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
 handle_cast({write_objects, BinObjs, DoneFun, Ver}, State) ->
-    do_write_objects(BinObjs, DoneFun, Ver),
+    do_write_objects_v3(BinObjs, DoneFun, Ver),
     {noreply, State};
 
 handle_cast({write_objects_v4, BinObjs, RtSinkPid, Ref, Ver}, State) ->
@@ -74,7 +74,7 @@ code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
 %% Receive TCP data - decode framing and dispatch
-do_write_objects(BinObjs, DoneFun, WireVersion) ->
+do_write_objects_v3(BinObjs, DoneFun, WireVersion) ->
     Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),
@@ -83,25 +83,45 @@ do_write_objects(BinObjs, DoneFun, WireVersion) ->
 
 
 
-do_write_objects_v4(BinObjs, Meta, AckPid, WireVersion) ->
+do_write_objects_v4(BinObjs, Meta1, AckPid, WireVersion) ->
     Objects = riak_repl_util:from_wire(WireVersion, BinObjs),
+    Meta2 = orddict:erase(skip_count, Meta1),
+    {Objects2, _} =
+        lists:foldl(
+            fun(Obj, {Acc, OrginalMeta}) ->
+                Rules = riak_repl2_object_filter:get_realtime_blacklist(Obj),
+                Meta1 = orddict:store(?BT_META_BLACKLIST, Rules, OrginalMeta),
+                {[{Obj, Meta1} | Acc], OrginalMeta}
+            end, {[], Meta2}, Objects),
     Retries = app_helper:get_env(riak_repl, rtsink_retry_limit, 3),
-    do_repl_put(Objects, Meta, AckPid, WireVersion, Retries).
+    do_repl_put(Objects2, AckPid, Retries).
 
-do_repl_put(_Objects, _Meta, _AckPid, 0) ->
+do_repl_put(_ObjectsMeta, _AckPid, 0) ->
     failed;
-do_repl_put(Objects, Meta, AckPid, Counter) ->
+do_repl_put(ObjectsMeta, AckPid, Counter) ->
 
     Results =
         lists:foldl(
-            fun(Obj, Acc) ->
-                PutResult = do_repl_put(Obj),
-                Rules = riak_repl2_object_filter:get_realtime_blacklist(Obj)
-            end, [], Objects),
-    ok.
+            fun(ObjMeta, Acc) ->
+                case do_repl_put(ObjMeta) of
+                    ack ->
+                        Acc;
+                    retry ->
+                        [ObjMeta | Acc]
+                end
+            end, [], ObjectsMeta),
+
+    case Results of
+        [] ->
+            gen_server:cast(AckPid, ack_v4);
+        _ ->
+            gen_server:cast(AckPid, retrying),
+            do_repl_put(Results, AckPid, Counter +1)
+
+    end.
 
 
-do_repl_put(Object) ->
+do_repl_put({Object, Meta}) ->
     B = riak_object:bucket(Object),
     K = riak_object:key(Object),
     case repl_helper_recv(Object) of
@@ -116,13 +136,15 @@ do_repl_put(Object) ->
                 ok ->
                     wait_for_fsm(MRef),
                     maybe_reap(ReqId, Object, B, K),
+                    maybe_push(Object, Meta),
                     ack;
                 {error, _Reason} ->
                     wait_for_fsm(MRef),
+                    %% Do not push onto queue, until we have completed the PUT successfully
                     retry
             end;
         cancel ->
-            lager:debug("Skipping repl received object ~p/~p", [B, K]),
+            %% Do not place onto the realtime queue, just like the riak_repl2_rt:postcommit hook
             ack
     end.
 
@@ -200,25 +222,27 @@ repl_helper_recv([{App, Mod}|T], Object) ->
     end.
 
 
-maybe_push(Binary, Meta, ObjectFilteringRules) ->
+maybe_push(Obj, Meta) ->
     case app_helper:get_env(riak_repl, realtime_cascades, always) of
         never ->
-            lager:debug("Skipping cascade due to app env setting"),
             ok;
         always ->
-            lager:debug("app env either set to always, or in default; doing cascade"),
-            List = riak_repl_util:from_wire(Binary),
-            Meta2 = orddict:erase(skip_count, Meta),
-            Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
-            riak_repl2_rtq:push(length(List), Binary, Meta3)
+            %% taken from riak_repl2_rt:postcommit
+            BinObjs =
+                case orddict:fetch(?BT_META_TYPED_BUCKET, Meta) of
+                    false ->
+                        riak_repl_util:to_wire(w1, Obj);
+                    true ->
+                        riak_repl_util:to_wire(w2, Obj)
+                end,
+            %% try the proxy first, avoids race conditions with unregister()
+            %% during shutdown
+            case whereis(riak_repl2_rtq_proxy) of
+                undefined ->
+                    riak_repl2_rtq:push(1, BinObjs, Meta);
+                _ ->
+                    %% we're shutting down and repl is stopped or stopping...
+                    riak_repl2_rtq_proxy:push(1, BinObjs, Meta)
+            end
     end.
-
-add_object_filtering_blacklist_to_meta(Meta, []) ->
-    lager:error("object filtering rules failed to return the default"),
-    Meta;
-add_object_filtering_blacklist_to_meta(Meta, [Rules]) ->
-    orddict:store(?BT_META_BLACKLIST, Rules, Meta);
-add_object_filtering_blacklist_to_meta(Meta, [_Rules | _Rest]) ->
-    lager:error("object filtering, repl binary has more than one object!"),
-    Meta.
 

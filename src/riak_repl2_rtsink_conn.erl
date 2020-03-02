@@ -175,7 +175,7 @@ handle_cast(ack_v4, State = #state{expected_seq_v4 = Seq}) ->
 
 %% new mechanism to inform the source we struggled to place the object and we are retrying
 %% on N number of failures we will not retry.
-handle_cast({retrying, Seq}, State) ->
+handle_cast(retrying, State = #state{expected_seq_v4 = Seq}) ->
     #state{transport = T, socket = S} = State,
     TcpIOL = riak_repl2_rtframe:encode(retrying, Seq),
     T:send(S, TcpIOL),
@@ -406,6 +406,7 @@ do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{exp
             {ok, State};
         false ->
             %% this has been changed from the previous protocol, we do not add this to our rtq anymore
+            %% and we send a message to source to inform it of the drop
             BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
             gen_server:cast(self(), {drop, BucketType}),
             send_bucket_type_drop(Seq, State),
@@ -418,7 +419,7 @@ do_write_objects_v4({objects_and_meta, {Seq, _BinObjs, _Meta}}, State = #state{e
             send_ack(Seq, State),
             {ok, State};
         false ->
-            %% we have received and ack that is not expected, nor the one before (for a possible retry)
+            %% we have received a seq that is not expected, nor the one before (for a possible retry)
             lager:error("Received wrong sequence number: ~p, Expected sequence number: ~p", [Seq, Seq2]),
             {error, wrong_seq, State}
     end.

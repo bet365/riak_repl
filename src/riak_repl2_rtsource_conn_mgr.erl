@@ -17,7 +17,6 @@
     connected/6,
     connect_failed/4,
     maybe_rebalance/1,
-    sink_shutdown/2,
     stop/1,
     get_all_status/1,
     get_all_status/2,
@@ -35,14 +34,22 @@
     {active, false}]).
 
 -record(state, {
-    remote = undefined,                         %% remote sink cluster name
-    connections_monitors = orddict:new(),       %% monitor references mapped to {pid, addr}
-    connections = orddict:new(),                %% addr's mapped to another orddict with {ref, pid}
-    pending_connection_counts = orddict:new(),  %% number of of pending connections per ip addr
-    connection_counts = orddict:new(),          %% number of established connections per ip addr
-    reject_connection_counts = orddict:new(),   %% number of connectios per ipaddr that need to be rejected
-    rb_timeout_tref,                            %% rebalance timeout timer reference
-    reference_rtq                               %% reference queue pid
+    remote = undefined,                                 %% remote sink cluster name
+
+    %% current active connections
+    connections_monitor_addrs = orddict:new(),          %% monitor references mapped to addr
+    connections_monitor_pids = orddict:new(),           %% monitor references mapped to pid
+
+    %% connection counts (for rebalancing)
+    pending_connection_counts = orddict:new(),          %% number of of pending connections per ip addr
+    connection_counts = orddict:new(),                  %% number of established connections per ip addr
+    reject_connection_counts = orddict:new(),           %% number of connectios per ipaddr that need to be rejected
+
+    %% sink nodes (used to determine if we need to rebalance)
+    sink_nodes = [],
+
+    rb_timeout_tref,                                    %% rebalance timeout timer reference
+    reference_rtq                                       %% reference queue pid
 }).
 
 %%%===================================================================
@@ -81,9 +88,6 @@ get_all_status(Pid, Timeout) ->
 get_rtsource_conn_pids(Pid) ->
     gen_server:call(Pid, get_rtsource_conn_pids).
 
-sink_shutdown(Pid, Addr, Ref) ->
-    gen_server:call(Pid, {sink_shutdown, Addr, Ref}, infinity).
-
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -96,7 +100,8 @@ init([Remote]) ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
-            State = #state{remote = Remote, reference_rtq = ReferenceQ},
+            SinkNodes = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
+            State = #state{remote = Remote, reference_rtq = ReferenceQ, sink_nodes = SinkNodes},
             NewState = rebalance_connections(State),
             {ok, NewState}
     end.
@@ -111,23 +116,13 @@ handle_call({connected, Socket, Transport, Addr, Proto, Props}, _From, State) ->
             reject_connection(Socket, Transport, Addr, Count, State)
     end;
 
-handle_call(all_status, _From, State=#state{connections_monitors = ConnectionsMonitors}) ->
+handle_call(all_status, _From, State=#state{connections_monitor_pids = ConnectionsMonitorPids}) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
-    {reply, lists:flatten(collect_status_data(ConnectionsMonitors, Timeout)), State};
+    {reply, lists:flatten(collect_status_data(ConnectionsMonitorPids, Timeout)), State};
 
-handle_call(get_rtsource_conn_pids, _From, State = #state{connections_monitors = ConnectionMonitors}) ->
-    Result = orddict:fold(fun(_, {Pid, _}, Acc) -> [Pid | Acc] end, [], ConnectionMonitors),
+handle_call(get_rtsource_conn_pids, _From, State = #state{connections_monitor_pids = ConnectionMonitorPids}) ->
+    Result = orddict:fold(fun(_, Pid, Acc) -> [Pid | Acc] end, [], ConnectionMonitorPids),
     {reply, Result, State};
-
-handle_call({sink_shutdown, Addr, Ref}, {Pid,_Tag}, State) ->
-    NewDict =
-        case orddict:find(Addr, Dict) of
-            error ->
-                orddict:store(Addr, 1, Dict);
-            {ok, Count} ->
-                orddict:store(Addr, Count +1, Dict)
-        end,
-    {reply, ok, State#state{sink_shutting_down = NewDict}};
 
 handle_call(stop, _From, State) ->
     {stop, shutdown, ok, State};
@@ -142,11 +137,18 @@ handle_cast({connect_failed, Reason, Addr}, State) ->
     lager:warning("Realtime replication connection to site ~p; address: ~p; failed - ~p\n", [Remote, Addr, Reason]),
     {noreply, connection_failed(Addr, State)};
 
-handle_cast(maybe_rebalance, State=#state{rb_timeout_tref = undefined}) ->
-    MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 60),
-    TimeDelay =  10 + round(MaxDelaySecs * crypto:rand_uniform(0, 1000)),
-    RbTimeoutTref = erlang:send_after(TimeDelay, self(), rebalance_now),
-    {noreply, State#state{rb_timeout_tref = RbTimeoutTref}};
+handle_cast(maybe_rebalance, State=#state{rb_timeout_tref = undefined, sink_nodes = SinkNodes, remote = Remote}) ->
+    NewSinkNodes = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
+    case NewSinkNodes == SinkNodes of
+        true ->
+            {noreply, State};
+        false ->
+            MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 60),
+            TimeDelay =  10 + round(MaxDelaySecs * crypto:rand_uniform(0, 1000)),
+            RbTimeoutTref = erlang:send_after(TimeDelay, self(), rebalance_now),
+            {noreply, State#state{rb_timeout_tref = RbTimeoutTref, sink_nodes = NewSinkNodes}}
+    end;
+
 handle_cast(maybe_rebalance, State) ->
     {noreply, State};
 
@@ -155,51 +157,31 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 %%%=====================================================================================================================
+%% expected cluster of connection, we need a rebalance but allow the rebalance to come from the change in the
+%% number of sink nodes, rather than this connection closing
+handle_info({'DOWN', MonitorRef, process, Pid, {error, sink_shutdown}}, State) ->
+    {noreply, State};
+
+%% We are the ones that issues this closure, the rebalance has already happened
+%% Remove the monitoring and reference in state for this connection
+handle_info({'DOWN', MonitorRef, process, Pid, {error, source_rebalance}}, State) ->
+    {noreply, State};
+
+%% unexpected closure of connection, we need a rebalance
+%% crash if we do not match pid with pid stored in connection_monitors
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
-    #state
-    {
-        connections_monitors = ConnectionMonitors,
-        connections = Connections,
-        connection_counts = ConnectionCounts
-    } = State,
+    #state{connections_monitors = ConnectionMonitors} = State,
     NewState =
         case orddict:find(MonitorRef, ConnectionMonitors) of
             error ->
                 lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
                 State;
             {ok, {Pid, Addr}} ->
+                %% Here we should issue a reconnect
+                maybe_rebalance(self()),
 
-                NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
-                State1 = State#state{connections_monitors = NewConnectionMonitors},
-
-                case orddict:find(Addr, Connections) of
-                    error ->
-                        %% this would be due to a rebalance!
-                        lager:error("could not find Addr: ~p in Connections (handle_info 'DOWN')", Addr),
-                        State1;
-                    {ok, Addresses} ->
-
-                        NewAddresses = orddict:erase(MonitorRef, Addresses),
-                        NewConnections = orddict:store(Addr, NewAddresses, Connections),
-                        NewConnectionCounts =
-                            case orddict:find(Addr, ConnectionCounts) of
-                                error ->
-                                    lager:error("could not find count in ConnectionCounts for addr: ~p", [Addr]),
-                                    ConnectionCounts;
-                                {ok, Count} ->
-                                    orddict:store(Addr, Count -1, ConnectionCounts)
-                            end,
-
-                        %% here we should issue a rebalance!
-                        %% a connection died, and we did not expect it
-                        maybe_rebalance(self()),
-                        State1#state{connections = NewConnections, connection_counts = NewConnectionCounts}
-                end;
-            {ok, {Pid2, Addr}} ->
-                lager:error("found monitor ref: ~p with different pid:~p, (orginal pid: ~p) "
-                            "associated to it for addr: ~p (handle_info 'DOWN')", [MonitorRef, Pid2, Pid, Addr]),
-                NewConnectionMonitors = orddict:erase(MonitorRef, ConnectionMonitors),
-                State#state{connections_monitors = NewConnectionMonitors}
+                NewState = State#state{connections_monitors = orddict:erase(MonitorRef, ConnectionMonitors)},
+                update_connection_counts(NewState, Addr, -1)
         end,
     {noreply, NewState};
 
@@ -212,15 +194,15 @@ handle_info(Info, State) ->
 
 %%%=====================================================================================================================
 
-terminate(Reason, _State=#state{remote = Remote, connections_monitors = ConnectionMonitors}) ->
+terminate(Reason, _State=#state{remote = Remote, connections_monitor_pids = ConnectionMonitorPids}) ->
     lager:info("rtrsource conn mgr terminating, Reason: ~p", [Reason]),
     riak_core_connection_mgr:disconnect({rt_repl, Remote}),
     orddict:fold(
-        fun(_, {Pid, Ref}, _) ->
+        fun(Ref, Pid, _) ->
             erlang:demonitor(Ref),
             catch riak_repl2_rtsource_conn:stop(Pid),
             ok
-        end, ok, ConnectionMonitors),
+        end, ok, ConnectionMonitorPids),
     ok.
 
 %%%=====================================================================================================================
@@ -237,8 +219,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Connection Failed
 %%%=====================================================================================================================
 connection_failed(Addr, State) ->
-    #state
-    {reject_connection_counts = RejectConnectionCounts} = State,
+    #state{reject_connection_counts = RejectConnectionCounts} = State,
     case orddict:find(Addr, RejectConnectionCounts) of
         error ->
             maybe_rebalance(self()),
@@ -257,11 +238,10 @@ accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
             Ref = erlang:monitor(process, RtSourcePid),
             case riak_repl2_rtsource_conn:connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, Props) of
                 ok ->
-                    State1 = update_connections(State, {connected, Ref, RtSourcePid, IPPort}),
-                    State2 = update_connections_monitors(State1, {connected, Ref, RtSourcePid, IPPort}),
-                    State3 = update_connection_counts(State2, IPPort),
-                    State4 = update_pending_connections(State3, IPPort),
-                    {reply, ok, State4};
+                    State1 = update_connections_monitors(State, {connected, Ref, RtSourcePid, IPPort}),
+                    State2 = update_connection_counts(State1, IPPort),
+                    State3 = update_pending_connections(State2, IPPort),
+                    {reply, ok, State3};
                 Error ->
                     erlang:demonitor(Ref),
                     exit(RtSourcePid, unable_to_connect),
@@ -284,25 +264,18 @@ reject_connection(Socket, Transport, Addr, Count, State) ->
 %%%=====================================================================================================================
 %% Update Connection States
 %%%=====================================================================================================================
-update_connections(State, {connected, Ref, Pid, Addr}) ->
-    #state{connections = Connections} = State,
-    NewConnections =
-        case orddict:find(Addr, Connections) of
-            error ->
-                NewAddrDict = orddict:from_list([{Ref, Pid}]),
-                orddict:store(Addr, NewAddrDict, Connections);
-            {ok, Dict} ->
-                NewAddrDict = orddict:store(Ref, Pid, Dict),
-                orddict:store(Addr, NewAddrDict, Connections)
-        end,
-    State#state{connections = NewConnections}.
-
 update_connections_monitors(State, {connected, Ref, Pid, Addr}) ->
-    #state{connections_monitors = ConnectionMonitors} = State,
-    NewConnectionMonitors = orddict:store(Ref, {Pid, Addr}, ConnectionMonitors),
-    State#state{connections_monitors = NewConnectionMonitors}.
+    #state{connections_monitor_pids = Pids, connections_monitor_addrs = Addrs} = State,
+    State#state
+    {
+        connections_monitor_addrs = orddict:store(Ref, Addr, Addrs),
+        connections_monitor_pids = orddict:store(Ref, Pid, Pids)
+    }.
 
+%% TODO: make use of update_counter
 update_pending_connections(State, Addr) ->
+    update_pending_connections(State, Addr, -1).
+update_pending_connections(State, Addr, Diff) ->
     #state{pending_connection_counts = PendingConnections} = State,
     NewPendingConnections =
         case orddict:find(Addr, PendingConnections) of
@@ -310,17 +283,20 @@ update_pending_connections(State, Addr) ->
                 lager:error("we have a new connection that is not in pending connections (accept connection)"),
                 PendingConnections;
             {ok, N} ->
-                orddict:store(Addr, N-1, PendingConnections)
+                orddict:store(Addr, N +Diff, PendingConnections)
         end,
     State#state{pending_connection_counts = NewPendingConnections}.
 
+%% TODO: make use of update_counter
 update_connection_counts(State, Addr) ->
+    update_connection_counts(State, Addr, 1).
+update_connection_counts(State, Addr, Diff) ->
     #state{connection_counts = ConnectionCoutns} = State,
     case orddict:find(Addr, ConnectionCoutns) of
         error ->
-            State#state{connection_counts = orddict:store(Addr, 1, ConnectionCoutns)};
+            State#state{connection_counts = orddict:store(Addr, Diff, ConnectionCoutns)};
         {ok, Count} ->
-            State#state{connection_counts = orddict:store(Addr, Count +1, ConnectionCoutns)}
+            State#state{connection_counts = orddict:store(Addr, Count +Diff, ConnectionCoutns)}
     end.
 
 update_reject_connections_count(Count, Addr, State) ->
@@ -340,40 +316,111 @@ update_reject_connections_count(Count, Addr, State) ->
 rebalance_connections(State) ->
     #state{
         connection_counts = ConnectionCounts,
-        pending_connection_counts = PendingConnectionCounts
+        pending_connection_counts = PendingConnectionCounts,
+        reject_connection_counts = RejectConnectionCounts
     } = State,
     case calculate_balanced_connections(State) of
         [] ->
             lager:warning("No available sink nodes to connect too (rebalance connections)"),
             maybe_rebalance(self()),
             State;
+
         BalancedConnections ->
 
-            %% calculate total connections conencted/pending
-            MergedConnectionCounts =
-                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, ConnectionCounts, PendingConnectionCounts),
+            %% merge pending + rejected connection as these are in flight and can be used as part of the rebalance
+            MergedPendingRejectedCounts =
+                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, RejectConnectionCounts, PendingConnectionCounts),
 
-            %% Calculate connection to be establish/ terminate
+            %% calculate connected + pending + rejected connection numbers (as these are all connected or in flight)
+            MergedConnectionCounts =
+                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, ConnectionCounts, MergedPendingRejectedCounts),
+
+            %% calculate number of connections to be established (or terminated if negative)
             RebalanceConnectionCounts =
                 orddict:merge(fun(_, V1, V2) -> V1 - V2 end, BalancedConnections, MergedConnectionCounts),
 
-            %% rebalance the connections to match the rebalance connection counts
-            orddict:fold(fun connect_or_terminate/3, State, RebalanceConnectionCounts)
+            %% split up list, to know which to establish, and which to terminate
+            {AddConnections, RemoveConnections} =
+                orddict:fold(
+                    fun
+                        (_Key, 0, {AC, RC}) ->
+                            {AC, RC};
+                        (Key, Value, {AC, RC}) ->
+                        case Value > 0 of
+                            true ->
+                                {orddict:store(Key, Value, AC), RC};
+                            false ->
+                                {AC, orddict:store(Key, Value, RC)}
+                        end
+                    end, {orddict:new(), orddict:new()}, RebalanceConnectionCounts),
+
+
+            %% reset reject_connection_counts and re-calculate them
+            State0 = State#state{reject_connection_counts = orddict:new()},
+
+            %% remove connections gracefully
+            State1 = orddict:fold(fun add_sink_conns/3, State0, AddConnections),
+
+            %% reject pending connections (as to not termiante too many open valid connections)
+            %% the only reason we would have pending connection for a address which we have determined requires
+            %% some connections to be terminated, is if we rebalance soon after a rebalance
+            {State2, NewRemoveConnections} =
+                orddict:fold(fun reject_pending_connections/3, {State1, orddict:new()}, RemoveConnections),
+
+            %% Remove the remainder of connections that need to shutdown gracefully
+            terminate_connections_gracefully(NewRemoveConnections, State2)
     end.
 
 
 
 
-connect_or_terminate(_Addr, 0, State) ->
-    State;
-connect_or_terminate(Addr, N, State) when N < 0 ->
-    {NewState, NewN} = reject_pending_connections(Addr, N, State),
-    terminate_sink_n_times(Addr, NewN, NewState);
-connect_or_terminate(Addr, N, State) when N > 0 ->
+%% terminate connections gracefully (use lists:keytake(Addr, 2, Dict))
+terminate_connections_gracefully(Dict, State = #state{connections_monitor_addrs = Addrs}) ->
+    ok.
+
+
+
+
+%% Reject Pending Connections
+reject_pending_connections(Addr, N, {State, Dict}) ->
+    #state{
+        pending_connection_counts = PendingConnectionCounts,
+        reject_connection_counts = RejectConnectionCounts
+    } = State,
+    case orddict:find(Addr, PendingConnectionCounts) of
+        error ->
+            State;
+        {ok, Pending} ->
+            case Pending >= N of
+                true ->
+                    NewPendingConnectionCounts = orddict:store(Addr, Pending - N, PendingConnectionCounts),
+                    NewRejectConnectionCounts = orddict:store(Addr, N, RejectConnectionCounts),
+                    NewState =
+                        State#state
+                        {
+                            pending_connection_counts = NewPendingConnectionCounts,
+                            reject_connection_counts = NewRejectConnectionCounts
+                        },
+                    {NewState, Dict};
+                false ->
+                    ConnectionsToTerminate = N - Pending,
+                    NewPendingConnectionCounts = orddict:store(Addr, 0, PendingConnectionCounts),
+                    NewRejectConnectionCounts = orddict:store(Addr, Pending, RejectConnectionCounts),
+                    NewState =
+                        State#state
+                        {
+                            pending_connection_counts = NewPendingConnectionCounts,
+                            reject_connection_counts = NewRejectConnectionCounts
+                        },
+                    {NewState, orddict:store(Addr, ConnectionsToTerminate, Dict)}
+
+            end
+    end.
+
+add_sink_conns(Addr, N, State) ->
     connect_to_sink_n_times(Addr, N, State).
 
-
-
+%% Add New Connections
 connect_to_sink_n_times(_Addr, 0, State) ->
     State;
 connect_to_sink_n_times(Addr, N, State) ->
@@ -392,72 +439,6 @@ connect_to_sink(Addr, State) ->
             State#state{pending_connection_counts = NewPendingConnections};
         _->
             State
-    end.
-
-
-reject_pending_connections(_Addr, 0, State) ->
-    State;
-reject_pending_connections(Addr, N, State) ->
-    #state{
-        pending_connection_counts = PendingConnectionCounts,
-        reject_connection_counts = RejectConnectionCounts
-    } = State,
-    case orddict:find(Addr, PendingConnectionCounts) of
-        error ->
-            State;
-        {ok, V} ->
-            case V >= N of
-                true ->
-                    NewPendingConnectionCounts = orddict:store(Addr, V - N, PendingConnectionCounts),
-                    NewRejectConnectionCounts = orddict:store(Addr, N, RejectConnectionCounts),
-                    NewState =
-                        State#state
-                        {
-                            pending_connection_counts = NewPendingConnectionCounts,
-                            reject_connection_counts = NewRejectConnectionCounts
-                        },
-                    {NewState, 0};
-                false ->
-                    NewPendingConnectionCounts = orddict:store(Addr, 0, PendingConnectionCounts),
-                    NewRejectConnectionCounts = orddict:store(Addr, N - V, RejectConnectionCounts),
-                    NewState =
-                        State#state
-                        {
-                            pending_connection_counts = NewPendingConnectionCounts,
-                            reject_connection_counts = NewRejectConnectionCounts
-                        },
-                    {NewState, N - V}
-
-            end
-    end.
-
-terminate_sink_n_times(_Addr, 0, State) ->
-    State;
-terminate_sink_n_times(Addr, N, State) ->
-    #state{connections = Connections} = State,
-    case orddict:find(Addr, Connections) of
-        error ->
-            State;
-        {ok, Addresses} ->
-            case length(Addresses) >= N of
-                true ->
-                    {Termiante, Rest} = lists:split(N, Addresses),
-                    %% TODO: do we want this to change so its a graceful shutdown for the reference queue
-                    %% TODO: as in we will wait for an ack if there is one incoming
-                    lists:foreach(fun({_Ref, Pid}) -> exit(Pid, rebalance) end, Termiante),
-                    NewConnections = orddict:store(Addr, Rest, Connections),
-                    State#state{connections = NewConnections};
-                false ->
-                    lager:error("we have been asked to kill more connections than exist! (terminate_sink_n_times)"),
-                    %% TODO: do we want this to change so its a graceful shutdown for the reference queue
-                    %% TODO: as in we will wait for an ack if there is one incoming
-                    lists:foreach(fun({_Ref, Pid}) -> exit(Pid, rebalance) end, Addresses),
-                    NewConnections = orddict:store(Addr, [], Connections),
-                    State#state{connections = NewConnections}
-            end
-
-
-
     end.
 
 
@@ -488,7 +469,7 @@ calculate_balanced_connections(State) ->
 
 collect_status_data(ConnectionMonitors, Timeout) ->
     orddict:fold(
-        fun(_, {Pid, _}, Acc) ->
+        fun(_, Pid, Acc) ->
             case riak_repl2_rtsource_conn:status(Pid, Timeout) of
                 [] -> Acc;
                 Status -> [Status | Acc]

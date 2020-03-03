@@ -11,7 +11,6 @@
     ack/3,
     register/2,
     shutdown/1,
-    shutdown/2,
     status/1
 ]).
 
@@ -89,8 +88,6 @@ register(RemoteName, Ref)->
 
 shutdown(RemoteName) ->
     gen_server:call(?SERVER(RemoteName), shutting_down, infinity).
-shutdown(RemoteName, Time) ->
-    gen_server:call(?SERVER(RemoteName), {shutting_down, Time}, infinity).
 
 status(RemoteName) ->
     try
@@ -141,14 +138,8 @@ handle_call(status, _From, State) ->
     Stats = [{pending, Pending}, {unacked, Unacked}, {acked, Acked}],
     {reply, Stats, State};
 
-handle_call(shutting_down, _From, State = #state{shutting_down_ref = undefined}) ->
+handle_call(shutting_down, _From, State) ->
     {reply, ok, State#state{shuting_down = true}};
-handle_call(shutting_down, _From, State = #state{shutting_down_ref = Ref}) ->
-    erlang:cancel_timer(Ref),
-    {reply, ok, State#state{shuting_down = true}};
-handle_call({shutting_down, Time}, _From, State) ->
-    Ref = erlang:send_after(Time, self(), set_shutting_down),
-    {reply, ok, State#state{shutting_down_ref = Ref}};
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -174,9 +165,6 @@ handle_cast(_Request, State) ->
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
     {noreply, maybe_retry(MonitorRef, Pid, State)};
 
-handle_info(set_shutting_down, State) ->
-    {noreply, State#state{shuting_down = true}};
-
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -198,53 +186,69 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
     #state
     {
-        consumer_monitors = ConsumerMonitors, consumers = Consumers,
-        reference_queue = RefQ, retry_queue = RetryQ,
-        name = Name, status = Status, drops = Drops
+        consumer_monitors = ConsumerMonitors,
+        consumers = Consumers,
+        reference_queue = RefQ,
+        retry_queue = RetryQ,
+        name = Name,
+        drops = Drops
     } = State,
     case orddict:find(MonitorRef, ConsumerMonitors) of
         {ok, Ref} ->
             case orddict:find(Ref, Consumers) of
+
+                %% consumer does not have an object (we can just remove it, nothing to retry)
+                {ok, Consumer = #consumer{seq = undefined, qseq = undefined, cseq = undefined}} ->
+                    NewConsumerMonitors = orddict:erase(MonitorRef, ConsumerMonitors),
+                    NewConsumers = orddict:erase(Ref, Consumers),
+                    State#state{consumer_monitors = NewConsumerMonitors, consumers = NewConsumers};
+
+                %% consumer has an object, we need to drop it or retry the object with another consumer
                 {ok, Consumer = #consumer{pid = Pid}} ->
-                    #consumer{seq = Seq, qseq = QSeq, retry_counter = RetryCounter} = Consumer,
+                    #consumer{seq = Seq, qseq = QSeq, retry_counter = RetryCounter, status = Status} = Consumer,
                     NewRetryCounter = RetryCounter +1,
                     NewConsumers = orddict:erase(Ref, Consumers),
                     NewConsumerMonitors = orddict:erase(MonitorRef, ConsumerMonitors),
                     delete_object_from_queue(Seq, RefQ, RetryQ, Status),
                     case  NewRetryCounter > get_retry_limit(State) of
                         true ->
-                            NewState =
-                                State#state
-                                {
-                                    consumers = NewConsumers,
-                                    consumer_monitors = NewConsumerMonitors,
-                                    drops = Drops +1
-                                },
-                            NewState;
+                            %% ack the rtq
+                            %% TODO: make a drop function to report the drop in the logs (log out bucket, key)
+                            riak_repl2_rtq:ack(Name, QSeq),
+                            State#state
+                            {
+                                consumers = NewConsumers,
+                                consumer_monitors = NewConsumerMonitors,
+                                drops = Drops +1
+                            };
                         false ->
-                            NewRetryQ = insert_object_to_queue({QSeq, NewRetryCounter}, RetryQ),
-                            NewState =
-                                State#state
-                                {
-                                    status = retry,
-                                    retry_queue = NewRetryQ,
-                                    consumers = NewConsumers,
-                                    consumer_monitors = NewConsumerMonitors
-                                },
+                            %% insert the object into the retry queue, and make a pull request
                             gen_server:cast(?SERVER(Name), maybe_pull),
-                            NewState
+                            NewRetryQ = insert_object_to_queue({QSeq, NewRetryCounter}, RetryQ),
+                            State#state
+                            {
+                                status = retry,
+                                retry_queue = NewRetryQ,
+                                consumers = NewConsumers,
+                                consumer_monitors = NewConsumerMonitors
+                            }
                     end;
+
+                %% we could not find the consumer in the consumer orddict
                 error ->
                     %% we got a down message with a monitor reference but the consumer does not exist
                     lager:error("'DOWN' message recieved with a monitor ref that matches no consumer"),
                     State
             end;
+
+        %% we could not find the monitor in the consumer monitors orddict
         error ->
             %% we got a down message with a monitor reference that we are not aware of
             lager:error("'DOWN' message recieved with a monitor ref we are not aware of"),
             State
     end;
 maybe_retry(_MonitorRef, _Pid, State = #state{shuting_down = true}) ->
+    %% we don't care about this, as we are shutting down, we can let the queue migrate the object
     State.
 
 

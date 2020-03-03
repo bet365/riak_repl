@@ -6,8 +6,7 @@
     enable/1,
     disable/1,
     enabled/0,
-    shutdown/0,
-    shutdown/1
+    shutdown/0
 ]).
 -export([init/1]).
 
@@ -39,12 +38,6 @@ shutdown() ->
     lists:foreach(
         fun({Remote, _, [riak_repl2_reference_rtq]}) ->
             riak_repl2_reference_rtq:shutdown(Remote)
-        end, supervisor:which_children(?MODULE)).
-
-shutdown(Time) ->
-    lists:foreach(
-        fun({Remote, _, [riak_repl2_reference_rtq]}) ->
-            riak_repl2_reference_rtq:shutdown(Remote, Time)
         end, supervisor:which_children(?MODULE)).
 
 %%%===================================================================

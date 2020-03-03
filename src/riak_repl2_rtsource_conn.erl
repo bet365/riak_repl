@@ -46,10 +46,12 @@
     start_link/1,
     stop/1,
     get_helper_pid/1,
-    status/1, status/2,
+    status/1,
+    status/2,
     get_address/1,
     get_socketname_primary/1,
-    connected/7
+    connected/7,
+    graceful_shutdown/2
 ]).
 
 
@@ -96,11 +98,12 @@
     cont = <<>>, % continuation from previous TCP buffer
 
     %% Protocol 4
-    conn_mgr_pid,
+    shutting_down = false,
+    shutting_down_reason,
+    expect_seq_v4 = 1,
     received_tref,
     ack_tref,
-    ref,
-    expect_seq_v4 = 1
+    ref
 }).
 
 %% API - start trying to send realtime repl to remote site
@@ -111,7 +114,7 @@ stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
 
 status(Pid) ->
-    status(Pid, infinity).
+    status(Pid, ?LONG_TIMEOUT).
 
 status(Pid, Timeout) ->
     try
@@ -125,7 +128,7 @@ connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, _Props) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
-        gen_server:call(RtSourcePid, {connected, Socket, Transport, IPPort, Proto}, ?LONG_TIMEOUT)
+        gen_server:call(RtSourcePid, {connected, Ref, Socket, Transport, IPPort, Proto}, ?LONG_TIMEOUT)
     catch
         _:Reason ->
             lager:warning("Unable to contact RT source connection process (~p). Reason ~p"
@@ -133,6 +136,17 @@ connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, _Props) ->
                 [RtSourcePid, Reason]),
             error
     end.
+
+graceful_shutdown(Pid, Reason) ->
+    try
+        gen_server:call(Pid, {graceful_shutdown, Reason}, ?LONG_TIMEOUT)
+    catch
+        _:Reason  ->
+            lager:warning("Unable to contact RT Source for graceful shutdown, Pid: ~p, Reason: ~p",
+                [Pid, Reason]),
+            error
+    end.
+
 
 get_helper_pid(RtSourcePid) ->
   gen_server:call(RtSourcePid, get_helper_pid).
@@ -152,7 +166,11 @@ init([Remote]) ->
   {ok, #state{remote = Remote}}.
 
 handle_call(stop, _From, State) ->
-  {stop, {shutdown, routine}, ok, State};
+  {stop, {shutdown, stopped}, ok, State};
+
+handle_call({graceful_shutdown, Reason}, _From, State) ->
+    {Reply, NewState} = set_shutdown(Reason, State),
+    {reply, Reply, NewState};
 
 handle_call(address, _From, State = #state{address=A}) ->
     {reply, A, State};
@@ -164,8 +182,8 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
-handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, {ConnMgrPid, _Tag}, State) ->
-    #state{remote = Remote, conn_mgr_pid = ConnMgrPid} = State,
+handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) ->
+    #state{remote = Remote} = State,
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
@@ -220,25 +238,31 @@ handle_info({Closed, _S}, State = #state{remote = Remote, cont = Cont})
             lager:warning("Realtime connection ~s to ~p closed with partial receive of ~b bytes\n",
                           [peername(State), Remote, NumBytes])
     end,
-    {stop, {shutdown, Closed}, State};
+    case shutdown_check(State) of
+        false ->
+            {stop, {shutdown, Closed}, State};
+        Shutdown ->
+            Shutdown
+    end;
 
 handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
   when Error == tcp_error; Error == ssl_error ->
     riak_repl_stats:rt_source_errors(),
     lager:warning("Realtime connection ~s to ~p network error ~p - ~b bytes pending\n",
                   [peername(State), Remote, Reason, size(Cont)]),
-    {stop, {shutdown, {Error, Reason}}, State};
+
+    case shutdown_check(State) of
+        false ->
+            {stop, {shutdown, {Error, Reason}}, State};
+        Shutdown ->
+            Shutdown
+    end;
 
 handle_info(send_heartbeat, State) ->
     {noreply, send_heartbeat(State)};
 
 handle_info({heartbeat_timeout, HBSent}, State ) ->
-    #state
-    {
-        hb_sent_q = HBSentQ,
-        hb_timeout_tref = HBTRef,
-        remote = Remote
-    } = State,
+    #state{hb_sent_q = HBSentQ, hb_timeout_tref = HBTRef, remote = Remote} = State,
     TimeSinceTimeout = timer:now_diff(now(), HBSent) div 1000,
 
     %% hb_timeout_tref is the authority of whether we should
@@ -253,7 +277,13 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
             lager:warning("Realtime connection ~s to ~p heartbeat timeout after ~p seconds\n",
                           [peername(State), Remote, HBTimeout]),
             lager:info("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
-            {stop, {shutdown, heartbeat_timeout}, State}
+
+            case shutdown_check(State) of
+                false ->
+                    {stop, {shutdown, heartbeat_timeout}, State};
+                Shutdown ->
+                    Shutdown
+            end
     end;
 
 handle_info(object_sent, State = #state{expect_seq_v4 = Seq}) ->
@@ -270,7 +300,13 @@ handle_info({receive_timeout, Seq}, State) ->
             {noreply, State#state{received_tref = undefined}};
         {_, true} ->
             lager:error("rtsource_conn recevie timeout, seq: ~p, peername: ~p, remote: ~p", [Seq, Peername, Remote]),
-            {stop, {error, receive_timeout}, State}
+
+            case shutdown_check(State) of
+                false ->
+                    {stop, {error, receive_timeout}, State};
+                Shutdown ->
+                    Shutdown
+            end
     end;
 
 handle_info({ack_timeout, Seq}, State) ->
@@ -282,7 +318,13 @@ handle_info({ack_timeout, Seq}, State) ->
             {noreply, State#state{ack_tref = undefined}};
         {_, true} ->
             lager:error("rtsource_conn ack timeout, seq: ~p, peername: ~p, remote: ~p", [Seq, Peername, Remote]),
-            {stop, {error, ack_timeout}, State}
+
+            case shutdown_check(State) of
+                false ->
+                    {stop, {error, ack_timeout}, State};
+                Shutdown ->
+                    Shutdown
+            end
     end;
 
 handle_info(Msg, State) ->
@@ -379,19 +421,27 @@ handle_incoming_data({ok, heartbeat, Cont}, State) ->
 
 
 handle_incoming_data({ok, node_shutdown, Cont}, State) ->
-    #state{helper_pid = Helper, conn_mgr_pid = ConnMgrPid, address = Addr, ref = Ref} = State,
-    %% inform connection manager that this node is shutting down, for rebalancing purposes
-    riak_repl2_rtsource_conn_mgr:sink_shutdown(ConnMgrPid, Addr, Ref),
+    #state{helper_pid = Helper, expect_seq_v4 = ESeq} = State,
+
     %% inform helper so it does not accept anymore data
-    riak_repl2_rtsource_helper:shutting_down(Helper),
-    recv(Cont, State);
+    {ok, Seq} = riak_repl2_rtsource_helper:shutting_down(Helper),
+
+    case (Seq +1 == ESeq) orelse (Seq == 0) of
+        true ->
+            %% we have the ack back for the last sequence number sent by the helper (terminate)
+            {stop, {error, sink_shutdown}, State};
+        false ->
+            {_, NewState} = set_shutdown(sink_shutdown, State),
+            recv(Cont, NewState)
+    end;
 
 %% This is the most upto date protocol to be used if all clusters are up to date with repl
 %% Because we are providing in order sequence numbers, it no longer matters on the ProtoMajor version
 %% we can just ack the reference queue, and it shall deal with it correctly.
 
 %% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
-handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq, ref = RTQRef, remote = Remote}) ->
+handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+    #state{ref = RTQRef, remote = Remote} = State,
     riak_repl_stats:objects_sent(),
     %% ack the reference queue
     ok = riak_repl2_reference_rtq:ack(Remote, RTQRef, Seq),
@@ -399,7 +449,15 @@ handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq,
     State1 = reset_heartbeat_timer(State),
     %% reset ack timer
     State2 = reset_ack_timer(State1),
-    recv(Cont, State2#state{expect_seq_v4 = Seq +1});
+
+    %% check if we are shutting down gracefully
+    case shutdown_check(State2) of
+        false ->
+            recv(Cont, State2#state{expect_seq_v4 = Seq +1});
+        Shutdown ->
+            Shutdown
+
+    end;
 
 handle_incoming_data({ok, {received, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
     State1 = reset_received_timer(State),
@@ -448,6 +506,16 @@ reset_ack_timer(State = #state{ack_tref = Ref}) ->
             _ = cancel_timer(Ref),
             State#state{ack_tref = undefined}
     end.
+
+set_shutdown(Reason, State = #state{shutting_down = false}) ->
+    {ok, State#state{shutting_down_reason = Reason, shutting_down = true}};
+set_shutdown(_, State) ->
+    {already_shutting_down, State}.
+
+shutdown_check(State = #state{shutting_down = true, shutting_down_reason = Reason}) ->
+    {stop, {error, Reason}, State};
+shutdown_check(_State) ->
+    false.
 
 %% ================================================================================================================== %%
 %% Heartbeat's

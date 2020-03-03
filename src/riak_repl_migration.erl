@@ -32,7 +32,6 @@ handle_call(migrate_queue, From, State) ->
     %% give the reference queue's a chance to clear themselves down
     DefaultTimeout = app_helper:get_env(riak_repl, queue_migration_timeout, 5),
     Time = DefaultTimeout * 1000,
-    riak_repl2_reference_rtq_sup:shutdown(Time),
     erlang:send(self(), {check_queue, Time}),
     {noreply, State#state{caller = From, elapsed_sleep = 0}}.
 
@@ -51,7 +50,7 @@ handle_info({check_queue, Time}, State = #state{elapsed_sleep = ElapsedSleep}) -
                 true ->
                     lager:info("Realtime queue has not completely drained"),
                     %% issue shutdown to all reference queues (we are about to migrate them)
-                    riak_repl2_reference_rtq_sup:shutdown(Time),
+                    riak_repl2_reference_rtq_sup:shutdown(),
                     erlang:send(self(), migrate_queue),
                     {noreply, State};
                 false ->

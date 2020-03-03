@@ -72,8 +72,8 @@ handle_call({send_object, Entry}, From,
     State = #state{transport = T, socket = S}) ->
     maybe_send(T, S, Entry, From, State);
 
-handle_call(shutting_down, _From, State) ->
-    {reply, ok, State#state{shutting_down = true}};
+handle_call(shutting_down, _From, State = #state{sent_seq = Seq}) ->
+    {reply, {ok, Seq}, State#state{shutting_down = true}};
 
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State};
@@ -108,7 +108,7 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_send(_Transport, _Socket, _QEntry, From, State = #state{shutting_down = true}) ->
     gen_server:reply(From, shutting_down),
     %% now we are out of the reference_rtq we can shutdown gracefully
-    {stop, shutdown, State};
+    State;
 maybe_send(Transport, Socket, QEntry, From, State) ->
     #state
     {

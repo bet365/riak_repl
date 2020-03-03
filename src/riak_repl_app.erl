@@ -330,23 +330,27 @@ get_ring() ->
 prep_stop(_State) ->
     %% TODO: this should only run with BNW
 
-    try %% wrap with a try/catch - application carries on regardless,
-        %% no error message or logging about the failure otherwise.
-
+    try
         %% mark the service down so other nodes don't try to migrate to this
         %% one while it's going down
         riak_core_node_watcher:service_down(riak_repl),
+        lager:info("Stopping application riak_repl - marked service down."),
+
+        %% stop the ranch dispatcher from accepting new connections for repl
+        ok = riak_core_service_mgr:stop_dispatcher(),
+        lager:info("Stopping the ranch dispatcher for the repl Address and Port"),
+
+        %% send out node_shutdown messages for rtsink_conn (protocol 4)
+        riak_repl2_rtsink_conn_sup:send_shutdown(),
+        lager:info("Sending out the node_shutdown message for rtsink_conn using protocol 4"),
 
         %% remove the ring event handler
-        riak_core:delete_guarded_event_handler(riak_core_ring_events,
-            riak_repl_ring_handler, []),
+        riak_core:delete_guarded_event_handler(riak_core_ring_events, riak_repl_ring_handler, []),
 
         %% the repl bucket hook will check to see if the queue is running and deliver to
         %% another node if it's shutting down
-        lager:info("Redirecting realtime replication traffic"),
         riak_repl2_rtq:shutdown(),
-
-        lager:info("Stopping application riak_repl - marked service down.\n", []),
+        lager:info("Issusing RTQ shutdown - to send new objects to the proxy"),
 
         case riak_repl_migration:start_link() of
             {ok, _Pid} ->
@@ -355,20 +359,22 @@ prep_stop(_State) ->
             {error, _} ->
                 lager:error("Can't start replication migration server")
         end,
+
         %% stop it cleanly, don't just kill it
-        riak_repl2_rtq:stop()
-       catch
-        Type:Reason ->
-            lager:error("Stopping application riak_api - ~p:~p.\n", [Type, Reason])
-       end,
-       Stats = riak_repl_stats:get_stats(),
-       SourceErrors = proplists:get_value(rt_source_errors, Stats, 0),
-       SinkErrors = proplists:get_value(rt_sink_errors, Stats, 0),
-       % Setting these to debug as I'm not sure they are entirely accurate
-       lager:debug("There were ~p rt_source_errors upon shutdown",
-                  [SourceErrors]),
-       lager:debug("There were ~p rt_sink_errors upon shutdown",
-                  [SinkErrors]),
+        riak_repl2_rtq:stop(),
+        lager:info("Stopping the realtime queue")
+
+    catch
+    Type:Reason ->
+        lager:error("Stopping application riak_api - ~p:~p.\n", [Type, Reason])
+    end,
+
+    Stats = riak_repl_stats:get_stats(),
+    SourceErrors = proplists:get_value(rt_source_errors, Stats, 0),
+    SinkErrors = proplists:get_value(rt_sink_errors, Stats, 0),
+    % Setting these to debug as I'm not sure they are entirely accurate
+    lager:debug("There were ~p rt_source_errors upon shutdown", [SourceErrors]),
+    lager:debug("There were ~p rt_sink_errors upon shutdown", [SinkErrors]),
     stopping.
 
 %% This function is only here for nodes using a version < 1.3. Remove it in

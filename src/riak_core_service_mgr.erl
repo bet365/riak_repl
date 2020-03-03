@@ -64,7 +64,8 @@
          is_registered/1,
          register_stats_fun/1,
          get_stats/0,
-         stop/0
+         stop/0,
+         stop_dispatcher/0
          ]).
 
 %% ranch callbacks
@@ -164,6 +165,10 @@ get_stats() ->
 stop() ->
     gen_server:call(?SERVER, stop).
 
+-spec stop() -> 'ok'.
+stop_dispatcher() ->
+    gen_server:call(?SERVER, stop_dispatcher).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -182,6 +187,10 @@ handle_call(get_services, _From, State) ->
 handle_call(stop, _From, State) ->
     _ = ranch:stop_listener(State#state.dispatch_addr),
     {stop, normal, ok, State};
+
+handle_call(stop_dispatcher, _From, State) ->
+    _ = ranch:stop_listener(State#state.dispatch_addr),
+    {reply, ok, State};
 
 handle_call(get_stats, _From, State) ->
     Stats = orddict:to_list(State#state.service_stats),

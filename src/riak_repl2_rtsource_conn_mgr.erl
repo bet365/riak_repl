@@ -25,13 +25,9 @@
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_NO_CONNECTIONS, 400).
--define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]},
-    {?TCP_OPTIONS, ?SERVER, self()}}).
+-define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?SERVER, self()}}).
 
--define(TCP_OPTIONS,  [{keepalive, true},
-    {nodelay, true},
-    {packet, 0},
-    {active, false}]).
+-define(TCP_OPTIONS,  [{keepalive, true}, {nodelay, true}, {packet, 0}, {active, false}]).
 
 -record(state, {
     remote = undefined,                                 %% remote sink cluster name
@@ -157,33 +153,33 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 %%%=====================================================================================================================
-%% expected cluster of connection, we need a rebalance but allow the rebalance to come from the change in the
-%% number of sink nodes, rather than this connection closing
 handle_info({'DOWN', MonitorRef, process, Pid, {error, sink_shutdown}}, State) ->
+    %% connect to another node (calculate an even distribtion)
     {noreply, State};
 
-%% We are the ones that issues this closure, the rebalance has already happened
-%% Remove the monitoring and reference in state for this connection
+
 handle_info({'DOWN', MonitorRef, process, Pid, {error, source_rebalance}}, State) ->
+    %% do not reconnect, this has already been done
     {noreply, State};
 
-%% unexpected closure of connection, we need a rebalance
-%% crash if we do not match pid with pid stored in connection_monitors
+%% while we operate with cluster on protocol 3, we will hit here on a sink node shutdown!
+%% do we want to issue a reconnect to the node going down?
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
-    #state{connections_monitors = ConnectionMonitors} = State,
-    NewState =
-        case orddict:find(MonitorRef, ConnectionMonitors) of
-            error ->
-                lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
-                State;
-            {ok, {Pid, Addr}} ->
-                %% Here we should issue a reconnect
-                maybe_rebalance(self()),
+    %% reconnect to the same node in X seconds?
+    #state{connections_monitor_pids = ConnectionMonitorPids} = State,
+    case orddict:find(MonitorRef, ConnectionMonitorPids) of
+        error ->
+            lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
+            {noreply, State};
+        {ok, {Pid, Addr}} ->
+            %% Here we should issue a reconnect
+            maybe_rebalance(self()),
 
-                NewState = State#state{connections_monitors = orddict:erase(MonitorRef, ConnectionMonitors)},
-                update_connection_counts(NewState, Addr, -1)
-        end,
-    {noreply, NewState};
+            NewState = State#state{connections_monitor_pids = orddict:erase(MonitorRef, ConnectionMonitorPids)},
+            update_connection_counts(NewState, Addr, -1),
+
+            {noreply, State}
+    end;
 
 handle_info(rebalance_now, State) ->
     {noreply, rebalance_connections(State#state{rb_timeout_tref = undefined})};
@@ -362,13 +358,13 @@ rebalance_connections(State) ->
             State1 = orddict:fold(fun add_sink_conns/3, State0, AddConnections),
 
             %% reject pending connections (as to not termiante too many open valid connections)
-            %% the only reason we would have pending connection for a address which we have determined requires
-            %% some connections to be terminated, is if we rebalance soon after a rebalance
-            {State2, NewRemoveConnections} =
+            %% the only reason we would have pending connection for a address which we have determined
+            %% to be terminated, is if we rebalance soon after a rebalance
+            {State2, ConnectionsToBeTerminated} =
                 orddict:fold(fun reject_pending_connections/3, {State1, orddict:new()}, RemoveConnections),
 
             %% Remove the remainder of connections that need to shutdown gracefully
-            terminate_connections_gracefully(NewRemoveConnections, State2)
+            terminate_connections_gracefully(ConnectionsToBeTerminated, State2)
     end.
 
 

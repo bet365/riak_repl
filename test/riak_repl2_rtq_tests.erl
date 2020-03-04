@@ -60,6 +60,10 @@ accumulate(Pid, Acc, C) ->
             accumulate(Pid, Acc+Size, C-1)
     end.
 
+set_filtering_rules(Pid) ->
+    FilteringConfig = [{<<"eqc_test">>, []}],
+    gen_server:call(Pid, {filtered_buckets, update_buckets, FilteringConfig}).
+
 status_test_() ->
     {setup, fun() ->
 

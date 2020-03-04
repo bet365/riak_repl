@@ -10,7 +10,9 @@
          cluster_mgr_member_fun/1,
          cluster_mgr_all_member_fun/1,
          cluster_mgr_write_cluster_members_to_ring/2,
-         cluster_mgr_read_cluster_targets_from_ring/0]).
+         cluster_mgr_read_cluster_targets_from_ring/0,
+         cluster_mgr_read_filtered_bucket_config_from_ring/0,
+         cluster_mgr_write_filtered_bucket_config_to_ring/2]).
 
 -include("riak_core_cluster.hrl").
 -include("riak_core_connection.hrl").
@@ -299,6 +301,15 @@ cluster_mgr_read_cluster_targets_from_ring() ->
     Ring = get_ring(),
     Clusters = riak_repl_ring:get_clusters(Ring),
     [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].
+
+cluster_mgr_write_filtered_bucket_config_to_ring(ClusterName, FilteredBucketConfig) ->
+    lager:debug("Saving filtered bucket config to the ring: ~p -> ~p", [ClusterName, FilteredBucketConfig]),
+    riak_core_ring_manager:ring_trans(fun riak_repl_ring:set_filtered_bucket_config/1,
+        {ClusterName, FilteredBucketConfig}).
+
+cluster_mgr_read_filtered_bucket_config_from_ring() ->
+    Ring = get_ring(),
+    riak_repl_ring:get_filtered_bucket_config(Ring).
 
 %% Register a locator for cluster names. MUST do this BEFORE we
 %% register the save/restore functions because the restore function

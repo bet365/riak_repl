@@ -517,15 +517,26 @@ send_object(Seq2, Seq, Pid, Entry) ->
     end.
 
 
+
+get_retry_limit() ->
+    case app_helper:get_env(riak_repl, default_retry_limit) of
+        N when is_integer(N) ->
+            N;
+        _ ->
+            ?DEFAULT_RETRY_LIMIT
+    end.
+
 -ifdef(TEST).
 
 get_retry_limit(_) ->
-    app_helper:get_env(riak_repl, default_retry_limit, ?DEFAULT_RETRY_LIMIT).
+    get_retry_limit().
 
 -else.
 get_retry_limit(#state{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {retry_limit, Name}) of
-        undefined -> app_helper:get_env(riak_repl, retry_limit, ?DEFAULT_RETRY_LIMIT);
-        RetryLimit -> RetryLimit
+        RetryLimit when is_integer(RetryLimit) ->
+            RetryLimit;
+        _ ->
+            get_retry_limit()
     end.
 -endif.

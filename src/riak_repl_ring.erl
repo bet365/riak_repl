@@ -41,6 +41,17 @@
          add_nat_map/2,
          del_nat_map/2,
          get_nat_map/1,
+
+         set_filtered_bucket_config/1,
+         get_filtered_bucket_config/1,
+         get_filtered_bucket_config_for_bucket/2,
+         add_filtered_bucket/2,
+         remove_cluster_from_bucket_config/2,
+         reset_filtered_buckets/2,
+         set_bucket_filtering_state/2,
+         get_bucket_filtering_state/1,
+         remove_filtered_bucket/2,
+
          get_realtime_connection_data/0,
          overwrite_realtime_connection_data/2,
          get_active_nodes/0,
@@ -401,7 +412,9 @@ initial_config() ->
        {listeners, []},
        {sites, []},
        {realtime_cascades, always},
-       {version, ?REPL_VERSION}]
+       {version, ?REPL_VERSION},
+       {filteredbuckets, []},
+       {bucket_filtering_enabled, false}]
       ).
 
 add_list_trans(Item, ListName, Ring) ->
@@ -499,6 +512,9 @@ del_nat_map(Ring, Mapping) ->
 get_nat_map(Ring) ->
     get_list(nat_map, Ring).
 
+get_ensured_repl_config(Ring) ->
+    get_repl_config(ensure_config(Ring)).
+
 overwrite_realtime_connection_data(Ring, Dictionary) ->
     RC = get_repl_config(ensure_config(Ring)),
     RC2 = dict:store(realtime_connections, Dictionary, RC),
@@ -571,6 +587,158 @@ get_value(Key, Dictionary, Default) ->
             Default
     end.
 
+%% ========================================================================================================= %%
+%% Bucket Filtering (legacy)
+%% ========================================================================================================= %%
+% Wrapper to check whether the ring has changed after setting a new metadata item
+-spec check_metadata_has_changed(ring(), riak_repl_dict(), riak_repl_dict()) -> {ignore, {atom(), atom()}} | {new_ring, ring()}.
+check_metadata_has_changed(Ring, RC, RC2) ->
+    case RC == RC2 of
+        true ->
+            {ignore, {not_changed, filteredbuckets}};
+        false ->
+            {new_ring, riak_core_ring:update_meta(?MODULE, RC2, Ring)}
+    end.
+
+%% Overwrite current config of filtered buckets
+set_filtered_bucket_config({Ring, FilterBucketConfig}) ->
+    RC = get_ensured_repl_config(Ring),
+    RC2 = dict:store(filteredbuckets, FilterBucketConfig, RC),
+
+    check_metadata_has_changed(Ring, RC, RC2).
+
+% Get the filtered bucket config from the ring
+-spec get_filtered_bucket_config(Ring :: ring()) -> [{string(), [binary()]}].
+get_filtered_bucket_config(Ring) ->
+    get_list(filteredbuckets, Ring).
+
+%% Get the list of buckets to replicate to the cluster 'ClusterName' from the ring config
+-spec get_filtered_bucket_config_for_bucket(ring(), binary()) -> [list()] | [].
+get_filtered_bucket_config_for_bucket(Ring, BucketName) ->
+    case get_filtered_bucket_config(Ring) of
+        [] ->
+            [];
+        FilteredBucketList ->
+            case lists:keyfind(BucketName, 1, FilteredBucketList) of
+                false ->
+                    [];
+                {BucketName, FoundConfig} ->
+                    FoundConfig
+            end
+    end.
+
+%% @doc
+%% @private
+%% Replace the config on the ring metadata for the given bucket, we can be smart and only check if data has changed on
+%% replacing the existing data
+%% @end
+-spec replace_filtered_config_for_bucket(Ring :: ring(), Metadata :: dict(), BucketName :: binary(), NewConfig :: list(list())) -> ring().
+replace_filtered_config_for_bucket(Ring, MetaData, BucketName, NewConfig) ->
+    case dict:find(filteredbuckets, MetaData) of
+        {ok, Config} ->
+            case lists:keyfind(BucketName, 1, Config) of
+                {BucketName, _Config2} ->
+                    NewData = lists:keyreplace(BucketName, 1, Config, {BucketName, NewConfig}),
+                    RC2 = dict:store(filteredbuckets, NewData, MetaData),
+                    check_metadata_has_changed(Ring, MetaData, RC2);
+                false ->
+                    RC2 = dict:store(filteredbuckets, [{BucketName, NewConfig} | Config], MetaData),
+                    {new_ring, riak_core_ring:update_meta(?MODULE, RC2, Ring)}
+            end;
+        error ->
+            RC2 = dict:store(filteredbuckets, [{BucketName, NewConfig}], MetaData),
+            % We know the ring has changed as we've added a new key to the metadata, so we'll return it
+            {new_ring, riak_core_ring:update_meta(?MODULE, RC2, Ring)}
+    end.
+
+%% @doc
+%% Add a bucket filtering association to the metadata on the ring. Is stored in the ring metadata as a list of
+%% bucket -> [list of clusters]
+%% @end
+-spec add_filtered_bucket(Ring :: ring(), {ToClusterName :: list(), BucketName :: binary()}) -> ring().
+add_filtered_bucket(Ring, {ToClusterName, BucketName}) when is_list(ToClusterName) andalso is_binary(BucketName) ->
+    ClusterName = riak_core_connection:symbolic_clustername(Ring),
+    do_add_filtered_bucket(Ring, ClusterName, ToClusterName, BucketName).
+
+-spec do_add_filtered_bucket(Ring :: ring(), FromClusterName :: list(), ToClusterName :: list(), BucketName :: binary()) -> ring().
+do_add_filtered_bucket(_Ring, ClusterName, ClusterName, BucketName) ->
+    % You can't add a bucket to be replicated to yourself, so ignore if that happens
+    lager:warning("tried to add bucket ~s to be filtered to the current cluster", [BucketName]),
+    {ignore, {filteredbuckets, same_host}};
+do_add_filtered_bucket(Ring, _FromClusterName, ToClusterName, BucketName) ->
+    RC = get_ensured_repl_config(Ring),
+    RemoteClusters = get_clusters(Ring),
+
+    case lists:keyfind(ToClusterName, 1, RemoteClusters) of
+        false ->
+            {ignore, {filteredbuckets, no_such_cluster}};
+        _ ->
+            %% Get the filtered buckets we currently have
+            ClustersToReplicateTo = get_filtered_bucket_config_for_bucket(Ring, BucketName),
+
+            case lists:member(ToClusterName, ClustersToReplicateTo) of
+                true ->
+                    {ignore, {filteredbuckets, cluster_exists}};
+                false ->
+                    NewClusterConfig = [ToClusterName | ClustersToReplicateTo],
+                    replace_filtered_config_for_bucket(Ring, RC, BucketName, NewClusterConfig)
+            end
+    end.
+
+% We can enable / disable filtered replication on our side via the ring
+-spec set_bucket_filtering_state(Ring :: ring(), Enabled :: boolean()) -> ring().
+set_bucket_filtering_state(Ring, Enabled) when is_boolean(Enabled) ->
+    RC = get_ensured_repl_config(Ring),
+    RC2 = dict:store(bucket_filtering_enabled, Enabled, RC),
+    check_metadata_has_changed(Ring, RC, RC2).
+
+%% Return a boolean which tells you if bucket filtering is enabled or not
+-spec get_bucket_filtering_state(Ring :: ring()) -> [] | proplists:proplist().
+get_bucket_filtering_state(Ring) ->
+    RC = get_ensured_repl_config(Ring),
+    case dict:find(bucket_filtering_enabled, RC) of
+        {ok, V} -> V;
+        error   -> []
+    end.
+
+-spec remove_cluster_from_bucket_config(Ring :: ring(), {Cluster :: list(), Bucket :: binary()}) -> ring().
+remove_cluster_from_bucket_config(Ring, {Cluster, Bucket}) ->
+    RC = get_ensured_repl_config(Ring),
+
+    case get_filtered_bucket_config_for_bucket(Ring, Bucket) of
+        [] ->
+            {ignore, {filtered_buckets, not_changed}};
+        Config ->
+            Config2 = lists:delete(Cluster, Config),
+            case Config2 of
+                [] ->
+                    % If we deleted the only cluster in the list remove the bucket completely, or config ends up
+                    % as {BucketName, []} which isn't useful at all
+                    remove_filtered_bucket(Ring, Bucket);
+                _ ->
+                    replace_filtered_config_for_bucket(Ring, RC, Bucket, Config2)
+            end
+    end.
+
+-spec reset_filtered_buckets(Ring :: ring(), NoParams :: []) -> ring().
+reset_filtered_buckets(Ring, _) ->
+    RC = get_ensured_repl_config(Ring),
+    RC2 = dict:store(filteredbuckets, [], RC),
+    check_metadata_has_changed(Ring, RC, RC2).
+
+remove_filtered_bucket(Ring, BucketName) ->
+    RC = get_ensured_repl_config(Ring),
+    {ok, BucketConfig} = dict:find(filteredbuckets, RC),
+    case lists:keyfind(BucketName, 1, BucketConfig) of
+        false ->
+            {ignore, {filtered_buckets, not_changed}};
+        _ ->
+            BucketConfig2 = lists:keydelete(BucketName, 1, BucketConfig),
+            RC3 = dict:store(filteredbuckets, BucketConfig2, RC),
+            check_metadata_has_changed(Ring, RC, RC3)
+    end.
+%% ========================================================================================================= %%
+
 
 %% unit tests
 
@@ -584,11 +752,64 @@ ensure_config_test() ->
     ?assertNot(undefined =:= riak_core_ring:get_meta(?MODULE, Ring)),
     Ring.
 
+bucket_filtering_enable_test() ->
+    Ring = ensure_config_test(),
+    {new_ring, Ring2} = set_bucket_filtering_state(Ring, true),
+    ?assertEqual(true, get_bucket_filtering_state(Ring2)),
+    Ring2.
+
+bucket_filtering_can_disable_test() ->
+    Ring = bucket_filtering_enable_test(),
+    {new_ring, Ring2} = set_bucket_filtering_state(Ring, false),
+    ?assertEqual(false, get_bucket_filtering_state(Ring2)),
+    Ring2.
+
 set_clusterIpAddrs_test() ->
     Ring = ensure_config_test(),
     {new_ring, Ring2} = set_clusterIpAddrs(Ring, {"test_cluster", ["127.0.0.1:60036"]}),
     ?assertEqual(get_clusterIpAddrs(Ring2, "test_cluster"), ["127.0.0.1:60036"]),
     Ring2.
+
+% Check we can add a filtered bucket for a given cluster
+bucket_filtering_can_add_bucket_test() ->
+    Ring = bucket_filtering_enable_test(),
+
+    {new_ring, Ring2} = set_clusterIpAddrs(Ring, {"test_cluster", ["127.0.0.1:60036"]}),
+    ?assertEqual(get_clusterIpAddrs(Ring2, "test_cluster"), ["127.0.0.1:60036"]),
+
+    {new_ring, Ring3} = add_filtered_bucket(Ring2, {"test_cluster", <<"bkt1">>}),
+    Config = get_filtered_bucket_config_for_bucket(Ring3, <<"bkt1">>),
+
+    ?assertEqual(["test_cluster"], Config),
+    Ring3.
+
+reset_filtered_buckets_test() ->
+    Ring = bucket_filtering_can_add_bucket_test(),
+    {new_ring, Ring2} = reset_filtered_buckets(Ring, []),
+    ?assertEqual(get_filtered_bucket_config(Ring2), []),
+    ok.
+
+bucket_filtering_can_remove_bucket_test() ->
+    Ring = bucket_filtering_can_add_bucket_test(),
+    {new_ring, Ring2} = remove_filtered_bucket(Ring, <<"bkt1">>),
+    Config = get_filtered_bucket_config(Ring2),
+    ?assertEqual(false, lists:keymember(<<"bkt1">>, 1, Config)).
+
+bucket_filtering_remove_cluster_test() ->
+    % Gives us a Ring with filtered bucket data: {<<"bkt1">>, ["test_cluster"]}
+    Ring = bucket_filtering_can_add_bucket_test(),
+
+    {new_ring, Ring2} = set_clusterIpAddrs(Ring, {"test_cluster2", ["127.0.0.1:50036"]}),
+    ?assertEqual(["127.0.0.1:50036"], get_clusterIpAddrs(Ring2, "test_cluster2")),
+    ?assertEqual(["127.0.0.1:60036"], get_clusterIpAddrs(Ring2, "test_cluster")),
+
+    {new_ring, Ring3} = add_filtered_bucket(Ring2, {"test_cluster2", <<"bkt1">>}),
+
+    {new_ring, Ring4} = remove_cluster_from_bucket_config(Ring3, {"test_cluster2", <<"bkt1">>}),
+    ?assertEqual(["test_cluster"], get_filtered_bucket_config_for_bucket(Ring4, <<"bkt1">>)),
+
+    {new_ring, Ring5} = remove_cluster_from_bucket_config(Ring4, {"test_cluster", <<"bkt1">>}),
+    ?assertEqual([], get_filtered_bucket_config_for_bucket(Ring5, <<"bkt1">>)).
 
 add_get_site_test() ->
     Ring0 = ensure_config_test(),

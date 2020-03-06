@@ -43,6 +43,7 @@
 
 %% API
 -export([
+    start/1,
     start_link/1,
     stop/1,
     get_helper_pid/1,
@@ -109,6 +110,9 @@
 %% API - start trying to send realtime repl to remote site
 start_link(Remote) ->
     gen_server:start_link(?MODULE, [Remote], []).
+
+start(Remote) ->
+    gen_server:start(?MODULE, [Remote], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -253,7 +257,7 @@ handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
 
     case shutdown_check(State) of
         false ->
-            {stop, {shutdown, {Error, Reason}}, State};
+            {stop, {Error, Reason}, State};
         Shutdown ->
             Shutdown
     end;
@@ -280,7 +284,7 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
 
             case shutdown_check(State) of
                 false ->
-                    {stop, {shutdown, heartbeat_timeout}, State};
+                    {stop, {error, heartbeat_timeout}, State};
                 Shutdown ->
                     Shutdown
             end
@@ -557,7 +561,7 @@ schedule_heartbeat(State, false) ->
     State;
 schedule_heartbeat(State = #state{hb_interval_tref = undefined}, true) ->
     HBInterval = get_heartbeat_interval(State),
-    TRef = erlang:send_after(timer:seconds(HBInterval), self(), send_heartbeat),
+    TRef = erlang:send_after(HBInterval, self(), send_heartbeat),
     State#state{hb_interval_tref = TRef};
 schedule_heartbeat(State = #state{hb_interval_tref = _TRef}, true) ->
     State.

@@ -25,35 +25,26 @@
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_NO_CONNECTIONS, 400).
--define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?SERVER, self()}}).
+-define(CLIENT_SPEC, {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?SERVER, self()}}).
 -define(TCP_OPTIONS,  [{keepalive, true}, {nodelay, true}, {packet, 0}, {active, false}]).
 
 -record(state, {
     remote = undefined,                                 %% remote sink cluster name
-
-    %% current active connections
     connections_monitor_addrs = orddict:new(),          %% monitor references mapped to addr
     connections_monitor_pids = orddict:new(),           %% monitor references mapped to pid
-
-    %% connection counts
     connection_counts = orddict:new(),                  %% number of established connections per ip addr
     balanced_connection_counts = orddict:new(),         %% the balanced version of connection_counts (the ideal to hit)
-
+    connection_failed_counts = orddict:new(),            %% for stats
     number_of_connection = 0,
     number_of_pending_connects = 0,
     number_of_pending_disconnects = 0,
-    balancing = false,
+    balancing = true,
     balanced = false,
-
-    connection_failed_counts = orddict:new(), %% for stats
-
-    %% This list is constantly rotated to provide the ability to balance out connections when we cannot connect
-    %% to a node, so we use a secondary node instead
     sink_nodes = [],
     bad_sink_nodes = [],
-
     rb_timeout_tref,                                    %% rebalance timeout timer reference
     bs_timeout_tref,                                    %% bad sink timer to retry the bad sinks
+    ipl_timeout_tref,                                   %% empty ip list timer to retry the list of IPs
     reference_rtq                                       %% reference queue pid
 }).
 
@@ -105,7 +96,7 @@ init([Remote]) ->
             lager:error("undefined reference rtq for remote: ~p", [Remote]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
-            SinkNodes = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
+            {ok, SinkNodes} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
             State = #state{remote = Remote, reference_rtq = ReferenceQ, sink_nodes = SinkNodes},
             NewState = rebalance_connections(State),
             {ok, NewState}
@@ -136,58 +127,66 @@ handle_cast({connect_failed, Reason, Addr}, State) ->
     lager:warning("Realtime replication connection to site ~p; address: ~p; failed - ~p\n", [Remote, Addr, Reason]),
     {noreply, connection_failed(Addr, State)};
 
-handle_cast(maybe_rebalance, State=#state{sink_nodes = SinkNodes, bad_sink_nodes = BadSinkNodes, remote = Remote}) ->
-    NewSinkNodes = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
-    case NewSinkNodes == SinkNodes of
-        true ->
-            {noreply, State};
-        false ->
-            BadSinkNodesDown = BadSinkNodes -- NewSinkNodes,
-            NewBadSinkNodes = BadSinkNodes -- BadSinkNodesDown,
-            State0 = State#state{bad_sink_nodes = NewBadSinkNodes, sink_nodes = NewSinkNodes},
-            State1 = start_rebalance_timer(State0),
-            State2 = update_balanced_connections(State1),
-            {noreply, State2}
-    end;
+
+handle_cast(maybe_rebalance, State) ->
+    State1 = set_balanced_connections(State),
+    State2 = set_status(State1),
+    {noreply, start_rebalance_timer(State2)};
 
 handle_cast(Request, State) ->
     lager:warning("unhandled cast: ~p", [Request]),
     {noreply, State}.
 
 %%%=====================================================================================================================
-handle_info({'DOWN', MonitorRef, process, Pid, {error, sink_shutdown}}, State) ->
-    %% add to bad nodes
-    %% trigger rebalance (or just leave it and wait for the rebalance to be triggered by the ring update)
-    {noreply, State};
+handle_info({'DOWN', MonitorRef, process, _Pid, {error, sink_shutdown}}, State) ->
+    #state{bad_sink_nodes = BadSinks, connections_monitor_addrs = Addrs} = State,
+    case orddict:find(MonitorRef, Addrs) of
+        {ok, Addr} ->
+            State1 = remove_connection_monitor(MonitorRef, State),
+            State2 = decrease_connection_count(Addr, State1),
+            State3 =
+                case lists:member(Addr, BadSinks) of
+                    true ->
+                        State2;
+                    false ->
+                        set_balanced_connections(State2#state{bad_sink_nodes = [Addr|BadSinks]})
+                end,
+            State4 = set_status(State3),
+            State5 = start_rebalance_timer(State4),
+            {noreply, State5};
+        error ->
+            lager:error("could not find monitor ref in connection monitors addrs"),
+            {noreply, State}
+    end;
 
 
-handle_info({'DOWN', MonitorRef, process, Pid, {error, source_rebalance}}, State) ->
-    %% decrease number of disconnects
-    %% update balancing
-    %% do nothing else
-    {noreply, State};
+handle_info({'DOWN', MonitorRef, process, _Pid, {error, source_rebalance}}, State) ->
+    #state{connections_monitor_addrs = Addrs} = State,
+    case orddict:find(MonitorRef, Addrs) of
+        {ok, Addr} ->
+            State1 = remove_connection_monitor(MonitorRef, State),
+            State2 = decrease_connection_count(Addr, State1),
+            State3 = decrease_number_of_pending_disconnects(State2),
+            State4 = set_status(State3),
+            {noreply, State4};
+        error ->
+            lager:error("could not find monitor ref in connection monitors addrs"),
+            {noreply, State}
+    end;
 
 %% while we operate with cluster on protocol 3, we will hit here on a sink node shutdown!
 %% do we want to issue a reconnect to the node going down?
-handle_info({'DOWN', MonitorRef, process, Pid, _Reason}, State) ->
-
-    %% unexpected shutdown/ protocol 3 sink node shutting down
-    %% just trigger rebalance, the code will now place the node into bad nodes if it needs to
-
-    %% check if we lose all connections to a node, place into bad nodes!
-
-
-    %% reconnect to the same node in X seconds?
-    #state{connections_monitor_pids = ConnectionMonitorPids} = State,
-    case orddict:find(MonitorRef, ConnectionMonitorPids) of
+handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, State) ->
+    #state{connections_monitor_addrs = Addrs} = State,
+    case orddict:find(MonitorRef, Addrs) of
+        {ok, Addr} ->
+            State1 = remove_connection_monitor(MonitorRef, State),
+            State2 = decrease_connection_count(Addr, State1),
+            State3 = set_status(State2),
+            State4 = start_rebalance_timer(State3),
+            {noreply, State4};
         error ->
-            lager:error("could not find monitor ref: ~p in ConnectionMonitors (handle_info 'DOWN')", [MonitorRef]),
-            {noreply, State};
-        {ok, {Pid, Addr}} ->
-
-            NewState = State#state{connections_monitor_pids = orddict:erase(MonitorRef, ConnectionMonitorPids)},
-            update_connection_counts(NewState, Addr, -1),
-
+            lager:error("could not find monitor ref in connection monitors addrs"),
             {noreply, State}
     end;
 
@@ -195,13 +194,19 @@ handle_info(rebalance_now, State) ->
     {noreply, maybe_do_rebalance(State#state{rb_timeout_tref = undefined})};
 
 handle_info(try_bad_sink_nodes, State = #state{bad_sink_nodes = []}) ->
-    {noreply, State};
+    {noreply, State#state{bs_timeout_tref = undefined}};
 handle_info(try_bad_sink_nodes, State = #state{bad_sink_nodes = BadSinkNodes, remote = Remote}) ->
     lists:foreach(
         fun(Addr) ->
             _ = riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, [Addr]})
         end, BadSinkNodes),
     {noreply, State#state{bs_timeout_tref = undefined}};
+
+handle_info(try_get_ip_list, State) ->
+    State0 = State#state{ipl_timeout_tref = undefined},
+    State1 = set_balanced_connections(State0),
+    State2 = set_status(State1),
+    {noreply, maybe_do_rebalance(State2)};
 
 
 handle_info(Info, State) ->
@@ -228,10 +233,24 @@ code_change(_OldVsn, State, _Extra) ->
 %%%=====================================================================================================================
 
 %%%===================================================================
-%%% Internal functions
+%% Get All Status's From rtsource_conn
+%%%===================================================================
+collect_status_data(ConnectionMonitors, Timeout) ->
+    orddict:fold(
+        fun(_, Pid, Acc) ->
+            case riak_repl2_rtsource_conn:status(Pid, Timeout) of
+                [] -> Acc;
+                Status -> [Status | Acc]
+            end
+        end, [], ConnectionMonitors).
+
+%%%===================================================================
+%%% Start Timers
 %%%===================================================================
 
-start_rebalance_timer(State = #state{rb_timeout_tref = undefined}) ->
+%% ensure that the iplist timeout ref is undefined as well
+%% if it is not undefined, it means we have no ip's in the list and are in a loop to get a non-empty list
+start_rebalance_timer(State = #state{ipl_timeout_tref = undefined, rb_timeout_tref = undefined}) ->
     MaxDelaySecs = app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 60),
     TimeDelay =  10000 + round(MaxDelaySecs * crypto:rand_uniform(0, 1000)),
     RbTimeoutTref = erlang:send_after(TimeDelay, self(), rebalance_now),
@@ -240,6 +259,8 @@ start_rebalance_timer(State) ->
     State.
 
 
+start_bad_sink_timer(State = #state{bad_sink_nodes = []}) ->
+    State;
 start_bad_sink_timer(State = #state{bs_timeout_tref = undefined}) ->
     TimeDelay = app_helper:get_env(riak_repl, rt_retry_bad_sinks, 120) * 1000,
     BsTimeoutTref = erlang:send_after(TimeDelay, self(), try_bad_sink_nodes),
@@ -247,27 +268,33 @@ start_bad_sink_timer(State = #state{bs_timeout_tref = undefined}) ->
 start_bad_sink_timer(State) ->
     State.
 
-%%%=====================================================================================================================
+start_empty_ip_list_timer(State = #state{ipl_timeout_tref = undefined}) ->
+    IPLTimeoutTref = erlang:send_after(5000, self(), try_get_ip_list),
+    State#state{ipl_timeout_tref = IPLTimeoutTref};
+start_empty_ip_list_timer(State) ->
+    State.
+
+%%%===================================================================
 %% Connection Failed
-%%%=====================================================================================================================
+%%%===================================================================
 connection_failed(Addr, State = #state{connection_failed_counts = Dict, bad_sink_nodes = BadSinkNodes}) ->
     case lists:member(Addr, BadSinkNodes) of
         false ->
             NewDict = orddict:update_counter(Addr, 1, Dict),
-            State1 = update_number_of_pending_connections(State#state{connection_failed_counts = NewDict}),
-            State2 = update_balanced_status(State1),
-            update_bad_sink_nodes(State2);
+            State1 = decrease_number_of_pending_connects(State#state{connection_failed_counts = NewDict}),
+            State2 = set_status(State1),
+            set_bad_sink_nodes(State2);
         true ->
             start_bad_sink_timer(State)
     end.
 
-%%%=====================================================================================================================
+%%%===================================================================
 %% Accept Connection
-%%%=====================================================================================================================
+%%%===================================================================
 accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
     #state{remote = Remote} = State,
-    {BadSinkReconnect, State0} = reset_bad_sink_node(IPPort, State),
-    case riak_repl2_rtsource_conn:start_link(Remote) of
+    {BadSinkReconnect, State0} = maybe_reset_bad_sink_node(IPPort, State),
+    case riak_repl2_rtsource_conn:start(Remote) of
         {ok, RtSourcePid} ->
             Ref = erlang:monitor(process, RtSourcePid),
             case riak_repl2_rtsource_conn:connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, Props) of
@@ -285,134 +312,48 @@ accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
             {reply, ER, State}
     end.
 
-update_state_for_new_connection(false, Ref, RtSourcePid, IPPort, State) ->
-    State1 = update_connections_monitors(State, Ref, RtSourcePid, IPPort),
-    State2 = update_connection_counts(State1, IPPort),
-    State3 = update_number_of_pending_connections(State2),
-    State4 = update_balanced_status(State3),
-    update_bad_sink_nodes(State4);
+update_state_for_new_connection(false, Ref, RtSourcePid, Addr, State) ->
+    State1 = add_connection_monitor(State, Ref, RtSourcePid, Addr),
+    State2 = increase_connection_count(Addr, State1),
+    State3 = decrease_number_of_pending_connects(State2),
+    State4 = set_status(State3),
+    set_bad_sink_nodes(State4);
 update_state_for_new_connection(true, Ref, RtSourcePid, IPPort, State) ->
-    State1 = update_connections_monitors(State, Ref, RtSourcePid, IPPort),
-    update_connection_counts(State1, IPPort).
-
-%%%=====================================================================================================================
-%% Update Connection States
-%%%=====================================================================================================================
-update_connections_monitors(State, Ref, Pid, Addr) ->
-    #state{connections_monitor_pids = Pids, connections_monitor_addrs = Addrs} = State,
-    State#state
-    {
-        connections_monitor_addrs = orddict:store(Ref, Addr, Addrs),
-        connections_monitor_pids = orddict:store(Ref, Pid, Pids)
-    }.
-
-update_connection_counts(Addr, State) ->
-    update_connection_counts(Addr, 1, State).
-update_connection_counts(Addr, Diff, State) ->
-    #state{connection_counts = ConnectionCounts} = State,
-    State#state{connection_counts = orddict:update_counter(Addr, Diff, ConnectionCounts)}.
-
-update_number_of_pending_connections(State = #state{number_of_pending_connects = N}) ->
-    X = N -1,
-    Balancing = X == 0,
-    State#state{number_of_pending_connects = X, balancing = Balancing}.
-
-update_balanced_status(State = #state{connection_counts = A, balanced_connection_counts = B}) ->
-    State#state{balanced = A == B}.
-
-update_balanced_connections(State) ->
-    #state{remote = Remote, bad_sink_nodes = BadSinks} = State,
-    TotalNumberOfConnections = get_number_of_connections(Remote),
-    case riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote) -- BadSinks of
-        {ok, []} ->
-            [];
-        {ok, SinkNodes} ->
-            NumberOfSinkNodes = length(SinkNodes),
-            TotalExtraConnections = TotalNumberOfConnections rem NumberOfSinkNodes,
-            AverageNumberOfConnections = (TotalNumberOfConnections - TotalExtraConnections) div NumberOfSinkNodes,
-
-            {BalancedConnectionCounts, _} =
-                lists:foldl(
-                    fun(Addr, {Acc, Counter}) ->
-                        case Counter =< TotalExtraConnections of
-                            true ->
-                                {orddict:store(Addr, AverageNumberOfConnections +1, Acc), Counter +1};
-                            false ->
-                                {orddict:store(Addr, AverageNumberOfConnections, Acc), Counter +1}
-                        end
-                    end, {orddict:new(), 1}, SinkNodes),
-            State#state{balanced_connection_counts = BalancedConnectionCounts}
-    end.
-
-update_bad_sink_nodes(State = #state{balancing = true}) ->
-    State;
-update_bad_sink_nodes(State = #state{connection_failed_counts = []}) ->
-    State;
-update_bad_sink_nodes(State = #state{connection_counts = Conns}) ->
-    case orddict:fold(fun find_no_sink_connections/3, [], Conns) of
-        [] ->
-            State#state{connection_failed_counts = orddict:new()};
-        BadSinks ->
-            State1 = State#state{bad_sink_nodes = BadSinks, connection_failed_counts = orddict:new()},
-            State2 = update_balanced_connections(State1),
-            State3 = update_balanced_status(State2),
-            State4 = start_rebalance_timer(State3),
-            start_bad_sink_timer(State4)
-    end.
-
-find_no_sink_connections(Addr, 0, Acc) ->
-    [Addr | Acc];
-find_no_sink_connections(_, _, Acc) ->
-    Acc.
+    State1 = add_connection_monitor(State, Ref, RtSourcePid, IPPort),
+    increase_connection_count(State1, IPPort).
 
 
-reset_bad_sink_node({Addr, _}, State = #state{bad_sink_nodes = BadSinkNodes}) ->
-    case lists:delete(Addr, BadSinkNodes) of
-        BadSinkNodes ->
-            {false, State};
-        NewBadSinkNodes ->
-            State1 = State#state{bad_sink_nodes = NewBadSinkNodes},
-            State2 = update_balanced_connections(State1),
-            State3 = update_balanced_status(State2),
-            {true, start_rebalance_timer(State3)}
-    end.
-
-
-%%%=====================================================================================================================
-%% Maybe Rebalance
-%%%=====================================================================================================================
-
-%% we are balanced, we do not require rebalancing
-maybe_do_rebalance(State = #state{balanced = true}) ->
-    State;
-
-%% we have hit here, but we are in the middle of the previous rebalance -> so reschedule
-maybe_do_rebalance(State = #state{balancing = true}) ->
-    start_rebalance_timer(State);
+%%%===================================================================
+%% Maybe Do The Rebalance (if we are balanced/ balancing, do not do the rebalance!)
+%%%===================================================================
+maybe_do_rebalance(State = #state{ipl_timeout_tref = undefined, balancing = false, balanced = false}) ->
+    rebalance_connections(State);
 
 maybe_do_rebalance(State) ->
-    rebalance_connections(State).
+    State.
 
-%%%=====================================================================================================================
+%%%===================================================================
 %% Rebalance Connections
-%%%=====================================================================================================================
+%%%===================================================================
 rebalance_connections(State) ->
     case should_add_connections(State) of
         {true, Add} ->
-            NewState = start_rebalance_timer(State),
-            add_connections(Add, NewState#state{balancing = true});
+            State1 = start_rebalance_timer(State),
+            add_connections(Add, State1);
         false ->
             case should_remove_connections(State) of
                 {true, Remove} ->
-                    remove_connections(Remove, State#state{balancing = true});
+                    remove_connections(Remove, State);
                 false ->
-                    State#state{balancing = false, balanced = true}
+                    %% If we we have this function we shouldn't get into this state
+                    %% as we perform check to see if we require the rebalance before we hit here
+                    set_status(State)
             end
     end.
 
-%%%=====================================================================================================================
+%%%===================================================================
 %% Calculate Connections To Add
-%%%=====================================================================================================================
+%%%===================================================================
 should_add_connections(State) ->
     #state{connection_counts = ConnectionCounts, balanced_connection_counts = BalancedConnectionCounts} = State,
     case BalancedConnectionCounts of
@@ -440,9 +381,9 @@ should_add_connections(State) ->
             end
     end.
 
-%%%=====================================================================================================================
+%%%===================================================================
 %% Calculate Connections To Remove
-%%%=====================================================================================================================
+%%%===================================================================
 should_remove_connections(State) ->
     #state{
         connection_counts = ConnectionCounts,
@@ -477,42 +418,46 @@ should_remove_connections(State) ->
 
 
 
-
+%%%===================================================================
+%% Remove Connections Gracefully
+%%%===================================================================
 %% terminate connections gracefully (use lists:keytake(Addr, 2, Dict))
 remove_connections(RemoveDict, State = #state{connections_monitor_addrs = Addrs}) ->
-    {NewState, _} = orddict:fold(fun remove_connection/3, {State, RemoveDict}, Addrs),
-    NewState.
+    {State1, _} = orddict:fold(fun remove_connection/3, {State, RemoveDict}, Addrs),
+    State2 = set_balanced_status(State1),
+    set_balancing_status(State2).
 
 remove_connection(_Ref, _Addr, {State, []}) ->
     {State, []};
 remove_connection(Ref, Addr, {State, RemoveDict}) ->
-    #state{connections_monitor_pids = Pids, number_of_pending_disconnects = N} = State,
-
+    #state{connections_monitor_pids = Pids} = State,
     case orddict:find(Addr, RemoveDict) of
         false ->
             {State, RemoveDict};
         {ok, Count} ->
             Pid = orddict:fetch(Ref, Pids),
             riak_repl2_rtsource_conn:graceful_shutdown(Pid, source_rebalance),
-            NewState = State#state{number_of_pending_disconnects = N +1},
+            State1 = increase_number_of_pending_disconnects(State),
             case Count -1 of
                 0 ->
                     NewRemoveDict = orddict:erase(Addr, RemoveDict),
-                    {NewState, NewRemoveDict};
+                    {State1, NewRemoveDict};
                 NewCount ->
                     NewRemoveDict = orddict:store(Addr, NewCount, RemoveDict),
-                    {NewState, NewRemoveDict}
+                    {State1, NewRemoveDict}
             end
 
     end.
 
 
 
-%%%=====================================================================================================================
+%%%===================================================================
 %% Add Connections
-%%%=====================================================================================================================
+%%%===================================================================
 add_connections(AddConnectionDict, State) ->
-    orddict:fold(fun add_sink_conns/3, State, AddConnectionDict).
+    State1 = orddict:fold(fun add_sink_conns/3, State, AddConnectionDict),
+    State2 = set_balancing_status(State1),
+    set_balanced_status(State2).
 
 add_sink_conns(Addr, N, State) ->
     connect_to_sink_n_times(Addr, N, State).
@@ -524,33 +469,216 @@ connect_to_sink_n_times(Addr, N, State) ->
     connect_to_sink_n_times(Addr, N-1, connect_to_sink(Addr, State)).
 
 connect_to_sink(Addr, State) ->
-    #state{number_of_pending_connects = N, remote = Remote} = State,
+    #state{remote = Remote} = State,
     case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, [Addr]}) of
         {ok, _Ref} ->
-            State#state{number_of_pending_connects = N +1};
+            increase_number_of_pending_connects(State);
         _->
             State
     end.
-%%%=====================================================================================================================
 
-collect_status_data(ConnectionMonitors, Timeout) ->
-    orddict:fold(
-        fun(_, Pid, Acc) ->
-            case riak_repl2_rtsource_conn:status(Pid, Timeout) of
-                [] -> Acc;
-                Status -> [Status | Acc]
-            end
-        end, [], ConnectionMonitors).
-
+%%%===================================================================
+%% Get the number of connections for our remote
+%%%===================================================================
+get_number_of_connections() ->
+    case app_helper:get_env(riak_repl, default_number_of_connections) of
+        N when is_integer(N) ->
+            N;
+        _ ->
+            ?DEFAULT_NO_CONNECTIONS
+    end.
 -ifdef(TEST).
 get_number_of_connections(_) ->
-    app_helper:get_env(riak_repl, default_number_of_connections, ?DEFAULT_NO_CONNECTIONS).
-
+    get_number_of_connections().
 -else.
-
 get_number_of_connections(Name) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections, Name}) of
-        undefined -> app_helper:get_env(riak_repl, default_number_of_connections, ?DEFAULT_NO_CONNECTIONS);
-        NumberOfConnections -> NumberOfConnections
+        N when is_integer(N) ->
+            N;
+        _ ->
+            get_number_of_connections()
     end.
 -endif.
+%%%===================================================================================================================%%
+%%                                              Update State                                                          %%
+%%%===================================================================================================================%%
+
+%%%===================================================================
+%% Update Bad Sink Nodes
+%%%===================================================================
+%% This is used to check if we have any connections to a sink node after we have completed a rebalance
+%% If we do not, we determine that we are unable to connect to the node and set it as a 'bad' node.
+%% This allows us to rebalance to the remaining 'good' nodes, while we periodically attempt to reconnect to the 'bad'
+%% nodes.
+set_bad_sink_nodes(State = #state{balancing = true}) ->
+    State;
+set_bad_sink_nodes(State = #state{connection_failed_counts = []}) ->
+    State;
+set_bad_sink_nodes(State = #state{connection_counts = Conns}) ->
+    case orddict:fold(fun find_no_sink_connections/3, [], Conns) of
+        [] ->
+            State#state{connection_failed_counts = orddict:new()};
+        BadSinks ->
+            State1 = State#state{bad_sink_nodes = BadSinks, connection_failed_counts = orddict:new()},
+            State2 = set_balanced_connections(State1),
+            State3 = set_status(State2),
+            State4 = start_rebalance_timer(State3),
+            start_bad_sink_timer(State4)
+    end.
+
+find_no_sink_connections(Addr, 0, Acc) ->
+    [Addr | Acc];
+find_no_sink_connections(_, _, Acc) ->
+    Acc.
+
+%%%===================================================================
+%% Reset Bad Sink Nodes
+%%%===================================================================
+%% This is called everytime we accept a connection
+%% If we accept a connection, and its in the list of bad sink nodes, we should reset that node back to being a 'good'
+%% node and fire off a rebalance
+maybe_reset_bad_sink_node(Addr, State = #state{bad_sink_nodes = BadSinkNodes}) ->
+    case lists:delete(Addr, BadSinkNodes) of
+        BadSinkNodes ->
+            {false, State};
+        NewBadSinkNodes ->
+            State1 = State#state{bad_sink_nodes = NewBadSinkNodes},
+            State2 = set_balanced_connections(State1),
+            State3 = set_status(State2),
+            {true, start_rebalance_timer(State3)}
+    end.
+
+%%%===================================================================
+%% Add Connection Monitor
+%%%===================================================================
+add_connection_monitor(State, Ref, Pid, Addr) ->
+    #state{connections_monitor_pids = Pids, connections_monitor_addrs = Addrs} = State,
+    State#state
+    {
+        connections_monitor_addrs = orddict:store(Ref, Addr, Addrs),
+        connections_monitor_pids = orddict:store(Ref, Pid, Pids)
+    }.
+
+%%%===================================================================
+%% Remove Connection Monitor
+%%%===================================================================
+remove_connection_monitor(Ref, State) ->
+    #state{connections_monitor_pids = Pids, connections_monitor_addrs = Addrs} = State,
+    State#state
+    {
+        connections_monitor_addrs = orddict:erase(Ref, Addrs),
+        connections_monitor_pids = orddict:erase(Ref, Pids)
+    }.
+
+
+%%===================================================================
+%% Increase The Connection Count For An Addresss
+%%%===================================================================
+%% increases the connection count for a given address
+increase_connection_count(Addr, State) ->
+    #state{connection_counts = ConnectionCounts} = State,
+    State#state{connection_counts = orddict:update_counter(Addr, 1, ConnectionCounts)}.
+
+%%===================================================================
+%% Decrease The Connection Count For An Addresss
+%%%===================================================================
+%% decreases the connection count for a given address
+decrease_connection_count(Addr, State) ->
+    #state{connection_counts = ConnectionCounts} = State,
+    State#state{connection_counts = orddict:update_counter(Addr, -1, ConnectionCounts)}.
+
+
+%%%===================================================================
+%% Increase Number Of Pending Disconnects
+%%%===================================================================
+%% This function increases the number of pending disconnects
+increase_number_of_pending_disconnects(State = #state{number_of_pending_disconnects = N}) ->
+    State#state{number_of_pending_disconnects = N +1}.
+
+%%%===================================================================
+%% Decrease Number Of Pending Disconnects
+%%%===================================================================
+%% This function decreases the number of pending disconnects
+decrease_number_of_pending_disconnects(State = #state{number_of_pending_disconnects = N}) ->
+    State#state{number_of_pending_disconnects = N -1}.
+
+
+%%%===================================================================
+%% Increase Number Of Pending Connections
+%%%===================================================================
+%% This function increases the number of pending connects
+increase_number_of_pending_connects(State = #state{number_of_pending_connects = N}) ->
+    State#state{number_of_pending_connects = N +1}.
+
+%%%===================================================================
+%% Decrease Number Of Pending Connections
+%%%===================================================================
+%% This function decreases the number of pending connects
+decrease_number_of_pending_connects(State = #state{number_of_pending_connects = N}) ->
+    State#state{number_of_pending_connects = N -1}.
+
+
+
+%%%===================================================================
+%% Set Status's
+%%%===================================================================
+set_status(State) ->
+    State1 = set_balanced_status(State),
+    set_balancing_status(State1).
+
+%%%===================================================================
+%% Set Balanced Status
+%%%===================================================================
+%% This function checks if the number of connections we have is the same as the number of connections we should have
+%% (that is determined by the balanced_connections_counts saved in state)
+%% We save that to state, to allow us to skip rebalancing in scenario's when its not needed
+set_balanced_status(State = #state{connection_counts = A, balanced_connection_counts = B}) ->
+    State#state{balanced = A == B}.
+
+%%%===================================================================
+%% Set Balancing Status
+%%%===================================================================
+%% This function takes the values of the pending number of disconnects/ connects, if they are both not 0, we set this
+%% to true
+set_balancing_status(State = #state{number_of_pending_connects = 0, number_of_pending_disconnects = 0}) ->
+    State#state{balancing = false};
+set_balancing_status(State) ->
+    State#state{balancing = true}.
+
+%%%===================================================================
+%% Set Balanced Connections
+%%%===================================================================
+%% This grabs the list of sink nodes from the cluster_mgr (in a specific order for our own node)
+%% We then use this list in combination with the config for the number of connections to have for this remote
+%% to build and list of {Addr, Count} which tells us how many times to connect to a given node
+set_balanced_connections(State) ->
+    #state{remote = Remote, bad_sink_nodes = BadSinkNodes} = State,
+    TotalNumberOfConnections = get_number_of_connections(Remote),
+    case riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote) of
+        {ok, []} ->
+            start_empty_ip_list_timer(State);
+        {ok, SinkNodes0} ->
+            BadSinkNodesDown = BadSinkNodes -- SinkNodes0,
+            NewBadSinkNodes = BadSinkNodes -- BadSinkNodesDown,
+            SinkNodes = SinkNodes0 -- NewBadSinkNodes,
+            NumberOfSinkNodes = length(SinkNodes),
+            TotalExtraConnections = TotalNumberOfConnections rem NumberOfSinkNodes,
+            AverageNumberOfConnections = (TotalNumberOfConnections - TotalExtraConnections) div NumberOfSinkNodes,
+
+            {BalancedConnectionCounts, _} =
+                lists:foldl(
+                    fun(Addr, {Acc, Counter}) ->
+                        case Counter =< TotalExtraConnections of
+                            true ->
+                                {orddict:store(Addr, AverageNumberOfConnections +1, Acc), Counter +1};
+                            false ->
+                                {orddict:store(Addr, AverageNumberOfConnections, Acc), Counter +1}
+                        end
+                    end, {orddict:new(), 1}, SinkNodes),
+            State#state
+            {
+                balanced_connection_counts = BalancedConnectionCounts,
+                sink_nodes = SinkNodes,
+                bad_sink_nodes = NewBadSinkNodes
+            }
+    end.

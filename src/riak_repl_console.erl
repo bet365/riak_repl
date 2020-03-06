@@ -1151,7 +1151,7 @@ set_rtq_consumer_max_bytes(MaxBytes, Remote) ->
                 false ->
                     ?LOG_USER_CMD("Failed to set consumer max bytes, as Remote: ~p does not exist", [Remote]);
                 true ->
-                    riak_core_metadata:put(?RIAK_REPL2_RTQ_CONFIG_KEY, {consumer_max_bytes, Remote}, IMaxBytes),
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Remote}, IMaxBytes),
                     ?LOG_USER_CMD("Succeded to set consumer max bytes. Consumer: ~p, Max Bytes: ~p", [Remote, MaxBytes])
             end
 
@@ -1162,7 +1162,7 @@ set_rtq_max_bytes(MaxBytes) ->
         error ->
             ?LOG_USER_CMD("Failed to set queue max bytes: ~p, as it is not an integer", [MaxBytes]);
         IMaxBytes ->
-            riak_core_metadata:put(?RIAK_REPL2_RTQ_CONFIG_KEY, queue_max_bytes, IMaxBytes),
+            riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes, IMaxBytes),
             ?LOG_USER_CMD("Succeded to set queue max bytes. Max Bytes: ~p", [MaxBytes])
     end.
 

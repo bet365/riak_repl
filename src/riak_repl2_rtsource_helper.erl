@@ -125,7 +125,7 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
             %% unblock the rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
             %% send rtsource_conn message to know to expect the seq number
-            object_sent ! RtsourceConnPid,
+            RtsourceConnPid ! object_sent,
             %% send object to sink
             {noreply, encode_and_send(QEntry2, Remote, Transport, Socket, State)};
         3 ->

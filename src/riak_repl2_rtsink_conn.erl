@@ -132,8 +132,8 @@ init([OkProto, Remote]) ->
 
     WriteDataFunction =
         case CommonMajor of
-            4 -> do_write_objects_v4;
-            _ -> do_write_objects_v3
+            4 -> fun do_write_objects_v4/2;
+            _ -> fun do_write_objects_v3/2
         end,
 
     State =

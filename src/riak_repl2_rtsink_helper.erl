@@ -52,8 +52,8 @@ handle_cast({write_objects, BinObjs, DoneFun, Ver}, State) ->
     do_write_objects_v3(BinObjs, DoneFun, Ver),
     {noreply, State};
 
-handle_cast({write_objects_v4, BinObjs, RtSinkPid, Ref, Ver}, State) ->
-    do_write_objects_v4(BinObjs, RtSinkPid, Ref, Ver),
+handle_cast({write_objects_v4, BinObjs, Meta, AckPid, Ver}, State) ->
+    do_write_objects_v4(BinObjs, Meta, AckPid, Ver),
     {noreply, State};
 
 handle_cast({unmonitor, Ref}, State) ->
@@ -83,16 +83,16 @@ do_write_objects_v3(BinObjs, DoneFun, WireVersion) ->
 
 
 
-do_write_objects_v4(BinObjs, Meta1, AckPid, WireVersion) ->
+do_write_objects_v4(BinObjs, Meta, AckPid, WireVersion) ->
     Objects = riak_repl_util:from_wire(WireVersion, BinObjs),
-    Meta2 = orddict:erase(skip_count, Meta1),
+    NewMeta = orddict:erase(skip_count, Meta),
     {Objects2, _} =
         lists:foldl(
             fun(Obj, {Acc, OrginalMeta}) ->
                 Rules = riak_repl2_object_filter:get_realtime_blacklist(Obj),
-                Meta1 = orddict:store(?BT_META_BLACKLIST, Rules, OrginalMeta),
-                {[{Obj, Meta1} | Acc], OrginalMeta}
-            end, {[], Meta2}, Objects),
+                UpdMeta = orddict:store(?BT_META_BLACKLIST, Rules, OrginalMeta),
+                {[{Obj, UpdMeta} | Acc], OrginalMeta}
+            end, {[], NewMeta}, Objects),
     Retries = app_helper:get_env(riak_repl, rtsink_retry_limit, 3),
     do_repl_put(Objects2, AckPid, Retries).
 

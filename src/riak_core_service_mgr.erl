@@ -165,7 +165,7 @@ get_stats() ->
 stop() ->
     gen_server:call(?SERVER, stop).
 
--spec stop() -> 'ok'.
+-spec stop_dispatcher() -> 'ok'.
 stop_dispatcher() ->
     gen_server:call(?SERVER, stop_dispatcher).
 

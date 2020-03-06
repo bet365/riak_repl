@@ -193,7 +193,7 @@ maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
         {ok, Ref} ->
             case orddict:find(Ref, Consumers) of
                 %% consumer does not have an object (we can just remove it, nothing to retry)
-                {ok, Consumer = #consumer{seq = undefined, qseq = undefined, cseq = undefined}} ->
+                {ok, #consumer{seq = undefined, qseq = undefined, cseq = undefined}} ->
                     NewConsumerMonitors = orddict:erase(MonitorRef, ConsumerMonitors),
                     NewConsumers = orddict:erase(Ref, Consumers),
                     State#state{consumer_monitors = NewConsumerMonitors, consumers = NewConsumers};
@@ -211,6 +211,7 @@ maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
                             State2 = insert_object_to_queue(QSeq, RetryCounter, State1),
                             maybe_pull(State2#state{status = retry});
                         false ->
+                            lager:error("here 4"),
                             %% ack the rtq
                             %% TODO: make a drop function to report the drop in the logs (log out bucket, key)
                             riak_repl2_rtq:ack(Name, QSeq),
@@ -235,11 +236,11 @@ maybe_retry(_MonitorRef, _Pid, State = #state{shuting_down = true}) ->
     State.
 
 
-insert_object_to_queue(Seq, RetryCounter, State = #state{retry_queue = RetrtyQ}) ->
-    #queue{end_seq = EndSeq, table = Tab} = RetrtyQ,
+insert_object_to_queue(Seq, RetryCounter, State = #state{retry_queue = RetryQ}) ->
+    #queue{end_seq = EndSeq, table = Tab} = RetryQ,
     EndSeq2 = EndSeq +1,
     ets:insert(Tab, {EndSeq2, {Seq, RetryCounter}}),
-    State#state{retry_queue = RetrtyQ#queue{end_seq = EndSeq2}}.
+    State#state{retry_queue = RetryQ#queue{end_seq = EndSeq2}}.
 
 insert_object_to_queue(QSeq, State = #state{reference_queue = RefQ}) ->
     #queue{end_seq = EndSeq, table = Tab} = RefQ,
@@ -255,7 +256,7 @@ get_retry_counter(#consumer{seq = Seq}, State) ->
             0;
         retry ->
             #queue{table = Tab} = RetryQ,
-            case ets:lookup(Seq, Tab) of
+            case ets:lookup(Tab, Seq) of
                 [] ->
                     0;
                 [{Seq, {_QSeq, RetryCounter}}] ->
@@ -457,6 +458,11 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{stat
         shutting_down ->
             maybe_deliver_object(Seq2, QEntry, State#state{consumer_fifo = NewFIFO});
 
+        {error, badmatch, Error} ->
+            lager:error("REFERENCE! error badmatch on sequence number: ~p", [Error]),
+            lager:error("State:~p", [State]),
+            State;
+
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
@@ -495,11 +501,16 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{stat
         shutting_down ->
             maybe_deliver_object(Seq2, QEntry, NewState#state{consumer_fifo = NewFIFO});
 
+        {error, badmatch, Error} ->
+            lager:error("RETRY! error badmatch on sequence number: ~p", [Error]),
+            lager:error("State:~p", [State]),
+            NewState;
+
         {error, Type, Error} ->
             lager:warning("Failed to send object to rtsource helper pid: ~p", [Pid]),
             lager:error("Reference Queue Error: Type: ~p, Error: ~p", [Type, Error]),
             exit(Pid, shutdown),
-            maybe_deliver_object(Seq2, QEntry, NewState#state{consumer_fifo = NewFIFO})
+            maybe_deliver_object(Seq2, QEntry, State#state{consumer_fifo = NewFIFO})
     end.
 
 send_object(Seq2, Seq, Pid, Entry) ->
@@ -509,6 +520,8 @@ send_object(Seq2, Seq, Pid, Entry) ->
         case riak_repl2_rtsource_helper:send_object(Pid, Entry) of
             bucket_type_not_supported_by_remote ->
                 bucket_type_not_supported_by_remote;
+            shutting_down ->
+                shutting_down;
             {ok, CSeq} ->
                 {ok, CSeq}
         end

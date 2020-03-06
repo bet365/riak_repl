@@ -21,11 +21,13 @@
 
 -export
 ([
-  start_link/2,
-  stop/1,
-  set_socket/3,
-  status/1, status/2,
-  get_peername/1
+    start_link/2,
+    stop/1,
+    set_socket/3,
+    status/1,
+    status/2,
+    get_peername/1,
+    send_shutdown/1
 ]).
 
 %% Export for intercept use in testing
@@ -115,6 +117,9 @@ status(Pid, Timeout) ->
 get_peername(Pid) ->
   gen_server:call(Pid, get_peername).
 
+send_shutdown(Pid) ->
+    gen_server:cast(Pid, send_shutdown).
+
 %% ================================================================================================================== %%
 %% gen_server callbacks
 %% ================================================================================================================== %%
@@ -179,6 +184,18 @@ handle_cast(retrying, State = #state{expected_seq_v4 = Seq}) ->
     #state{transport = T, socket = S} = State,
     TcpIOL = riak_repl2_rtframe:encode(retrying, Seq),
     T:send(S, TcpIOL),
+    {noreply, State};
+
+%% protocol 4, send node shutdown message to source so they can handle it gracefully
+handle_cast(send_shutdown, State = #state{proto = Proto, transport = T, socket = S}) ->
+    {_, {CommonMajor, _}, {CommonMajor, _}} = Proto,
+    case CommonMajor >= 4 of
+        true ->
+            TcpIOL = riak_repl2_rtframe:encode(node_shutdown, undefined),
+            T:send(S, TcpIOL);
+        false ->
+            ok
+    end,
     {noreply, State};
 
 

@@ -211,7 +211,6 @@ maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
                             State2 = insert_object_to_queue(QSeq, RetryCounter, State1),
                             maybe_pull(State2#state{status = retry});
                         false ->
-                            lager:error("here 4"),
                             %% ack the rtq
                             %% TODO: make a drop function to report the drop in the logs (log out bucket, key)
                             riak_repl2_rtq:ack(Name, QSeq),

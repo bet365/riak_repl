@@ -127,10 +127,11 @@ do_repl_put({Object, Meta}) ->
     case repl_helper_recv(Object) of
         ok ->
             ReqId = erlang:phash2({self(), os:timestamp()}),
-            Opts = [asis, disable_hooks, {update_last_modified, false}],
-            {ok, PutPid} = riak_kv_put_fsm:start_link(ReqId, Object, all, all, ?REPL_FSM_TIMEOUT, self(), Opts),
+            %% {w, W}, {dw, DW} -> do not set these, use the bucket props
+            Opts = [{timeout, ?REPL_FSM_TIMEOUT}, asis, disable_hooks, {update_last_modified, false}],
+            From = {raw, ReqId, self()},
+            {ok, PutPid} = riak_kv_put_fsm:start(From, Object, Opts),
             MRef = erlang:monitor(process, PutPid),
-
             %% block waiting for response
             case wait_for_response(ReqId, "put") of
                 ok ->

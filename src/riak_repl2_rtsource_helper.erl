@@ -10,7 +10,7 @@
 %% API
 -export(
 [
-    start_link/6,
+    start_link/7,
     stop/1,
     status/1,
     status/2,
@@ -27,19 +27,22 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
     terminate/2, code_change/3]).
 
--record(state, {remote,     % remote site name
-                transport,  % erlang module to use for transport
-                socket,     % socket to pass to transport
-                proto,      % protocol version negotiated
-                sent_seq = 0,   % last sequence sent
-                objects = 0, % number of objects sent - really number of pulls as could be multiobj
-                ref,
-                rtsource_conn_pid,
-                shutting_down = false
+-record(state,
+{
+    id,
+    remote,     % remote site name
+    transport,  % erlang module to use for transport
+    socket,     % socket to pass to transport
+    proto,      % protocol version negotiated
+    sent_seq = 0,   % last sequence sent
+    objects = 0, % number of objects sent - really number of pulls as could be multiobj
+    ref,
+    rtsource_conn_pid,
+    shutting_down = false
 }).
 
-start_link(Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid) ->
-    gen_server:start_link(?MODULE, [Remote, Transport, Socket, Version, RTQRef, RtsourceConnPid], []).
+start_link(Remote, Id, Transport, Socket, Version, RTQRef, RtsourceConnPid) ->
+    gen_server:start_link(?MODULE, [Remote, Id, Transport, Socket, Version, RTQRef, RtsourceConnPid], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -62,10 +65,10 @@ shutting_down(Pid) ->
     gen_server:call(Pid, shutting_down, infinity).
 
 
-init([Remote, Transport, Socket, Version, Ref, RtsourceConnPid]) ->
-    State = #state{remote = Remote, transport = Transport, proto = Version,
+init([Remote, Id, Transport, Socket, Version, Ref, RtsourceConnPid]) ->
+    State = #state{id = Id, remote = Remote, transport = Transport, proto = Version,
         socket = Socket, ref = Ref, rtsource_conn_pid = RtsourceConnPid},
-    riak_repl2_reference_rtq:register(Remote, Ref),
+    riak_repl2_reference_rtq:register(Remote, Id, Ref),
     {ok, State}.
 
 handle_call({send_object, Entry}, From,

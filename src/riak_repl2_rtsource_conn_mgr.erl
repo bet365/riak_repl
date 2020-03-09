@@ -3,7 +3,7 @@
 -include("riak_repl.hrl").
 
 %% API
--export([start_link/1]).
+-export([start_link/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -29,6 +29,7 @@
 -define(TCP_OPTIONS,  [{keepalive, true}, {nodelay, true}, {packet, 0}, {active, false}]).
 
 -record(state, {
+    id = undefined,
     remote = undefined,                                 %% remote sink cluster name
     connections_monitor_addrs = orddict:new(),          %% monitor references mapped to addr
     connections_monitor_pids = orddict:new(),           %% monitor references mapped to pid
@@ -52,8 +53,8 @@
 %%% API
 %%%===================================================================
 
-start_link(Remote) ->
-    gen_server:start_link(?MODULE, [Remote], []).
+start_link(RemoteName, Id) ->
+    gen_server:start_link(?MODULE, [RemoteName, Id], []).
 
 connected(Socket, Transport, IPPort, Proto, RTSourceConnMgrPid, Props) ->
     Transport:controlling_process(Socket, RTSourceConnMgrPid),
@@ -90,14 +91,15 @@ get_rtsource_conn_pids(Pid) ->
 %%%===================================================================
 
 
-init([Remote]) ->
-    case whereis(riak_repl2_reference_rtq:name(Remote)) of
+init([RemoteName, Id]) ->
+    RefQName = riak_repl2_reference_rtq:name(RemoteName, Id),
+    case whereis(RefQName) of
         undefined ->
-            lager:error("undefined reference rtq for remote: ~p", [Remote]),
+            lager:error("undefined reference rtq for remote: ~p", [RefQName]),
             {stop, {error, "undefined reference rtq"}};
         ReferenceQ ->
-            {ok, SinkNodes} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Remote),
-            State = #state{remote = Remote, reference_rtq = ReferenceQ, sink_nodes = SinkNodes},
+            {ok, SinkNodes} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(RemoteName),
+            State = #state{id = Id, remote = RemoteName, reference_rtq = ReferenceQ, sink_nodes = SinkNodes},
             NewState = rebalance_connections(State),
             {ok, NewState}
     end.
@@ -292,9 +294,9 @@ connection_failed(Addr, State = #state{connection_failed_counts = Dict, bad_sink
 %% Accept Connection
 %%%===================================================================
 accept_connection(Socket, Transport, IPPort, Proto, Props, State) ->
-    #state{remote = Remote} = State,
+    #state{remote = Remote, id = Id} = State,
     {BadSinkReconnect, State0} = maybe_reset_bad_sink_node(IPPort, State),
-    case riak_repl2_rtsource_conn:start(Remote) of
+    case riak_repl2_rtsource_conn:start(Remote, Id) of
         {ok, RtSourcePid} ->
             Ref = erlang:monitor(process, RtSourcePid),
             case riak_repl2_rtsource_conn:connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, Props) of
@@ -480,12 +482,21 @@ connect_to_sink(Addr, State) ->
 %%%===================================================================
 %% Get the number of connections for our remote
 %%%===================================================================
+round_up_connections(N) ->
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    case N rem Concurrency of
+        0 ->
+            N div Concurrency;
+        _ ->
+            (N+Concurrency) div Concurrency
+    end.
+
 get_number_of_connections() ->
     case app_helper:get_env(riak_repl, default_number_of_connections) of
         N when is_integer(N) ->
-            N;
+            round_up_connections(N);
         _ ->
-            ?DEFAULT_NO_CONNECTIONS
+            round_up_connections(?DEFAULT_NO_CONNECTIONS)
     end.
 -ifdef(TEST).
 get_number_of_connections(_) ->
@@ -494,7 +505,7 @@ get_number_of_connections(_) ->
 get_number_of_connections(Name) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections, Name}) of
         N when is_integer(N) ->
-            N;
+            round_up_connections(N);
         _ ->
             get_number_of_connections()
     end.

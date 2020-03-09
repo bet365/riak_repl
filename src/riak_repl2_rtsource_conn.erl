@@ -43,8 +43,7 @@
 
 %% API
 -export([
-    start/1,
-    start_link/1,
+    start/2,
     stop/1,
     get_helper_pid/1,
     status/1,
@@ -84,6 +83,7 @@
 
 -record(state,
 {
+    id,
     remote,    % remote name
     address,   % {IP, Port}
     transport, % transport module
@@ -107,12 +107,8 @@
     ref
 }).
 
-%% API - start trying to send realtime repl to remote site
-start_link(Remote) ->
-    gen_server:start_link(?MODULE, [Remote], []).
-
-start(Remote) ->
-    gen_server:start(?MODULE, [Remote], []).
+start(Remote, Id) ->
+    gen_server:start(?MODULE, [Remote, Id], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -166,8 +162,8 @@ get_socketname_primary(Pid) ->
 %% gen_server callbacks
 
 %% Initialize
-init([Remote]) ->
-  {ok, #state{remote = Remote}}.
+init([Remote, Id]) ->
+  {ok, #state{remote = Remote, id = Id}}.
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, stopped}, ok, State};
@@ -187,14 +183,14 @@ handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
 handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) ->
-    #state{remote = Remote} = State,
+    #state{remote = Remote, id = Id} = State,
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
         ok ->
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer, Ref, self()),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref, self()),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source, SocketTag}, Transport),
             State2 =
@@ -257,7 +253,7 @@ handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
 
     case shutdown_check(State) of
         false ->
-            {stop, {Error, Reason}, State};
+            {stop, {error, {Error, Reason}}, State};
         Shutdown ->
             Shutdown
     end;
@@ -284,7 +280,7 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
 
             case shutdown_check(State) of
                 false ->
-                    {stop, {error, heartbeat_timeout}, State};
+                    {stop, {shutdown, heartbeat_timeout}, State};
                 Shutdown ->
                     Shutdown
             end
@@ -445,10 +441,10 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
 
 %% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
 handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    #state{ref = RTQRef, remote = Remote} = State,
+    #state{ref = RTQRef, remote = Remote, id = Id} = State,
     riak_repl_stats:objects_sent(),
     %% ack the reference queue
-    ok = riak_repl2_reference_rtq:ack(Remote, RTQRef, Seq),
+    ok = riak_repl2_reference_rtq:ack(Remote, Id, RTQRef, Seq),
     %% Reset heartbeat timer, since we've seen activity from the peer
     State1 = reset_heartbeat_timer(State),
     %% reset ack timer
@@ -517,7 +513,7 @@ set_shutdown(_, State) ->
     {already_shutting_down, State}.
 
 shutdown_check(State = #state{shutting_down = true, shutting_down_reason = Reason}) ->
-    {stop, {error, Reason}, State};
+    {stop, {shutdown, Reason}, State};
 shutdown_check(_State) ->
     false.
 

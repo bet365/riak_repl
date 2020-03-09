@@ -19,14 +19,11 @@ start_link() ->
 init([]) ->
     Processes =
         [
-            {riak_repl2_rtq, {riak_repl2_rtq, start_link, []},
-                transient, 50000, worker, [riak_repl2_rtq]},
+            {riak_repl2_rtq_sup, {riak_repl2_rtq_sup, start_link, []},
+                permanent, infinity, supervisor, [riak_repl2_rtq_sup]},
 
             {riak_repl2_reference_rtq_sup, {riak_repl2_reference_rtq_sup, start_link, []},
             permanent, infinity, supervisor, [riak_repl2_reference_rtq_sup]},
-
-            {riak_repl2_rtq_overload_counter, {riak_repl2_rtq_overload_counter, start_link, []},
-                permanent, 50000, worker, [riak_repl2_rtq_overload_counter]},
 
             {riak_repl2_rtsource_conn_sup, {riak_repl2_rtsource_conn_sup, start_link, []},
                 permanent, infinity, supervisor, [riak_repl2_rtsource_conn_sup]},

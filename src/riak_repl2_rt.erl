@@ -76,7 +76,7 @@ started() ->
 ensure_rt(WantEnabled0, WantStarted0) ->
     WantEnabled = lists:usort(WantEnabled0),
     WantStarted = lists:usort(WantStarted0),
-    Status = riak_repl2_rtq:status(),
+    Status = riak_repl2_rtq_sup:status(),
     CStatus = proplists:get_value(consumers, Status, []),
     Enabled = lists:sort([Remote || {Remote, _Stats} <- CStatus]),
     Connections = riak_repl2_rtsource_conn_sup:enabled(),
@@ -100,7 +100,7 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     ToValidate = Started -- ToStop,
     _ = [case lists:keyfind(Remote, 1, Connections) of
              {_, Pid} ->
-                 riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid);
+                 riak_repl2_rtsource_conn_mgr_remote_sup:maybe_rebalance(Pid);
              false ->
                  ok
          end || Remote <- ToValidate ],
@@ -170,7 +170,9 @@ postcommit(RObj) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    riak_repl2_rtq:push(length(Objects), BinObjs, Meta);
+                    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+                    Hash = erlang:phash2(BinObjs, Concurrency) +1,
+                    riak_repl2_rtq:push(Hash, length(Objects), BinObjs, Meta);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...
                     riak_repl2_rtq_proxy:push(length(Objects), BinObjs, Meta)
@@ -199,7 +201,7 @@ handle_call(status, _From, State = #state{sinks = SinkPids}) ->
              end || Pid <- SinkPids],
     Status = [{enabled, enabled()},
               {started, started()},
-              {q,       riak_repl2_rtq:status()},
+              {q,       riak_repl2_rtq_sup:status()},
               {sources, Sources},
               {sinks, Sinks}],
     {reply, Status, State};

@@ -5,7 +5,6 @@
     start_link/0,
     enable/1,
     disable/1,
-    enabled/0,
     shutdown/0
 ]).
 -export([init/1]).
@@ -27,17 +26,13 @@ disable(Remote) ->
     _ = supervisor:terminate_child(?MODULE, Remote),
     _ = supervisor:delete_child(?MODULE, Remote),
     lager:info("Reference Queue has been stopped, unregistering remote from realtime queue"),
-    riak_repl2_rtq:unregister(Remote),
+    riak_repl2_rtq_sup:unregister(Remote),
     ok.
-
-enabled() ->
-    [ {Remote, ReferenceQ} || {Remote, ReferenceQ, _, [riak_repl2_reference_rtq]}
-        <- supervisor:which_children(?MODULE), is_pid(ReferenceQ)].
 
 shutdown() ->
     lists:foreach(
-        fun({Remote, _, [riak_repl2_reference_rtq]}) ->
-            riak_repl2_reference_rtq:shutdown(Remote)
+        fun({Remote, _, [riak_repl2_reference_rtq_remote_sup]}) ->
+            riak_repl2_reference_rtq_remote_sup:shutdown(Remote)
         end, supervisor:which_children(?MODULE)).
 
 %%%===================================================================
@@ -56,5 +51,5 @@ init([]) ->
 %%%===================================================================
 
 make_child(Remote) ->
-    {Remote, {riak_repl2_reference_rtq, start_link, [Remote]},
-        permanent, ?SHUTDOWN, worker, [riak_repl2_reference_rtq]}.
+    {Remote, {riak_repl2_reference_rtq_remote_sup, start_link, [Remote]},
+        transient, infinity, supervisor, [riak_repl2_reference_rtq_remote_sup]}.

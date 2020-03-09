@@ -221,9 +221,9 @@ resume_fullsync([]) ->
 %% Repl2 commands
 %%
 rtq_stats() ->
-    case erlang:whereis(riak_repl2_rtq) of
+    case erlang:whereis(riak_repl2_rtq_sup) of
         Pid when is_pid(Pid) ->
-            [{realtime_queue_stats, riak_repl2_rtq:status()}];
+            [{realtime_queue_stats, riak_repl2_rtq_sup:status()}];
         _ -> []
     end.
 
@@ -900,8 +900,7 @@ client_stats_rpc() ->
 server_stats() ->
     case erlang:whereis(riak_repl_leader_gs) of
         Pid when is_pid(Pid) ->
-            RT2 = [rt2_source_stats(P) || {_R,P} <-
-                                          riak_repl2_rtsource_conn_sup:enabled()],
+            RT2 = [rt2_source_stats(P) || {_R,P} <- riak_repl2_rtsource_conn_sup:enabled()],
             LeaderNode = riak_repl_leader:leader_node(),
             case LeaderNode of
                 undefined ->
@@ -965,7 +964,7 @@ coordinator_srv_stats() ->
 rt2_source_stats(Pid) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     State = try
-                riak_repl2_rtsource_conn_mgr:get_all_status(Pid, Timeout)
+                riak_repl2_rtsource_conn_mgr_remote_sup:get_all_status(Pid, Timeout)
             catch
                 _:_ ->
                     too_busy

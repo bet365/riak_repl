@@ -240,7 +240,9 @@ maybe_push(Obj, Meta) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    riak_repl2_rtq:push(1, BinObjs, Meta);
+                    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+                    Hash = erlang:phash2(BinObjs, Concurrency) +1,
+                    riak_repl2_rtq:push(Hash, 1, BinObjs, Meta);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...
                     riak_repl2_rtq_proxy:push(1, BinObjs, Meta)

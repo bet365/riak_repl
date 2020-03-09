@@ -5,13 +5,13 @@
 %% API
 -export(
 [
-    start_link/1,
-    name/1,
-    push/2,
-    ack/3,
-    register/2,
-    shutdown/1,
-    status/1
+    name/2,
+    start_link/2,
+    push/3,
+    ack/4,
+    register/3,
+    shutdown/2,
+    status/2
 ]).
 
 %% gen_server callbacks
@@ -25,7 +25,6 @@
     code_change/3
 ]).
 
--define(SERVER(RemoteName), name(RemoteName)).
 -define(DEFAULT_RETRY_LIMIT, unlimited).
 
 %% Queues
@@ -39,6 +38,7 @@
 
 -record(state,
 {
+    id,
     name = undefined,
     shuting_down = false,
     shutting_down_ref = undefined,
@@ -67,29 +67,30 @@
 %%% API
 %%%===================================================================
 
-name(RemoteName) ->
-    IdBin = list_to_binary(RemoteName),
-    binary_to_atom(<<"riak_repl2_reference_rtq_", IdBin/binary>>, latin1).
+name(RemoteName, Id) ->
+    NameBin = list_to_binary(RemoteName),
+    IdBin = integer_to_binary(Id),
+    binary_to_atom(<<"riak_repl2_reference_rtq_", NameBin/binary, "_", IdBin/binary>>, latin1).
 
-start_link(RemoteName) ->
-    gen_server:start_link({local, name(RemoteName)}, ?MODULE, [RemoteName], []).
+start_link(RemoteName, Id) ->
+    gen_server:start_link({local, name(RemoteName, Id)}, ?MODULE, [RemoteName, Id], []).
 
 %% should we try catch this so we don't kill the rtq?
-push(RemoteName, QEntry) ->
-    gen_server:cast(?SERVER(RemoteName), {push, QEntry}).
+push(RemoteName, Id, QEntry) ->
+    gen_server:cast(name(RemoteName, Id), {push, QEntry}).
 
-ack(RemoteName, Ref, CSeq) ->
-    gen_server:cast(?SERVER(RemoteName), {ack, Ref, CSeq}).
+ack(RemoteName, Id, Ref, CSeq) ->
+    gen_server:cast(name(RemoteName, Id), {ack, Ref, CSeq}).
 
-register(RemoteName, Ref)->
-    gen_server:call(?SERVER(RemoteName), {register, Ref}, infinity).
+register(RemoteName, Id, Ref)->
+    gen_server:call(name(RemoteName, Id), {register, Ref}, infinity).
 
-shutdown(RemoteName) ->
-    gen_server:call(?SERVER(RemoteName), shutting_down, infinity).
+shutdown(RemoteName, Id) ->
+    gen_server:call(name(RemoteName, Id), shutting_down, infinity).
 
-status(RemoteName) ->
+status(RemoteName, Id) ->
     try
-        gen_server:call(?SERVER(RemoteName), status)
+        gen_server:call(name(RemoteName, Id), status)
 
     catch
         _:_  ->
@@ -101,13 +102,20 @@ status(RemoteName) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init([RemoteName]) ->
-    {QSeq, QTab} = riak_repl2_rtq:register(RemoteName),
-    NewState = #state{name = RemoteName, qtab = QTab},
+init([RemoteName, Id]) ->
+    {QSeq, QTab} = riak_repl2_rtq:register(Id, RemoteName),
+    NewState = #state{id = Id, name = RemoteName, qtab = QTab},
     {ok, populate_reference_table(ets:first(QTab), QSeq, NewState)}.
 
 handle_call({register, Ref}, {Pid, _Tag}, State) ->
-    #state{name = Name, consumers = Consumers, consumer_fifo = ConsumerFIFO, consumer_monitors = ConsumerMonitors} = State,
+    #state
+    {
+        id = Id,
+        name = Name,
+        consumers = Consumers,
+        consumer_fifo = ConsumerFIFO,
+        consumer_monitors = ConsumerMonitors
+    } = State,
     case orddict:find(Ref, Consumers) of
         {ok, _} ->
             lager:error("Name: ~p, Ref: ~p, Pid: ~p. Already exisiting reference to consumer", [State#state.name, Ref, Pid]),
@@ -124,7 +132,7 @@ handle_call({register, Ref}, {Pid, _Tag}, State) ->
                     consumer_fifo = NewConsumerFIFO,
                     consumer_monitors = NewConsumerMonitors
                 },
-            gen_server:cast(?SERVER(Name), maybe_pull),
+            gen_server:cast(name(Name, Id), maybe_pull),
             {reply, ok, NewState}
     end;
 
@@ -180,6 +188,7 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
     #state
     {
+        id = Id,
         consumer_monitors = ConsumerMonitors,
         consumers = Consumers,
         name = Name,
@@ -209,7 +218,7 @@ maybe_retry(MonitorRef, Pid, State = #state{shuting_down = false}) ->
                         false ->
                             %% ack the rtq
                             %% TODO: make a drop function to report the drop in the logs (log out bucket, key)
-                            riak_repl2_rtq:ack(Name, QSeq),
+                            riak_repl2_rtq:ack(Id, Name, QSeq),
                             State1#state{drops = Drops +1}
                     end;
 
@@ -302,10 +311,10 @@ populate_reference_table(Seq, QSeq, State = #state{qtab = QTab, name = Name}) ->
 
 
 ack_seq(Ref, CSeq, State) ->
-    #state{consumers = Consumers, name = Name, ack_counter = AC, consumer_fifo = ConsumerFIFO} = State,
+    #state{id = Id, name = Name, consumers = Consumers, ack_counter = AC, consumer_fifo = ConsumerFIFO} = State,
     case orddict:find(Ref, Consumers) of
         {ok, #consumer{qseq = QSeq, pid = Pid} = C} when C#consumer.cseq == CSeq ->
-            riak_repl2_rtq:ack(Name, QSeq),
+            riak_repl2_rtq:ack(Id, Name, QSeq),
             delete_object_from_queue(C, State),
             UpdatedConsumer = #consumer{pid = Pid},
             UpdatedConsumers = orddict:store(Ref, UpdatedConsumer, Consumers),
@@ -430,7 +439,7 @@ maybe_deliver_object(ConsumerRef, NewFIFO, Seq2, QEntry, #state{consumers = Cons
     end.
 
 deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{status = active, drops = Drops}) ->
-    #state{consumers = Consumers, reference_queue = RefQ, name = Name} = State,
+    #state{id = Id, name = Name, consumers = Consumers, reference_queue = RefQ} = State,
     #queue{start_seq = Seq} = RefQ,
     #consumer{pid = Pid} = Consumer,
     {QSeq, NumItems, Bin, Meta, _Completed} = QEntry,
@@ -446,7 +455,7 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{stat
 
         bucket_type_not_supported_by_remote ->
             delete_object_from_queue(Seq2, RefQ),
-            riak_repl2_rtq:ack(Name, QSeq),
+            riak_repl2_rtq:ack(Id, Name, QSeq),
             NewRefQ = RefQ#queue{start_seq = Seq2},
             maybe_pull(State#state{reference_queue = NewRefQ, drops = Drops +1});
 
@@ -466,7 +475,7 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{stat
     end;
 
 deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{status = retry, drops = Drops}) ->
-    #state{consumers = Consumers, retry_queue = RetryQ, name = Name} = State,
+    #state{id = Id, name = Name, consumers = Consumers, retry_queue = RetryQ} = State,
     #queue{start_seq = Seq, end_seq = EndSeq} = RetryQ,
     #consumer{pid = Pid} = Consumer,
     {QSeq, NumItems, Bin, Meta, _Completed} = QEntry,
@@ -489,7 +498,7 @@ deliver_object(ConsumerRef, NewFIFO, Consumer, Seq2, QEntry, State = #state{stat
 
         bucket_type_not_supported_by_remote ->
             delete_object_from_queue(Seq2, RetryQ),
-            riak_repl2_rtq:ack(Name, QSeq),
+            riak_repl2_rtq:ack(Id, Name, QSeq),
             NewRetryQ = RetryQ#queue{start_seq = Seq2},
             maybe_pull(NewState#state{retry_queue = NewRetryQ, drops = Drops +1});
 

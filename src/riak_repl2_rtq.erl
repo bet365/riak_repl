@@ -6,36 +6,36 @@
 %% API
 -export(
 [
-    start_link/0,
+    name/1,
     start_link/1,
-    register/1,
-    unregister/1,
+    start_link/2,
+    register/2,
+    unregister/2,
+    push/5,
     push/4,
     push/3,
-    push/2,
-    ack/2,
-    status/0,
-    shutdown/0,
-    stop/0,
-    is_running/0,
+    ack/3,
+    status/1,
+    shutdown/1,
+    stop/1,
+    is_running/1,
 
 
-    drain_queue/0,
-    is_empty/0,
+    drain_queue/1,
+    is_empty/1,
 
-    summarize/0,
-    dumpq/0,
-    evict/1,
+    summarize/1,
+    dumpq/1,
     evict/2,
-    ack_sync/2
+    evict/3,
+    ack_sync/3
 ]).
 
 % private api
--export([report_drops/1]).
+-export([report_drops/2]).
 -export([start_test/0]).
 
--define(overload_ets, rtq_overload_ets).
--define(SERVER, ?MODULE).
+
 -define(DEFAULT_OVERLOAD, 2000).
 -define(DEFAULT_RECOVER, 1000).
 -define(DEFAULT_RTQ_LATENCY_SLIDING_WINDOW, 300).
@@ -47,6 +47,7 @@
 
 -record(state,
 {
+    id,
     qtab = ets:new(?MODULE, [protected, ordered_set, {read_concurrency, true}]), % ETS table
     qseq = 0,  % Last sequence number handed out
     overload = ?DEFAULT_OVERLOAD :: pos_integer(), % if the message q exceeds this, the rtq is overloaded
@@ -71,99 +72,105 @@
 %%% API
 %%%===================================================================
 
-start_link() ->
+name(Id) ->
+    IdBin = integer_to_binary(Id),
+    binary_to_atom(<<"riak_repl2_rtq_", IdBin/binary>>, latin1).
+
+overload_ets_name(Id) ->
+    IdBin = integer_to_binary(Id),
+    binary_to_atom(<<"rtq_overload_ets_", IdBin/binary>>, latin1).
+
+
+start_link(Id) ->
     Overload = app_helper:get_env(riak_repl, rtq_overload_threshold, ?DEFAULT_OVERLOAD),
     Recover = app_helper:get_env(riak_repl, rtq_overload_recover, ?DEFAULT_RECOVER),
     Opts = [{overload_threshold, Overload}, {overload_recover, Recover}],
-    start_link(Opts).
-start_link(Options) ->
-    case ets:info(?overload_ets) of
+    start_link(Id, Opts).
+start_link(Id, Options) ->
+    ETS = overload_ets_name(Id),
+    case ets:info(ETS) of
         undefined ->
-            ?overload_ets = ets:new(?overload_ets, [named_table, public, {read_concurrency, true}]),
-            ets:insert(?overload_ets, {overloaded, false});
+            ETS = ets:new(ETS, [named_table, public, {read_concurrency, true}]),
+            ets:insert(ETS, {overloaded, false});
         _ ->
             ok
     end,
-    gen_server:start_link({local, ?SERVER}, ?MODULE, Options, []).
+    gen_server:start_link({local, name(Id)}, ?MODULE, [Id, Options], []).
 
 start_test() ->
     gen_server:start(?MODULE, [], []).
 
-register(Name) ->
-    gen_server:call(?SERVER, {register, Name}, infinity).
+register(Id, Name) ->
+    gen_server:call(name(Id), {register, Name}, infinity).
 
-unregister(Name) ->
-    gen_server:call(?SERVER, {unregister, Name}, infinity).
+unregister(Id, Name) ->
+    gen_server:call(name(Id), {unregister, Name}, infinity).
 
-status() ->
-    Status = gen_server:call(?SERVER, status, infinity),
-    % I'm having the calling process do derived stats because
-    % I don't want to block the rtq from processing objects.
-    MaxBytes = proplists:get_value(max_bytes, Status),
-    CurrentBytes = proplists:get_value(bytes, Status),
-    PercentBytes = round( (CurrentBytes / MaxBytes) * 100000 ) / 1000,
-    [{percent_bytes_used, PercentBytes} | Status].
+status(Id) ->
+    gen_server:call(name(Id), status, infinity).
 
-shutdown() ->
-    gen_server:call(?SERVER, shutting_down, infinity).
+shutdown(Id) ->
+    gen_server:call(name(Id), shutting_down, infinity).
 
-stop() ->
-    gen_server:call(?SERVER, stop, infinity).
+stop(Id) ->
+    gen_server:call(name(Id), stop, infinity).
 
-is_running() ->
-    gen_server:call(?SERVER, is_running, infinity).
+is_running(Id) ->
+    gen_server:call(name(Id), is_running, infinity).
 
-push(NumItems, Bin) ->
-    push(NumItems, Bin, []).
-push(NumItems, Bin, Meta) ->
-    push(NumItems, Bin, Meta, []).
-push(NumItems, Bin, Meta, PreCompleted) ->
-    case ets:lookup(?overload_ets, overloaded) of
+%% TODO: deal with repl migration stuff
+push(Id, NumItems, Bin) ->
+    push(Id, NumItems, Bin, []).
+push(Id, NumItems, Bin, Meta) ->
+    push(Id, NumItems, Bin, Meta, []).
+push(Id, NumItems, Bin, Meta, PreCompleted) ->
+    ETS = overload_ets_name(Id),
+    case ets:lookup(ETS, overloaded) of
         [{overloaded, true}] ->
             lager:debug("rtq overloaded"),
-            riak_repl2_rtq_overload_counter:drop();
+            riak_repl2_rtq_overload_counter:drop(Id);
         [{overloaded, false}] ->
-            gen_server:cast(?SERVER, {push, NumItems, Bin, Meta, PreCompleted})
+            gen_server:cast(name(Id), {push, NumItems, Bin, Meta, PreCompleted})
     end.
 
-ack(Name, Seq) ->
-    gen_server:cast(?SERVER, {ack, Name, Seq}).
+ack(Id, Name, Seq) ->
+    gen_server:cast(name(Id), {ack, Name, Seq}).
 
-report_drops(N) ->
-    gen_server:cast(?SERVER, {report_drops, N}).
+report_drops(Id, N) ->
+    gen_server:cast(name(Id), {report_drops, N}).
 
-drain_queue() ->
-    gen_server:call(?SERVER, drain_queue).
+drain_queue(Id) ->
+    gen_server:call(name(Id), drain_queue).
 
-is_empty() ->
-    gen_server:call(?SERVER, is_empty, infinity).
+is_empty(Id) ->
+    gen_server:call(name(Id), is_empty, infinity).
 
 %%%========================================================================
 %%% Backward Compatability Functions (will eventually be removed/ changed)
 %%%========================================================================
-summarize() ->
-    gen_server:call(?SERVER, summarize, infinity).
+summarize(Id) ->
+    gen_server:call(name(Id), summarize, infinity).
 
-dumpq() ->
-    gen_server:call(?SERVER, dumpq, infinity).
+dumpq(Id) ->
+    gen_server:call(name(Id), dumpq, infinity).
 
-evict(Seq) ->
-    gen_server:call(?SERVER, {evict, Seq}, infinity).
+evict(Id, Seq) ->
+    gen_server:call(name(Id), {evict, Seq}, infinity).
 
-evict(Seq, Key) ->
-    gen_server:call(?SERVER, {evict, Seq, Key}, infinity).
+evict(Id, Seq, Key) ->
+    gen_server:call(name(Id), {evict, Seq, Key}, infinity).
 
-ack_sync(Name, Seq) ->
-    gen_server:call(?SERVER, {ack_sync, Name, Seq}, infinity).
+ack_sync(Id, Name, Seq) ->
+    gen_server:call(name(Id), {ack_sync, Name, Seq}, infinity).
 
 
 %%%===================================================================
 %%% gen_server calls
 %%%===================================================================
-init(Options) ->
+init([Id, Options]) ->
     Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
     Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+    {ok, #state{id = Id, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
 
 
 handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq}) ->
@@ -208,7 +215,7 @@ handle_call({push, NumItems, Bin, Meta, []}, From, State) ->
     handle_call({push, NumItems, Bin, Meta, []}, From, State);
 handle_call({push, NumItems, Bin, Meta, Completed}, _From, State) ->
     State2 = maybe_flip_overload(State),
-    {reply, ok, push(NumItems, Bin, Meta, Completed, State2)};
+    {reply, ok, do_push(NumItems, Bin, Meta, Completed, State2)};
 
 handle_call(summarize, _From, State = #state{qtab = QTab}) ->
     Fun = fun({Seq, _NumItems, Bin, _Meta, _Completed}, Acc) ->
@@ -240,7 +247,7 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
     end;
 
 handle_call(drain_queue, _From, State = #state{shutting_down = true}) ->
-    Reply = drain_queue(State),
+    Reply = do_drain_queue(State),
     {reply, Reply, State};
 handle_call(drain_queue, _From, State = #state{shutting_down = false}) ->
     {reply, {error, queue_not_shutting_down}, State};
@@ -259,7 +266,7 @@ handle_cast({push, _NumItems, _Bin, _Meta, _Completed}, State=#state{remotes=[]}
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
     State2 = maybe_flip_overload(State),
-    {noreply, push(NumItems, Bin, Meta, PreCompleted, State2)};
+    {noreply, do_push(NumItems, Bin, Meta, PreCompleted, State2)};
 
 handle_cast({ack, Name, Seq}, State) ->
        {noreply, ack_seq(Name, Seq, State)};
@@ -286,9 +293,9 @@ handle_cast(_Msg, State) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-terminate(Reason, State) ->
+terminate(Reason, State = #state{id = N}) ->
     lager:info("rtq terminating due to: ~p State: ~p", [Reason, State]),
-    catch(erlang:unregister(?SERVER)),
+    catch(erlang:unregister(name(N))),
     flush_pending_pushes().
 
 code_change(_OldVsn, State, _Extra) ->
@@ -355,14 +362,14 @@ unregister_cleanup(Seq, Remote, State = #state{qtab = QTab, all_remote_names = A
 %% ================================================================================================================== %%
 %% Status
 %% ================================================================================================================== %%
-make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
+make_status(State = #state{qtab = QTab, remotes = Remotes, id = Id}) ->
     MaxBytes = get_queue_max_bytes(),
     RemoteStats =
         lists:foldl(
             fun(Remote, Acc) ->
                 #remote{name = Name, total_drops = Drops, rsize_bytes = RSize} = Remote,
                 Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Remote)}, {drops, Drops}],
-                RefStats = riak_repl2_reference_rtq:status(Name),
+                RefStats = riak_repl2_reference_rtq:status(Id, Name),
                 [{Name, Stats ++ RefStats} | Acc]
             end, [], Remotes),
     [{bytes, qbytes(QTab, State)},
@@ -377,9 +384,10 @@ make_status(State = #state{qtab = QTab, remotes = Remotes}) ->
 %% ================================================================================================================== %%
 %% Push
 %% ================================================================================================================== %%
-push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) ->
+do_push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) ->
     #state
     {
+        id = Id,
         qtab = QTab,
         qseq = QSeq,
         all_remote_names = AllRemoteNames,
@@ -406,7 +414,7 @@ push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) -
             State3 = update_remotes_queue_size(State2, Size, Send),
 
             %% push to reference queues
-            push_to_remotes(Send, QEntry),
+            push_to_remotes(Send, Id, QEntry),
 
             %% (trim consumers) find out if consumers have reach maximum capacity
             State4 = maybe_trim_remote_queues(State3),
@@ -414,7 +422,7 @@ push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = false}) -
             %% (trim queue) find out if queue reached maximum capacity
             maybe_trim_queue(State4)
     end;
-push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = true}) ->
+do_push(NumItems, Bin, Meta, PreCompleted, State = #state{shutting_down = true}) ->
     riak_repl2_rtq_proxy:push(NumItems, Bin, Meta, PreCompleted),
     State.
 
@@ -442,12 +450,12 @@ set_local_forwards_meta(LocalForwards, Meta) ->
 set_skip_meta(Meta) ->
     orddict:store(skip_count, 0, Meta).
 
-push_to_remotes([], _QEntry) ->
+push_to_remotes([], _Id, _QEntry) ->
     ok;
-push_to_remotes([RemoteName | Rest], QEntry) ->
+push_to_remotes([RemoteName | Rest], Id, QEntry) ->
     %% TODO try catch this? (its a cast)
-    riak_repl2_reference_rtq:push(RemoteName, QEntry),
-    push_to_remotes(Rest, QEntry).
+    riak_repl2_reference_rtq:push(RemoteName, Id, QEntry),
+    push_to_remotes(Rest, Id, QEntry).
 
 %% ==================================================== %%
 %% Trimming Remote Queues
@@ -611,7 +619,7 @@ ack_seq(RemoteName, Seq, State) ->
 %% ================================================================================================================== %%
 %% Drain Queue
 %% ================================================================================================================== %%
-drain_queue(#state{qtab = QTab}) ->
+do_drain_queue(#state{qtab = QTab}) ->
     case ets:last(QTab) of
         'end_of_table' ->
             empty;
@@ -631,19 +639,20 @@ drain_queue(#state{qtab = QTab}) ->
 %% ================================================================================================================== %%
 %% Maybe flip overload used to ensure that the rtq mailbox does not exceed a configured size.
 %% ================================================================================================================== %%
-maybe_flip_overload(State) ->
+maybe_flip_overload(State = #state{id = Id}) ->
     #state{overloaded = Overloaded, overload = Overload, recover = Recover} = State,
     {message_queue_len, MsgQLen} = erlang:process_info(self(), message_queue_len),
+    ETS = overload_ets_name(Id),
     if
         Overloaded andalso MsgQLen =< Recover ->
             lager:info("Recovered from overloaded condition"),
-            ets:insert(?overload_ets, {overloaded, false}),
+            ets:insert(ETS, {overloaded, false}),
             State#state{overloaded = false};
         (not Overloaded) andalso MsgQLen > Overload ->
             lager:warning("Realtime queue mailbox size of ~p is greater than ~p indicating overload; objects will be dropped until size is less than or equal to ~p", [MsgQLen, Overload, Recover]),
             % flip the rt_dirty flag on
             riak_repl_stats:rt_source_errors(),
-            ets:insert(?overload_ets, {overloaded, true}),
+            ets:insert(ETS, {overloaded, true}),
             State#state{overloaded = true};
         true ->
             State

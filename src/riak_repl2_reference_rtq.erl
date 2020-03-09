@@ -102,8 +102,9 @@ status(RemoteName) ->
 %%%===================================================================
 
 init([RemoteName]) ->
-    gen_server:cast(?SERVER(RemoteName), initialise),
-    {ok, #state{name = RemoteName}}.
+    {QSeq, QTab} = riak_repl2_rtq:register(RemoteName),
+    NewState = #state{name = RemoteName, qtab = QTab},
+    {ok, populate_reference_table(ets:first(QTab), QSeq, NewState)}.
 
 handle_call({register, Ref}, {Pid, _Tag}, State) ->
     #state{name = Name, consumers = Consumers, consumer_fifo = ConsumerFIFO, consumer_monitors = ConsumerMonitors} = State,
@@ -144,11 +145,6 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(maybe_pull, State) ->
     {noreply, maybe_pull(State)};
-
-handle_cast(initialise, State = #state{name = Name}) ->
-    {QSeq, QTab} = riak_repl2_rtq:register(Name),
-    NewState = State#state{qtab = QTab},
-    {noreply, populate_reference_table(ets:first(QTab), QSeq, NewState)};
 
 handle_cast({push, QEntry}, State) ->
     {noreply, do_push(QEntry, State)};

@@ -47,7 +47,7 @@
 -define(BT_META_TYPE, bucket_type).
 -define(BT_META_PROPS_HASH, properties_hash_val).
 -define(BT_META_BLACKLIST, realtime_blacklist).
--define(RIAK_REPL2_CONFIG_KEY, {riak_repl2_rtq, config}).
+-define(RIAK_REPL2_CONFIG_KEY, {riak_repl2, config}).
 
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).

@@ -481,7 +481,7 @@ trim_remote_queues(Remotes, '$end_of_table', State = #state{remotes = OkRemotes}
     State#state{remotes = Remotes ++ OkRemotes};
 trim_remote_queues([], _, State) ->
     State;
-trim_remote_queues(Remotes, Seq, State = #state{remotes = OkRemotes, qseq = QTab, all_remote_names = AllRemoteNames}) ->
+trim_remote_queues(Remotes, Seq, State = #state{remotes = OkRemotes, qtab = QTab, all_remote_names = AllRemoteNames}) ->
     case ets:lookup(QTab, Seq) of
         [] ->
             trim_remote_queues(Remotes, ets:next(QTab, Seq), State);

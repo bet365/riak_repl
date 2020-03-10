@@ -116,7 +116,7 @@ do_repl_put(ObjectsMeta, AckPid, Counter) ->
             gen_server:cast(AckPid, ack_v4);
         _ ->
             gen_server:cast(AckPid, retrying),
-            do_repl_put(Results, AckPid, Counter +1)
+            do_repl_put(Results, AckPid, Counter -1)
 
     end.
 
@@ -140,7 +140,8 @@ do_repl_put({Object, Meta}) ->
                     maybe_reap(ReqId, Object, B, K),
                     maybe_push(Object, Meta),
                     ack;
-                {error, _Reason} ->
+                {error, Reason} ->
+                    lager:info("Retrying repl put due to: ~p", [Reason]),
                     %% Do not push onto queue, until we have completed the PUT successfully
                     retry
             end;

@@ -464,7 +464,7 @@ handle_incoming_data({ok, {received, Seq}, Cont}, State = #state{expect_seq_v4 =
     recv(Cont, State1);
 
 handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    State1 = reset_ack_timer(Seq),
+    State1 = reset_ack_timer(State),
     AckRef = erlang:send_after(get_ack_timeout(State), self(), {ack_timeout, Seq}),
     recv(Cont, State1#state{ack_tref = AckRef});
 

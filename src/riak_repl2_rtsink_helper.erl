@@ -130,17 +130,17 @@ do_repl_put({Object, Meta}) ->
             %% {w, W}, {dw, DW} -> do not set these, use the bucket props
             Opts = [{timeout, ?REPL_FSM_TIMEOUT}, asis, disable_hooks, {update_last_modified, false}],
             From = {raw, ReqId, self()},
-            {ok, PutPid} = riak_kv_put_fsm:start(From, Object, Opts),
-            MRef = erlang:monitor(process, PutPid),
+
+            %% can be {ok, Pid} | {error, overload} (if its the error its sent back to the client anyway)
+            _ = riak_kv_put_fsm:start(From, Object, Opts),
+
             %% block waiting for response
             case wait_for_response(ReqId, "put") of
                 ok ->
-                    wait_for_fsm(MRef),
                     maybe_reap(ReqId, Object, B, K),
                     maybe_push(Object, Meta),
                     ack;
                 {error, _Reason} ->
-                    wait_for_fsm(MRef),
                     %% Do not push onto queue, until we have completed the PUT successfully
                     retry
             end;
@@ -172,7 +172,8 @@ reap(ReqId, Bucket, Key, Object) ->
 
 reap(ReqId, Bucket, Key) ->
     lager:debug("Incoming deleted obj ~p/~p", [Bucket, Key]),
-    riak_kv_get_fsm:start(ReqId, Bucket, Key, 1, ?REPL_FSM_TIMEOUT, self()),
+    %% reap needs to go to 'all' not '1'
+    riak_kv_get_fsm:start(ReqId, Bucket, Key, all, ?REPL_FSM_TIMEOUT, self()),
     %% block waiting for response
     wait_for_response(ReqId, "reap").
 
@@ -183,18 +184,9 @@ wait_for_response(ReqId, Verb) ->
             {error, Reason};
         {ReqId, _} ->
             ok
-    after 60000 ->
-        lager:warning("Timed out after 1 minute doing ~s on replicated object", [Verb]),
+    after ?REPL_FSM_TIMEOUT + 5000 ->
+        lager:warning("Timed out after 20 seconds doing ~s on replicated object", [Verb]),
         {error, timeout}
-    end.
-
-wait_for_fsm(MRef) ->
-    %% wait for put FSM to exit
-    receive {'DOWN', MRef, _, _, _} ->
-        ok
-    after 60000 ->
-        lager:warning("put fsm did not exit on schedule"),
-        ok
     end.
 
 repl_helper_recv(Object) ->

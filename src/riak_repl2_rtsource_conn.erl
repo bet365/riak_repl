@@ -468,7 +468,7 @@ handle_incoming_data({ok, {received, Seq}, Cont}, State = #state{expect_seq_v4 =
     recv(Cont, State1);
 
 handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    State1 = reset_ack_timer(Seq),
+    State1 = reset_ack_timer(State),
     AckRef = erlang:send_after(get_ack_timeout(State), self(), {ack_timeout, Seq}),
     recv(Cont, State1#state{ack_tref = AckRef});
 
@@ -571,7 +571,7 @@ get_heartbeat_enabled() ->
     app_helper:get_env(riak_repl, default_rt_heartbeat_enabled, true).
 
 get_heartbeat_interval() ->
-    case app_helper:get_env(riak_repl, default_rt_heartbeat_interval, ?DEFAULT_HBINTERVAL) of
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_interval) of
         Time when is_integer(Time) ->
             Time * 1000;
         _ ->
@@ -579,7 +579,7 @@ get_heartbeat_interval() ->
     end.
 
 get_heartbeat_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout, ?DEFAULT_HBTIMEOUT) of
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout) of
         Time when is_integer(Time) ->
             Time * 1000;
         _ ->
@@ -587,7 +587,7 @@ get_heartbeat_timeout() ->
     end.
 
 get_received_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_receive_timeout, ?DEFAULT_RECEIVE_TIMEOUT) of
+    case app_helper:get_env(riak_repl, default_rt_receive_timeout) of
         Time when is_integer(Time) ->
             Time * 1000;
         _ ->
@@ -595,7 +595,7 @@ get_received_timeout() ->
     end.
 
 get_ack_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_ack_timeout, ?DEFAULT_ACK_TIMEOUT) of
+    case app_helper:get_env(riak_repl, default_rt_ack_timeout) of
         Time when is_integer(Time) ->
             Time * 1000;
         _ ->

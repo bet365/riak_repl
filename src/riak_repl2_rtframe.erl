@@ -9,10 +9,9 @@
 -define(MSG_OBJECTS_AND_META,   16#30). %% List of objects and rt meta data
 
 %% Protocol 4
--define(MSG_RECEIVED,           16#40). %% received object
--define(MSG_RETRYING,           16#50). %% retrying
--define(MSG_BT_DROP,            16#60). %% bucket type drop
--define(MSG_NODE_SHUTDOWN,      16#70). %% node shutdown message (so source doesn't rebalance onto the same node)
+-define(MSG_RETRYING,           16#40). %% retrying
+-define(MSG_BT_DROP,            16#50). %% bucket type drop
+-define(MSG_NODE_SHUTDOWN,      16#60). %% node shutdown message (so source doesn't rebalance onto the same node)
 
 
 %% ================================================================================================================== %%
@@ -40,9 +39,6 @@ encode_payload(heartbeat, undefined) ->
 %% ================================================================================================================== %%
 %% Encode Protocol 4
 %% ================================================================================================================== %%
-encode_payload(received, Seq) ->
-    [?MSG_RECEIVED, <<Seq:64/unsigned-big-integer>>];
-
 encode_payload(retrying, Seq) ->
     [?MSG_RETRYING, <<Seq:64/unsigned-big-integer>>];
 
@@ -82,9 +78,6 @@ decode_payload(?MSG_HEARTBEAT, <<>>) ->
 %% ================================================================================================================== %%
 %% Decode Protocol 4
 %% ================================================================================================================== %%
-decode_payload(?MSG_RECEIVED, <<Seq:64/unsigned-big-integer>>) ->
-    {received, Seq};
-
 decode_payload(?MSG_RETRYING, <<Seq:64/unsigned-big-integer>>) ->
     {retrying, Seq};
 

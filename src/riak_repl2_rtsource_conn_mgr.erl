@@ -140,7 +140,7 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 %%%=====================================================================================================================
-handle_info({'DOWN', MonitorRef, process, _Pid, {error, sink_shutdown}}, State) ->
+handle_info({'DOWN', MonitorRef, process, _Pid, {shutdown, sink_shutdown}}, State) ->
     #state{bad_sink_nodes = BadSinks, connections_monitor_addrs = Addrs} = State,
     case orddict:find(MonitorRef, Addrs) of
         {ok, Addr} ->
@@ -162,7 +162,7 @@ handle_info({'DOWN', MonitorRef, process, _Pid, {error, sink_shutdown}}, State) 
     end;
 
 
-handle_info({'DOWN', MonitorRef, process, _Pid, {error, source_rebalance}}, State) ->
+handle_info({'DOWN', MonitorRef, process, _Pid, {shutdown, source_rebalance}}, State) ->
     #state{connections_monitor_addrs = Addrs} = State,
     case orddict:find(MonitorRef, Addrs) of
         {ok, Addr} ->
@@ -176,6 +176,7 @@ handle_info({'DOWN', MonitorRef, process, _Pid, {error, source_rebalance}}, Stat
             {noreply, State}
     end;
 
+%% TODO: shutdown for {wrong_seq, ack_timeout, recieve_timeout} etc ...
 %% while we operate with cluster on protocol 3, we will hit here on a sink node shutdown!
 %% do we want to issue a reconnect to the node going down?
 handle_info({'DOWN', MonitorRef, process, _Pid, _Reason}, State) ->

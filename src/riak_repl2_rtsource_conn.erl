@@ -51,8 +51,7 @@
     get_address/1,
     get_socketname_primary/1,
     connected/7,
-    graceful_shutdown/2,
-    object_sent/1,
+    graceful_shutdown/2
 ]).
 
 
@@ -62,8 +61,6 @@
 
 -define(DEFAULT_HBINTERVAL, 15000).
 -define(DEFAULT_HBTIMEOUT, 15000).
--define(DEFAULT_RECEIVE_TIMEOUT, 10000).
--define(DEFAULT_ACK_TIMEOUT, 60000).
 
 -define(TCP_OPTIONS,  [{keepalive, true},
                        {nodelay, true},
@@ -103,8 +100,6 @@
     shutting_down = false,
     shutting_down_reason,
     expect_seq_v4 = 1,
-    received_tref,
-    ack_tref,
     ref
 }).
 
@@ -113,9 +108,6 @@ start(Remote, Id) ->
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
-
-object_sent(Pid) ->
-    gen_server:call(Pid, object_sent, infinity).
 
 status(Pid) ->
     status(Pid, ?LONG_TIMEOUT).
@@ -194,7 +186,7 @@ handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) 
         ok ->
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref, self()),
+            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source, SocketTag}, Transport),
             State2 =
@@ -220,11 +212,6 @@ handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) 
         ER ->
             {reply, ER, State}
     end;
-
-handle_call(object_sent, _From, State = #state{expect_seq_v4 = Seq}) ->
-    RecevieRef = erlang:send_after(get_received_timeout(State), self(), {receive_timeout, Seq}),
-    AckRef = erlang:send_after(get_ack_timeout(State), self(), {ack_timeout, Seq}),
-    {reply, ok, State#state{received_tref = RecevieRef, ack_tref = AckRef}};
 
 handle_call(get_helper_pid, _From, State=#state{helper_pid = H}) ->
     {reply, H, State}.
@@ -295,42 +282,6 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
             end
     end;
 
-handle_info({receive_timeout, Seq}, State) ->
-    #state{received_tref = Ref, peername = Peername, remote = Remote, expect_seq_v4 = Seq2} = State,
-    case {Ref, Seq == Seq2} of
-        {undefined, _} ->
-            {noreply, State};
-        {_, false} ->
-            {noreply, State#state{received_tref = undefined}};
-        {_, true} ->
-            lager:error("rtsource_conn recevie timeout, seq: ~p, peername: ~p, remote: ~p", [Seq, Peername, Remote]),
-
-            case shutdown_check(State) of
-                false ->
-                    {stop, {error, receive_timeout}, State};
-                Shutdown ->
-                    Shutdown
-            end
-    end;
-
-handle_info({ack_timeout, Seq}, State) ->
-    #state{ack_tref = Ref, peername = Peername, remote = Remote, expect_seq_v4 = Seq2} = State,
-    case {Ref, Seq == Seq2} of
-        {undefined, _} ->
-            {noreply, State};
-        {_, false} ->
-            {noreply, State#state{ack_tref = undefined}};
-        {_, true} ->
-            lager:error("rtsource_conn ack timeout, seq: ~p, peername: ~p, remote: ~p", [Seq, Peername, Remote]),
-
-            case shutdown_check(State) of
-                false ->
-                    {stop, {error, ack_timeout}, State};
-                Shutdown ->
-                    Shutdown
-            end
-    end;
-
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
@@ -363,7 +314,7 @@ get_status(State) ->
         remote = R,
         transport = T,
         socket = S,
-        helper_pid = H,
+        expect_seq_v4 = Sent,
         hb_rtt = HBRTT
     } = State,
 
@@ -382,26 +333,12 @@ get_status(State) ->
                 [
                     {connected, true},
                     {transport, T},
-                    {socket, riak_core_tcp_mon:format_socket_stats(SocketStats, [])},
-                    {helper_pid, riak_repl_util:safe_pid_to_list(H)}
+                    {objects, Sent},
+                    {socket, riak_core_tcp_mon:format_socket_stats(SocketStats, [])}
                 ] ++ HBStats
         end,
-    HelperProps =
-        case H of
-            undefined ->
-                [];
-            _ ->
-                try
-                    DefaultTimeout = app_helper:get_env(riak_repl, status_timeout, 5000) - 1000,
-                    Timeout = app_helper:get_env(riak_repl, status_helper_timeout, DefaultTimeout),
-                    riak_repl2_rtsource_helper:status(H, Timeout)
-                catch
-                    _:{timeout, _} ->
-                        [{helper, timeout}]
-                end
-        end,
     FormattedPid = riak_repl_util:safe_pid_to_list(self()),
-    [{sink, R}, {pid, FormattedPid}] ++ Props ++ HelperProps.
+    [{sink, R}, {pid, FormattedPid}] ++ Props.
 
 %% ================================================================================================================== %%
 %% Receive functionality from sink
@@ -433,7 +370,7 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
     case (Seq +1 == ESeq) orelse (Seq == 0) of
         true ->
             %% we have the ack back for the last sequence number sent by the helper (terminate)
-            {stop, {error, sink_shutdown}, State};
+            {stop, {shutdown, sink_shutdown}, State};
         false ->
             {_, NewState} = set_shutdown(sink_shutdown, State),
             recv(Cont, NewState)
@@ -445,32 +382,46 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
 
 %% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
 handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    #state{ref = RTQRef, remote = Remote, id = Id} = State,
     riak_repl_stats:objects_sent(),
-    %% ack the reference queue
-    ok = riak_repl2_reference_rtq:ack(Remote, Id, RTQRef, Seq),
     %% Reset heartbeat timer, since we've seen activity from the peer
     State1 = reset_heartbeat_timer(State),
-    %% reset ack timer
-    State2 = reset_ack_timer(State1),
+
+    %% ack the reference queue
+    #state{remote = Remote, id = Id, ref = Ref} = State,
+    ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
 
     %% check if we are shutting down gracefully
-    case shutdown_check(State2) of
+    case shutdown_check(State1) of
         false ->
-            recv(Cont, State2#state{expect_seq_v4 = Seq +1});
+            recv(Cont, State1#state{expect_seq_v4 = Seq +1});
         Shutdown ->
             Shutdown
 
     end;
 
-handle_incoming_data({ok, {received, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    State1 = reset_received_timer(State),
+handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+    %% Reset heartbeat timer, since we've seen activity from the peer
+    State1 = reset_heartbeat_timer(State),
     recv(Cont, State1);
 
-handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
-    State1 = reset_ack_timer(State),
-    AckRef = erlang:send_after(get_ack_timeout(State), self(), {ack_timeout, Seq}),
-    recv(Cont, State1#state{ack_tref = AckRef});
+handle_incoming_data({ok, {bt_drop, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+    riak_repl_stats:objects_sent(),
+    %% Reset heartbeat timer, since we've seen activity from the peer
+    State1 = reset_heartbeat_timer(State),
+
+    %% ack the reference queue
+    #state{remote = Remote, id = Id, ref = Ref} = State,
+    %% TODO: report a drop instead of acking! (new functionality to queue)
+    ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
+
+    %% check if we are shutting down gracefully
+    case shutdown_check(State1) of
+        false ->
+            recv(Cont, State1#state{expect_seq_v4 = Seq +1});
+        Shutdown ->
+            Shutdown
+
+    end;
 
 handle_incoming_data({ok, {Type, Seq}, _}, State) ->
     handle_wrong_seq(Type, Seq, State).
@@ -491,24 +442,6 @@ reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref}) ->
         _ ->
             _ = cancel_timer(Ref),
             schedule_heartbeat(State#state{hb_timeout_tref=undefined})
-    end.
-
-reset_received_timer(State = #state{received_tref = Ref}) ->
-    case Ref of
-        undefined ->
-            State;
-        _ ->
-            _ = cancel_timer(Ref),
-            State#state{received_tref = undefined}
-    end.
-
-reset_ack_timer(State = #state{ack_tref = Ref}) ->
-    case Ref of
-        undefined ->
-            State;
-        _ ->
-            _ = cancel_timer(Ref),
-            State#state{ack_tref = undefined}
     end.
 
 set_shutdown(Reason, State = #state{shutting_down = false}) ->
@@ -586,22 +519,6 @@ get_heartbeat_timeout() ->
             ?DEFAULT_HBTIMEOUT
     end.
 
-get_received_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_receive_timeout) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            ?DEFAULT_RECEIVE_TIMEOUT
-    end.
-
-get_ack_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_ack_timeout) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            ?DEFAULT_ACK_TIMEOUT
-    end.
-
 
 
 -ifdef(TEST).
@@ -614,12 +531,6 @@ get_heartbeat_interval(_) ->
 
 get_heartbeat_timeout(_) ->
     get_heartbeat_timeout().
-
-get_received_timeout(_) ->
-    get_received_timeout().
-
-get_ack_timeout(_) ->
-    get_ack_timeout().
 
 -else.
 
@@ -639,18 +550,6 @@ get_heartbeat_timeout(#state{remote = RemoteName}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, RemoteName}) of
         Interval when is_integer(Interval) -> Interval * 1000;
         _ -> get_heartbeat_timeout()
-    end.
-
-get_received_timeout(#state{remote = RemoteName}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_receive_timeout, RemoteName}) of
-        Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> get_received_timeout()
-    end.
-
-get_ack_timeout(#state{remote = RemoteName}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_ack_timeout, RemoteName}) of
-        Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> get_ack_timeout()
     end.
 
 

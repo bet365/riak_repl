@@ -115,7 +115,7 @@ maybe_send(Transport, Socket, QEntry, From, State) ->
         sent_seq = Seq,
         remote = Remote,
         proto = {Major, _},
-        rtsource_conn_pid = RtsourceConnPid
+        rtsource_conn_pid = _RtsourceConnPid
     } = State,
     Seq2 = Seq +1,
     QEntry2 = setelement(1, QEntry, Seq2),

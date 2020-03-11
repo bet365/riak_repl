@@ -133,17 +133,6 @@ connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, _Props) ->
             error
     end.
 
-graceful_shutdown(Pid, Reason) ->
-    try
-        gen_server:call(Pid, {graceful_shutdown, Reason}, ?LONG_TIMEOUT)
-    catch
-        _:Reason  ->
-            lager:warning("Unable to contact RT Source for graceful shutdown, Pid: ~p, Reason: ~p",
-                [Pid, Reason]),
-            error
-    end.
-
-
 get_helper_pid(RtSourcePid) ->
   gen_server:call(RtSourcePid, get_helper_pid).
 
@@ -152,6 +141,9 @@ get_address(Pid) ->
 
 get_socketname_primary(Pid) ->
   gen_server:call(Pid, get_socketname_primary).
+
+graceful_shutdown(Pid, Reason) ->
+    gen_server:cast(Pid, {graceful_shutdown, Reason}).
 
 % ======================================================================================================================
 
@@ -163,10 +155,6 @@ init([Remote, Id]) ->
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, stopped}, ok, State};
-
-handle_call({graceful_shutdown, Reason}, _From, State) ->
-    {Reply, NewState} = set_shutdown(Reason, State),
-    {reply, Reply, NewState};
 
 handle_call(address, _From, State = #state{address=A}) ->
     {reply, A, State};
@@ -215,6 +203,10 @@ handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) 
 
 handle_call(get_helper_pid, _From, State=#state{helper_pid = H}) ->
     {reply, H, State}.
+
+handle_cast({graceful_shutdown, Reason}, State) ->
+    NewState = set_shutdown(Reason, State),
+    {noreply,NewState};
 
 handle_cast(_Request, State) ->
     {noreply, State}.
@@ -372,7 +364,7 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
             %% we have the ack back for the last sequence number sent by the helper (terminate)
             {stop, {shutdown, sink_shutdown}, State};
         false ->
-            {_, NewState} = set_shutdown(sink_shutdown, State),
+            NewState = set_shutdown(sink_shutdown, State),
             recv(Cont, NewState)
     end;
 
@@ -445,9 +437,9 @@ reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref}) ->
     end.
 
 set_shutdown(Reason, State = #state{shutting_down = false}) ->
-    {ok, State#state{shutting_down_reason = Reason, shutting_down = true}};
+    State#state{shutting_down_reason = Reason, shutting_down = true};
 set_shutdown(_, State) ->
-    {already_shutting_down, State}.
+    State.
 
 shutdown_check(State = #state{shutting_down = true, shutting_down_reason = Reason}) ->
     {stop, {shutdown, Reason}, State};

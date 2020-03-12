@@ -28,8 +28,8 @@ disable(Remote) ->
     _ = supervisor:delete_child(?MODULE, Remote).
 
 enabled() ->
-    [{Remote, ConnMgrSupPid}  || {Remote, ConnMgrSupPid, _, [riak_repl2_rtsource_conn_mgr_remote_sup]}
-        <- supervisor:which_children(?MODULE), is_pid(ConnMgrSupPid)].
+    [{Remote, ConnMgr}  || {Remote, ConnMgr, _, [riak_repl2_rtsource_conn_mgr]}
+        <- supervisor:which_children(?MODULE), is_pid(ConnMgr)].
 
 %% @private
 init([]) ->
@@ -41,5 +41,5 @@ init([]) ->
     {ok, {{one_for_one, 10, 10}, Children}}.
 
 make_remote(Remote) ->
-    {Remote, {riak_repl2_rtsource_conn_mgr_remote_sup, start_link, [Remote]},
-        permanent, infinity, supervisor, [riak_repl2_rtsource_conn_mgr_remote_sup]}.
+    {Remote, {riak_repl2_rtsource_conn_mgr, start_link, [Remote]},
+        permanent, ?SHUTDOWN, worker, [riak_repl2_rtsource_conn_mgr]}.

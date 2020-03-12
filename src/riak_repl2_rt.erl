@@ -100,7 +100,7 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     ToValidate = Started -- ToStop,
     _ = [case lists:keyfind(Remote, 1, Connections) of
              {_, Pid} ->
-                 riak_repl2_rtsource_conn_mgr_remote_sup:maybe_rebalance(Pid);
+                 riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid);
              false ->
                  ok
          end || Remote <- ToValidate ],
@@ -188,7 +188,7 @@ init([]) ->
 handle_call(status, _From, State = #state{sinks = SinkPids}) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     Sources = [try
-                   riak_repl2_rtsource_conn_mgr:get_all_status(Pid, Timeout)
+                   riak_repl2_rtsource_conn_mgr:status(Pid)
                catch
                    _:_ ->
                        {Remote, Pid, unavailable}

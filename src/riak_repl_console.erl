@@ -962,9 +962,8 @@ coordinator_srv_stats() ->
     end.
 
 rt2_source_stats(Pid) ->
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     State = try
-                riak_repl2_rtsource_conn_mgr_remote_sup:get_all_status(Pid, Timeout)
+                riak_repl2_rtsource_conn_mgr:status(Pid)
             catch
                 _:_ ->
                     too_busy

@@ -43,7 +43,7 @@
 
 %% API
 -export([
-    start/2,
+    start/3,
     stop/1,
     get_helper_pid/1,
     status/1,
@@ -97,14 +97,16 @@
     cont = <<>>, % continuation from previous TCP buffer
 
     %% Protocol 4
+    connection_mgr_pid,
+    connection_mgr_ref,
     shutting_down = false,
     shutting_down_reason,
     expect_seq_v4 = 1,
     ref
 }).
 
-start(Remote, Id) ->
-    gen_server:start(?MODULE, [Remote, Id], []).
+start(Remote, Id, ConnMgr) ->
+    gen_server:start(?MODULE, [Remote, Id, ConnMgr], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -150,8 +152,9 @@ graceful_shutdown(Pid, Reason) ->
 %% gen_server callbacks
 
 %% Initialize
-init([Remote, Id]) ->
-  {ok, #state{remote = Remote, id = Id}}.
+init([Remote, Id, ConnMgr]) ->
+    Ref = erlang:monitor(process, ConnMgr),
+    {ok, #state{remote = Remote, id = Id, connection_mgr_pid = ConnMgr, connection_mgr_ref = Ref}}.
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, stopped}, ok, State};
@@ -273,6 +276,10 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
                     Shutdown
             end
     end;
+
+handle_info({'DOWN', MonitorRef, process, Pid, _Reason},
+    State = #state{connection_mgr_ref = MonitorRef, connection_mgr_pid = Pid}) ->
+    {stop, {error, conn_mgr_died}, State};
 
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),

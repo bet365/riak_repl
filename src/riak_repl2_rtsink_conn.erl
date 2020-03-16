@@ -178,7 +178,7 @@ handle_cast(ack_v4, State = #state{expected_seq_v4 = Seq}) ->
     State2 = State#state{expected_seq_v4 = Seq +1},
     case send_ack(Seq, State) of
         ok ->
-            {ok, State2};
+            {noreply, State2};
         {error, Reason} ->
             {stop, {error, Reason}, State2}
     end;

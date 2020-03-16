@@ -40,7 +40,7 @@ handle_cast(_Msg, State) ->
 
 
 handle_info({check_queue, Time}, State = #state{elapsed_sleep = ElapsedSleep}) ->
-    case riak_repl2_rtq:is_empty() of
+    case riak_repl2_rtq_sup:is_empty() of
         true ->
             gen_server:reply(State#state.caller, ok),
             lager:info("Queue empty, no replication queue migration required"),
@@ -86,10 +86,18 @@ handle_info(migrate_queue, State) ->
 %% to downconvert the items into the old "w0" format, otherwise the other node will
 %% send an unsupported object format to its eventual sink node. This is painful to
 %% trace back to here.
+
+%% TODO: deal with N number of realtime queues!
 drain_queue(Peer, PeerWireVer) ->
-    case riak_repl2_rtq:drain_queue() of
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    drain_queue(Peer, PeerWireVer, Concurrency).
+
+drain_queue(_Peer, _PeerWireVer, 0) ->
+    ok;
+drain_queue(Peer, PeerWireVer, Id) ->
+    case riak_repl2_rtq:drain_queue(Id) of
         empty ->
-            ok;
+            drain_queue(PeerWireVer, PeerWireVer, Id -1);
         QEntry ->
             migrate_single_object(QEntry, PeerWireVer, Peer),
             drain_queue(Peer, PeerWireVer)
@@ -104,7 +112,7 @@ migrate_single_object({_Seq, NumItem, W1BinObjs, Meta, Completed}, PeerWireVer, 
                     w0 ->
                       {push, NumItem, BinObjs};
                     w1 ->
-                          case riak_core_capability:get({riak_repl, ack_list}, false) of
+                          case riak_core_capability:get({riak_repl, rtq_completed_list}, false) of
                               false ->
                                   %% remove data from meta
                                   {push, NumItem, BinObjs, Meta};

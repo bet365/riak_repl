@@ -6,7 +6,10 @@
 [
     start_link/0,
     unregister/1,
-    status/0
+    shutdown/0,
+    is_empty/0,
+    status/0,
+    stop/0
 ]).
 
 %% Supervisor callbacks
@@ -22,19 +25,39 @@ unregister(Remote) ->
     Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
     lists:foreach(fun(Id) -> riak_repl2_rtq:unregister(Id, Remote) end, lists:seq(1,Concurrency)).
 
+
+is_empty() ->
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    lists:foreach(fun(Id) -> riak_repl2_rtq:is_empty(Id) end, lists:seq(1,Concurrency)).
+
+
+shutdown() ->
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    lists:foreach(fun(Id) -> riak_repl2_rtq:shutdown(Id) end, lists:seq(1,Concurrency)).
+
+stop() ->
+    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    lists:foreach(fun(Id) -> riak_repl2_rtq:stop(Id) end, lists:seq(1,Concurrency)).
+
+
 status() ->
     get_all_status().
 
 init([]) ->
     Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    MigrationQ = [make_migration_rtq()],
     RTQ = [make_rtq(Id) || Id <- lists:seq(1, Concurrency)],
     Overload = [make_overload(Id) || Id <- lists:seq(1, Concurrency)],
-    Children = RTQ ++ Overload,
+    Children = MigrationQ ++ RTQ ++ Overload,
     {ok, {{one_for_one, 10, 10}, Children}}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+make_migration_rtq() ->
+    {riak_repl2_migration_rtq, {riak_repl2_migration_rtq, start_link, []},
+        transient, ?SHUTDOWN, worker, [riak_repl2_migration_rtq]}.
 
 make_rtq(Id) ->
     Name = riak_repl2_rtq:name(Id),

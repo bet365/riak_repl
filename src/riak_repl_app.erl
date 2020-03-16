@@ -70,7 +70,7 @@ start(_Type, _StartArgs) ->
         0
     ),
     riak_core_capability:register(
-        {riak_repl, ack_list},
+        {riak_repl, rtq_completed_list},
         [true, false],
         false
     ),
@@ -349,7 +349,7 @@ prep_stop(_State) ->
 
         %% the repl bucket hook will check to see if the queue is running and deliver to
         %% another node if it's shutting down
-        riak_repl2_rtq:shutdown(),
+        riak_repl2_rtq_sup:shutdown(),
 
         lager:info("Issusing RTQ shutdown - to send new objects to the proxy"),
 
@@ -362,7 +362,7 @@ prep_stop(_State) ->
         end,
 
         %% stop it cleanly, don't just kill it
-        riak_repl2_rtq:stop(),
+        riak_repl2_rtq_sup:stop(),
         lager:info("Stopping the realtime queue")
 
     catch

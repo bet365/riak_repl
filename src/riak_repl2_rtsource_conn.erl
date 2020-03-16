@@ -285,8 +285,7 @@ handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
 
-terminate(Reason, #state{socket = Socket, transport = Transport, address = A, helper_pid = H}) ->
-    exit(H, shutdown),
+terminate(Reason, #state{socket = Socket, transport = Transport, address = A}) ->
     catch Transport:close(Socket),
     lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, A]),
     ok.

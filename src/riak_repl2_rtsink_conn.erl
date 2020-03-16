@@ -175,16 +175,25 @@ handle_call(stop, _From, State) ->
 %% Note pattern match on expected_seq_v4, as we do not increment upon receive, we only increment once placed
 %% And now the source only sends us 1 object at a time
 handle_cast(ack_v4, State = #state{expected_seq_v4 = Seq}) ->
-    send_ack(Seq, State),
-    {noreply, State#state{expected_seq_v4 = Seq +1}};
+    State2 = State#state{expected_seq_v4 = Seq +1},
+    case send_ack(Seq, State) of
+        ok ->
+            {ok, State2};
+        {error, Reason} ->
+            {stop, {error, Reason}, State2}
+    end;
 
 %% new mechanism to inform the source we struggled to place the object and we are retrying
 %% on N number of failures we will not retry.
 handle_cast(retrying, State = #state{expected_seq_v4 = Seq}) ->
     #state{transport = T, socket = S} = State,
     TcpIOL = riak_repl2_rtframe:encode(retrying, Seq),
-    T:send(S, TcpIOL),
-    {noreply, State};
+    case T:send(S, TcpIOL) of
+        ok ->
+            {noreply, State};
+        {error, Reason} ->
+            {stop, {error, Reason}, State}
+    end;
 
 %% protocol 4, send node shutdown message to source so they can handle it gracefully
 handle_cast(send_shutdown, State = #state{proto = Proto, transport = T, socket = S}) ->
@@ -192,11 +201,15 @@ handle_cast(send_shutdown, State = #state{proto = Proto, transport = T, socket =
     case CommonMajor >= 4 of
         true ->
             TcpIOL = riak_repl2_rtframe:encode(node_shutdown, undefined),
-            T:send(S, TcpIOL);
+            case T:send(S, TcpIOL) of
+                ok ->
+                    {noreply, State};
+                {error, Reason} ->
+                    {stop, {error, Reason}, State}
+            end;
         false ->
-            ok
-    end,
-    {noreply, State};
+            {noreply, State}
+    end;
 
 
 
@@ -212,8 +225,13 @@ handle_cast({ack_v3, Ref, Seq, Skips}, State = #state{seq_ref = Ref}) ->
             {noreply, State#state{completed = Completed2}};
         {AckTo, Completed2}  ->
             TcpIOL = riak_repl2_rtframe:encode(ack, AckTo),
-            T:send(S, TcpIOL),
-            {noreply, State#state{acked_seq = AckTo, completed = Completed2}}
+            State2 = State#state{acked_seq = AckTo, completed = Completed2},
+            case T:send(S, TcpIOL) of
+                ok ->
+                    {noreply, State2};
+                {error, Reason} ->
+                    {stop, {error, Reason}, State2}
+            end
     end;
 handle_cast({ack_v3, Ref, Seq, _Skips}, State) ->
     %% Nothing to send, it's old news.
@@ -424,15 +442,24 @@ do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{exp
             %% and we send a message to source to inform it of the drop
             BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
             gen_server:cast(self(), {drop, BucketType}),
-            send_bucket_type_drop(Seq, State),
-            {ok, State#state{expected_seq_v4 = Seq +1}}
+            State2 = State#state{expected_seq_v4 = Seq +1},
+            case send_bucket_type_drop(Seq, State) of
+                ok ->
+                    {ok, State2};
+                {error, Reason} ->
+                    {error, {error, Reason}, State2}
+            end
     end;
 do_write_objects_v4({objects_and_meta, {Seq, _BinObjs, _Meta}}, State = #state{expected_seq_v4 = Seq2}) ->
     case Seq2 = Seq +1 of
         true ->
             %% send and ack back for this object as we have already placed it into the cluster
-            send_ack(Seq, State),
-            {ok, State};
+            case send_ack(Seq, State) of
+                ok ->
+                    {ok, State};
+                {error, Reason} ->
+                    {error, {error, Reason}, State}
+            end;
         false ->
             %% we have received a seq that is not expected, nor the one before (for a possible retry)
             lager:error("Received wrong sequence number: ~p, Expected sequence number: ~p", [Seq, Seq2]),

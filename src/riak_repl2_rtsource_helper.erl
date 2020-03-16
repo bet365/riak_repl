@@ -72,7 +72,6 @@ handle_call(shutting_down, _From, State = #state{sent_seq = Seq}) ->
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State}.
 
-%% TODO: does this need to be spawned?
 handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
     spawn(fun() -> HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined), T:send(S, HBIOL) end),
     {noreply, State};
@@ -111,13 +110,13 @@ maybe_send(QEntry, From, State) ->
         true ->
             %% unblock the rtq as fast as possible
             gen_server:reply(From, {ok, Seq2}),
-            {noreply, encode_and_send(Seq2, QEntry2, Remote,State)};
+            encode_and_send(Seq2, QEntry2, Remote,State);
         false ->
             case riak_repl_bucket_type_util:is_bucket_typed(Meta) of
                 false ->
                     %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, {ok, Seq2}),
-                    {noreply, encode_and_send(Seq2, QEntry2, Remote, State)};
+                    encode_and_send(Seq2, QEntry2, Remote, State);
                 true ->
                     %% unblock the reference rtq as fast as possible
                     gen_server:reply(From, bucket_type_not_supported_by_remote),
@@ -129,9 +128,13 @@ maybe_send(QEntry, From, State) ->
 encode_and_send(Seq2, QEntry, Remote, State = #state{transport = T, socket = S}) ->
     QEntry2 = merge_forwards_and_routed_meta(QEntry, Remote),
     {Encoded, State2} = encode(QEntry2, State),
-    %% TODO: maybe case statement this in case of an error!
-    T:send(S, Encoded),
-    State2#state{sent_seq = Seq2}.
+    State3 = State2#state{sent_seq = Seq2},
+    case T:send(S, Encoded) of
+        ok ->
+            {noreply, State3};
+        {error, Reason} ->
+            {stop, {error, Reason}, State3}
+    end.
 
 
 encode({Seq, _NumObjs, BinObjs, _Meta}, State = #state{proto = Ver}) when Ver < {2,0} ->

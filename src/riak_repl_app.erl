@@ -350,6 +350,7 @@ prep_stop(_State) ->
         %% the repl bucket hook will check to see if the queue is running and deliver to
         %% another node if it's shutting down
         riak_repl2_rtq:shutdown(),
+
         lager:info("Issusing RTQ shutdown - to send new objects to the proxy"),
 
         case riak_repl_migration:start_link() of

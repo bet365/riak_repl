@@ -17,9 +17,15 @@ start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 enable(Remote) ->
-    lager:info("Starting reference queue for: ~p", [Remote]),
     ChildSpec = make_child(Remote),
-    supervisor:start_child(?MODULE, ChildSpec).
+    case supervisor:start_child(?MODULE, ChildSpec) of
+        {ok, _} ->
+            lager:info("Starting reference queue for: ~p", [Remote]);
+        {ok, _, _} ->
+            lager:info("Starting reference queue for: ~p", [Remote]);
+        _ ->
+            ok
+    end.
 
 disable(Remote) ->
     lager:info("Stopping reference queue for: ~p", [Remote]),

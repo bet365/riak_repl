@@ -18,9 +18,15 @@ start_link() ->
 
 
 enable(Remote) ->
-    lager:info("Starting replication realtime source ~p", [Remote]),
     ChildSpec = make_remote(Remote),
-    supervisor:start_child(?MODULE, ChildSpec).
+    case supervisor:start_child(?MODULE, ChildSpec) of
+        {ok, _} ->
+            lager:info("Starting replication realtime source ~p", [Remote]);
+        {ok, _, _} ->
+            lager:info("Starting replication realtime source ~p", [Remote]);
+        _ ->
+            ok
+    end.
 
 disable(Remote) ->
     lager:info("Stopping replication realtime source ~p", [Remote]),

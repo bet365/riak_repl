@@ -51,7 +51,8 @@
     get_address/1,
     get_socketname_primary/1,
     connected/7,
-    graceful_shutdown/2
+    graceful_shutdown/2,
+    object_sent/2
 ]).
 
 
@@ -102,7 +103,17 @@
     shutting_down = false,
     shutting_down_reason,
     expect_seq_v4 = 1,
+    object_sent_time,
     ref
+}).
+
+-record(latency,
+{
+    total_time = 0,
+    total_number_objects = 0,
+    mean = 0,
+    standard_deviation = 0,
+    max = 0
 }).
 
 start(Remote, Id, ConnMgr) ->
@@ -147,6 +158,9 @@ get_socketname_primary(Pid) ->
 graceful_shutdown(Pid, Reason) ->
     gen_server:cast(Pid, {graceful_shutdown, Reason}).
 
+object_sent(Pid, Time) ->
+    gen_server:call(Pid, {object_sent, Time}, ?LONG_TIMEOUT).
+
 % ======================================================================================================================
 
 %% gen_server callbacks
@@ -169,6 +183,9 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
+handle_call({object_sent, Time}, _From, State) ->
+    {reply, ok, State#state{object_sent_time = Time}};
+
 handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) ->
     #state{remote = Remote, id = Id} = State,
     %% Check the socket is valid, may have been an error
@@ -177,7 +194,8 @@ handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) 
         ok ->
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref),
+            {ok, HelperPid} =
+                riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref, self()),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
             riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source, SocketTag}, Transport),
             State2 =
@@ -379,13 +397,20 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
 %% we can just ack the reference queue, and it shall deal with it correctly.
 
 %% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
-handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq, object_sent_time = TimeSent}) ->
+    %% update stats
+    Now = os:timestamp(),
+    Diff = timer:now_diff(Now, TimeSent),
+    State1 = update_consumer_latency(Diff, State),
+
+    %% update objects sent
     riak_repl_stats:objects_sent(),
+
     %% Reset heartbeat timer, since we've seen activity from the peer
-    State1 = reset_heartbeat_timer(State),
+    State2 = reset_heartbeat_timer(Stat1),
 
     %% ack the reference queue
-    #state{remote = Remote, id = Id, ref = Ref} = State,
+    #state{remote = Remote, id = Id, ref = Ref} = State2,
     ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
 
     %% check if we are shutting down gracefully

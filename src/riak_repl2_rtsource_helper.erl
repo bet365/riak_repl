@@ -10,7 +10,7 @@
 %% API
 -export(
 [
-    start_link/6,
+    start_link/7,
     stop/1,
     send_heartbeat/1,
     send_object/2,
@@ -36,11 +36,12 @@
     proto,      % protocol version negotiated
     sent_seq = 0,   % last sequence sent
     ref,
+    rtsource_conn_pid,
     shutting_down = false
 }).
 
-start_link(Remote, Id, Transport, Socket, Version, RTQRef) ->
-    gen_server:start_link(?MODULE, [Remote, Id, Transport, Socket, Version, RTQRef], []).
+start_link(Remote, Id, Transport, Socket, Version, RTQRef, RTPid) ->
+    gen_server:start_link(?MODULE, [Remote, Id, Transport, Socket, Version, RTQRef, RTPid], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
@@ -57,9 +58,9 @@ shutting_down(Pid) ->
     gen_server:call(Pid, shutting_down, infinity).
 
 
-init([Remote, Id, Transport, Socket, Version, Ref]) ->
+init([Remote, Id, Transport, Socket, Version, Ref, RTPid]) ->
     State = #state{id = Id, remote = Remote, transport = Transport, proto = Version,
-        socket = Socket, ref = Ref},
+        socket = Socket, ref = Ref, rtsource_conn_pid = RTPid},
     riak_repl2_reference_rtq:register(Remote, Id, Ref),
     {ok, State}.
 
@@ -125,10 +126,14 @@ maybe_send(QEntry, From, State) ->
             end
     end.
 
-encode_and_send(Seq2, QEntry, Remote, State = #state{transport = T, socket = S}) ->
+encode_and_send(Seq2, QEntry, Remote, State = #state{transport = T, socket = S, rtsource_conn_pid = RTPid}) ->
     QEntry2 = merge_forwards_and_routed_meta(QEntry, Remote),
     {Encoded, State2} = encode(QEntry2, State),
     State3 = State2#state{sent_seq = Seq2},
+
+    %% crash if this fails, we will just re-connect via conn_mgr
+    ok = riak_repl2_rtsource_conn:object_sent(RTPid, os:timestamp()),
+
     case T:send(S, Encoded) of
         ok ->
             {noreply, State3};

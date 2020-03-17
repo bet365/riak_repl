@@ -351,7 +351,7 @@ try_ssl(Socket, Transport, MyCaps, TheirCaps) ->
                 [TheirName, MyName]),
             {error, no_ssl};
         {true, true} ->
-            lager:info("~p and ~p agreed to use SSL", [MyName, TheirName]),
+            lager:debug("~p and ~p agreed to use SSL", [MyName, TheirName]),
             case riak_core_ssl_util:maybe_use_ssl(riak_core) of
                 false ->
                     {ranch_tcp, Socket};

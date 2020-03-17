@@ -86,8 +86,6 @@ handle_info(migrate_queue, State) ->
 %% to downconvert the items into the old "w0" format, otherwise the other node will
 %% send an unsupported object format to its eventual sink node. This is painful to
 %% trace back to here.
-
-%% TODO: deal with N number of realtime queues!
 drain_queue(Peer, PeerWireVer) ->
     Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
     drain_queue(Peer, PeerWireVer, Concurrency).

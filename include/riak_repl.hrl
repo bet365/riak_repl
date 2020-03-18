@@ -132,3 +132,13 @@
 -define(LONG_TIMEOUT, 120*1000).
 
 -define(V2REPLDEP, "DEPRECATION NOTICE: The replication protocol you are currently using in this cluster has been deprecated and will be unsupported and removed some time after the Riak Enterprise 2.1 release. Please upgrade to the latest replication protocol as soon as possible. If you need assistance migrating contact Basho Client Services or follow the instructions in our documentation ( http://docs.basho.com/riakee/latest/cookbooks/Multi-Data-Center-Replication-UpgradeV2toV3/ ).").
+
+-record(distribution_collector,
+{
+    timestamp = os:timestamp(),
+    number_data_points = 0,
+    aggregate_values = 0,
+    aggregate_values_sqrd = 0,
+    max = 0
+}).
+

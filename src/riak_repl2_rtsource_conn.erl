@@ -52,7 +52,8 @@
     get_socketname_primary/1,
     connected/7,
     graceful_shutdown/2,
-    object_sent/2
+    object_sent/2,
+    get_latency/2
 ]).
 
 
@@ -98,6 +99,7 @@
     cont = <<>>, % continuation from previous TCP buffer
 
     %% Protocol 4
+    latency = #distribution_collector{},
     connection_mgr_pid,
     connection_mgr_ref,
     shutting_down = false,
@@ -105,15 +107,6 @@
     expect_seq_v4 = 1,
     object_sent_time,
     ref
-}).
-
--record(latency,
-{
-    total_time = 0,
-    total_number_objects = 0,
-    mean = 0,
-    standard_deviation = 0,
-    max = 0
 }).
 
 start(Remote, Id, ConnMgr) ->
@@ -161,6 +154,14 @@ graceful_shutdown(Pid, Reason) ->
 object_sent(Pid, Time) ->
     gen_server:call(Pid, {object_sent, Time}, ?LONG_TIMEOUT).
 
+get_latency(Pid, Timeout) ->
+    try
+        gen_server:call(Pid, latency, Timeout)
+    catch
+        _:_ ->
+            error
+    end.
+
 % ======================================================================================================================
 
 %% gen_server callbacks
@@ -182,6 +183,17 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
 
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
+
+handle_call(latency, _From, State = #state{latency = Latency, address = Addr}) ->
+    #distribution_collector{timestamp = T1} = Latency,
+    ResetAfter = app_helper:get_env(riak_repl, reset_consumer_latency, 60) * 1000,
+    TimeDiff = timer:now_diff(os:timestamp(), T1) / 1000,
+    case  TimeDiff >= ResetAfter of
+        true ->
+            {reply, {Addr, #distribution_collector{}}, State#state{latency = #distribution_collector{}}};
+        false ->
+            {reply, {Addr, Latency}, State}
+    end;
 
 handle_call({object_sent, Time}, _From, State) ->
     {reply, ok, State#state{object_sent_time = Time}};
@@ -401,13 +413,13 @@ handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq,
     %% update stats
     Now = os:timestamp(),
     Diff = timer:now_diff(Now, TimeSent),
-    State1 = update_consumer_latency(Diff, State),
+    State1 = update_latency(Diff, State),
 
     %% update objects sent
     riak_repl_stats:objects_sent(),
 
     %% Reset heartbeat timer, since we've seen activity from the peer
-    State2 = reset_heartbeat_timer(Stat1),
+    State2 = reset_heartbeat_timer(State1),
 
     %% ack the reference queue
     #state{remote = Remote, id = Id, ref = Ref} = State2,
@@ -577,6 +589,46 @@ get_heartbeat_timeout(#state{remote = RemoteName}) ->
 
 
 -endif.
+
+
+%% ===================================================================
+%% Update Latency
+%% ===================================================================
+update_latency(Time, State = #state{latency = #distribution_collector{timestamp = Tstamp}}) ->
+    ResetAfter = app_helper:get_env(riak_repl, reset_consumer_latency, 60) * 1000,
+    TimeDiff = timer:now_diff(os:timestamp(), Tstamp) / 1000,
+    update_latency(Time, State, TimeDiff >= ResetAfter).
+
+update_latency(Time, State, true) ->
+    Latency = #distribution_collector
+    {
+        timestamp = os:timestamp(),
+        number_data_points = 1,
+        aggregate_values = Time,
+        aggregate_values_sqrd = Time*Time,
+        max = Time
+    },
+    State#state{latency = Latency};
+update_latency(Time, State = #state{latency = Latency}, false) ->
+    #distribution_collector
+    {number_data_points = N1, aggregate_values = AV1, aggregate_values_sqrd = AVS1, max = Max1} = Latency,
+    %% increase the number of data points
+    N2 = N1 +1,
+    %% calculate new aggregate values
+    AV2 = AV1 + Time,
+    %% calculate new aggregate values sqrd
+    AVS2 = AVS1 + (Time*Time),
+    %% calculate new max
+    Max2 = case Time > Max1 of
+               true ->
+                   Time;
+               false ->
+                   Max1
+           end,
+    Latency2 = #distribution_collector
+    {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2},
+    State#state{latency = Latency2}.
+
 
 %% ===================================================================
 %% EUnit tests

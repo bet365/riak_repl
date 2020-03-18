@@ -111,39 +111,7 @@ handle_call({connected, Socket, Transport, Addr, Proto, Props, Id}, _From, State
 
 %% TODO: decide on the information we want here
 handle_call(status, _From, State) ->
-%%    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
-%%    orddict:fold(
-%%        fun(_, Pid, Acc) ->
-%%            case riak_repl2_rtsource_conn:status(Pid, Timeout) of
-%%                [] -> Acc;
-%%                Status -> [Status | Acc]
-%%            end
-%%        end, [], ConnectionMonitors),
-
-    #state
-    {
-        remote = Remote,
-        balanced = Balanced,
-        balancing = Balancing,
-        number_of_connection = NumberOfConnections,
-        connections = Connections
-    } = State,
-
-    ConnectionsPerSink =
-        orddict:fold(
-            fun(_, #connections{connection_counts = C}, Acc) ->
-                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, C, Acc)
-            end, orddict:new(), Connections),
-
-    Stats =
-        [
-            {remote, Remote},
-            {balanced, Balanced},
-            {balancing, Balancing},
-            {number_of_connections, NumberOfConnections},
-            {connections, ConnectionsPerSink}
-        ],
-
+    Stats = get_status(State),
     {reply, Stats, State};
 
 handle_call(get_rtsource_conn_pids, _From, State = #state{connections = Connections}) ->
@@ -276,7 +244,7 @@ handle_info(Info, State) ->
 %%%=====================================================================================================================
 
 terminate(Reason, _State=#state{remote = Remote, connections = Connections}) ->
-    lager:info("RTSOURCE CONN MGR has died", [Reason]),
+    lager:info("RTSOURCE CONN MGR has died due to: ~p", [Reason]),
     riak_core_connection_mgr:disconnect({rt_repl, Remote}),
     orddict:fold(
         fun(_, #connections{connections_monitor_pids = Pids}, _) ->
@@ -599,7 +567,7 @@ get_number_of_connections_per_queue(Name) ->
 %%%===================================================================================================================%%
 
 %%%===================================================================
-%% Update Bad Sink Nodes (DONE) %% TODO: this logic is not correct for deciding if a sink has 0 connections!
+%% Update Bad Sink Nodes (DONE)
 %%%===================================================================
 %% This is used to check if we have any connections to a sink node after we have completed a rebalance
 %% If we do not, we determine that we are unable to connect to the node and set it as a 'bad' node.
@@ -813,3 +781,110 @@ set_balanced_connections_helper(Id, Connection, {Acc, ConnectionsPerQ, SinkNodes
     NewAcc = orddict:store(Id, Connection#connections{balanced_connection_counts = BalancedConnectionCounts}, Acc),
     NewSinkNodes = T ++ [H],
     {NewAcc, ConnectionsPerQ, NewSinkNodes}.
+
+
+%%%===================================================================
+%% Status
+%%%===================================================================
+%% Old Status
+%%    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+%%    orddict:fold(
+%%        fun(_, Pid, Acc) ->
+%%            case riak_repl2_rtsource_conn:status(Pid, Timeout) of
+%%                [] -> Acc;
+%%                Status -> [Status | Acc]
+%%            end
+%%        end, [], ConnectionMonitors),
+
+
+get_status(State) ->
+    #state
+    {
+        remote = Remote,
+        balanced = Balanced,
+        balancing = Balancing,
+        number_of_connection = NumberOfConnections,
+        number_of_pending_connects = NumberOfPendingConnects,
+        number_of_pending_disconnects = NumerberOfPendingDisconnects
+    } = State,
+
+    Stats =
+        [
+            {remote, Remote},
+            {balanced, Balanced},
+            {balancing, Balancing},
+            {number_of_connections, NumberOfConnections},
+            {number_of_pending_connects, NumberOfPendingConnects},
+            {number_of_pending_disconnects, NumerberOfPendingDisconnects},
+            {connections, get_connection_counts(State)},
+            {latency, get_latency(State)}
+        ],
+    Stats.
+
+
+get_connection_counts(#state{connections = Connections}) ->
+    orddict:fold(
+        fun(_, #connections{connection_counts = C}, Acc) ->
+            orddict:merge(fun(_, V1, V2) -> V1 + V2 end, C, Acc)
+        end, orddict:new(), Connections).
+
+get_latency(State = #state{connections = Connections}) ->
+    %% Latency information
+    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+    LatencyPerSink =
+        orddict:fold(
+            fun(_, #connections{connections_monitor_pids = Pids}, Acc) ->
+                orddict:fold(
+                    fun(_Ref, Pid, Acc2) ->
+                        case riak_repl2_rtsource_conn:get_latency(Pid, Timeout) of
+                            error -> Acc2;
+                            {Addr, LatencyDistribtion} -> merge_latency(Addr, LatencyDistribtion, Acc2)
+                        end
+                    end, Acc, Pids)
+            end, orddict:new(), Connections),
+    generate_latency_from_distribtuion(LatencyPerSink, State).
+
+merge_latency(Addr, LatencyDistribtion, Acc) ->
+    case orddict:find(Addr, Acc) of
+        error ->
+            orddict:store(Addr, LatencyDistribtion, Acc);
+        {ok, OGLatencyDistribtion} ->
+            Latency3 = merge_latency(OGLatencyDistribtion, LatencyDistribtion),
+            orddict:store(Addr, Latency3, Acc)
+    end.
+
+merge_latency(L1, L2) ->
+    #distribution_collector
+    {number_data_points = N1, aggregate_values = AV1, aggregate_values_sqrd = AVS1, max = Max1} = L1,
+    #distribution_collector
+    {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2} = L2,
+    Max =  case Max1 >= Max2 of
+               true ->
+                   Max1;
+               false ->
+                   Max2
+           end,
+    #distribution_collector
+    {number_data_points = N1 + N2, aggregate_values = AV1 + AV2, aggregate_values_sqrd = AVS1 + AVS2, max = Max}.
+
+
+generate_latency_from_distribtuion(LatencyPerSink, #state{remote = Remote}) ->
+    RemoteLatencyDistribution =
+        orddict:fold(
+            fun(_, LatencyDistribution, Acc) ->
+                merge_latency(Acc, LatencyDistribution)
+            end, #distribution_collector{}, LatencyPerSink),
+    AllLatencyDistributions = orddict:store(Remote, RemoteLatencyDistribution, LatencyPerSink),
+    orddict:map(fun(_Key, Distribution) -> calculate_latency(Distribution) end, AllLatencyDistributions).
+
+calculate_latency(#distribution_collector{number_data_points = 0}) ->
+    {{mean, 0}, {percentile_95, 0}, {percentile_99, 0}, {percentile_100, 0}};
+calculate_latency(Dist) ->
+    #distribution_collector
+    {number_data_points = N, aggregate_values = AV, aggregate_values_sqrd = AVS, max = Max} = Dist,
+    Mean = AV / N,
+    Var = (AVS + (N*Mean*Mean) - (2*Mean*AV)) / N,
+    Std = math:sqrt(Var),
+    P95 = Mean + 1.645*Std,
+    P99 = Mean + 2.326*Std,
+    {{mean, round(Mean)}, {percentile_95, round(P95)}, {percentile_99, round(P99)}, {percentile_100, round(Max)}}.

@@ -791,10 +791,10 @@ cache_peername_test_case() ->
 
 % test case for https://github.com/basho/riak_repl/issues/252
 reactivate_socket_interval_test_case() ->
-    ?assertEqual(?REACTIVATE_SOCK_INT_MILLIS, get_reactivate_socket_interval()),
+    ?assertEqual(?REACTIVATE_SOCK_INT_MILLIS, get_reactivate_socket_interval_v3()),
 
     application:set_env(riak_repl, reactivate_socket_interval_millis, ?REACTIVATE_SOCK_INT_MILLIS_TEST_VAL),
-    ?assertEqual(?REACTIVATE_SOCK_INT_MILLIS_TEST_VAL, get_reactivate_socket_interval()).
+    ?assertEqual(?REACTIVATE_SOCK_INT_MILLIS_TEST_VAL, get_reactivate_socket_interval_v3()).
 
 listen_sink() ->
     riak_repl2_rtsink_conn:sync_register_service().

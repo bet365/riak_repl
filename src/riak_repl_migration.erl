@@ -87,7 +87,7 @@ handle_info(migrate_queue, State) ->
 %% send an unsupported object format to its eventual sink node. This is painful to
 %% trace back to here.
 drain_queue(Peer, PeerWireVer) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     drain_queue(Peer, PeerWireVer, Concurrency).
 
 drain_queue(_Peer, _PeerWireVer, 0) ->

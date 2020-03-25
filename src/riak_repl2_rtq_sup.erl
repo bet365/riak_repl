@@ -22,21 +22,21 @@ start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
 unregister(Remote) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     lists:foreach(fun(Id) -> riak_repl2_rtq:unregister(Id, Remote) end, lists:seq(1,Concurrency)).
 
 
 is_empty() ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     lists:foreach(fun(Id) -> riak_repl2_rtq:is_empty(Id) end, lists:seq(1,Concurrency)).
 
 
 shutdown() ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     lists:foreach(fun(Id) -> riak_repl2_rtq:shutdown(Id) end, lists:seq(1,Concurrency)).
 
 stop() ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     lists:foreach(fun(Id) -> riak_repl2_rtq:stop(Id) end, lists:seq(1,Concurrency)).
 
 
@@ -44,7 +44,7 @@ status() ->
     get_all_status().
 
 init([]) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     MigrationQ = [make_migration_rtq()],
     RTQ = [make_rtq(Id) || Id <- lists:seq(1, Concurrency)],
     Overload = [make_overload(Id) || Id <- lists:seq(1, Concurrency)],
@@ -73,13 +73,13 @@ make_overload(Id) ->
 
 get_all_status() ->
     try
-        N = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+        Concurrency = riak_repl_util:get_rtq_concurrency(),
         AllStats =
             lists:foldl(
                 fun(X, Acc) ->
                     Status = riak_repl2_rtq:status(X),
                     orddict:to_list(merge_status(orddict:from_list(Status), orddict:from_list(Acc)))
-                end, riak_repl2_rtq:status(1), lists:seq(2, N)),
+                end, riak_repl2_rtq:status(1), lists:seq(2, Concurrency)),
 
         % I'm having the calling process do derived stats because
         % I don't want to block the rtq from processing objects.

@@ -62,7 +62,8 @@
          mode_12_enabled/1,
          mode_13_enabled/1,
          maybe_get_vnode_lock/1,
-         maybe_send/3
+         maybe_send/3,
+         get_rtq_concurrency/0
      ]).
 
 -export([wire_version/1,
@@ -80,6 +81,13 @@
 -define(W1_VER, 1). %% first non-just-term-to-binary wire format
 -define(W2_VER, 2). %% first non-just-term-to-binary wire format
 -define(BAD_SOCKET_NUM, -1).
+
+
+get_rtq_concurrency() ->
+  case app_helper:get_env(riak_repl, rtq_concurrency) of
+    N when is_integer(N) -> N;
+    _ -> erlang:system_info(schedulers)
+  end.
 
 make_peer_info() ->
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),

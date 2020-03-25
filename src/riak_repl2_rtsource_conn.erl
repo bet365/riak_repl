@@ -184,15 +184,15 @@ handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
-handle_call(latency, _From, State = #state{latency = Latency, address = Addr}) ->
+handle_call(latency, _From, State = #state{latency = Latency, peername = Peername}) ->
     #distribution_collector{timestamp = T1} = Latency,
     ResetAfter = app_helper:get_env(riak_repl, reset_consumer_latency, 60) * 1000,
     TimeDiff = timer:now_diff(os:timestamp(), T1) / 1000,
     case  TimeDiff >= ResetAfter of
         true ->
-            {reply, {Addr, #distribution_collector{}}, State#state{latency = #distribution_collector{}}};
+            {reply, {Peername, #distribution_collector{}}, State#state{latency = #distribution_collector{}}};
         false ->
-            {reply, {Addr, Latency}, State}
+            {reply, {Peername, Latency}, State}
     end;
 
 handle_call({object_sent, Time}, _From, State) ->
@@ -351,12 +351,7 @@ get_status(State) ->
             undefined ->
                 [{connected, false}];
             _ ->
-                HBStats = case get_heartbeat_enabled(State) of
-                              true ->
-                                  [{hb_rtt, HBRTT}];
-                              false ->
-                                  []
-                          end,
+                HBStats = [{hb_rtt, HBRTT}],
                 SocketStats = riak_core_tcp_mon:socket_status(S),
                 [
                     {connected, true},
@@ -492,20 +487,11 @@ shutdown_check(_State) ->
 %% ================================================================================================================== %%
 %% Heartbeat's
 %% ================================================================================================================== %%
-
-
-send_heartbeat(State) ->
-    send_heartbeat(State, get_heartbeat_enabled(State)).
-
-%% Heartbeat is disabled, do nothing
-send_heartbeat(State, false) ->
-    State;
-
 %% Heartbeat supported and enabled, tell helper to send the message,
 %% and start the timeout.  Managing heartbeat from this process
 %% will catch any bug that causes the helper process to hang as
 %% well as connection issues - either way we want to re-establish.
-send_heartbeat(State, true) ->
+send_heartbeat(State) ->
     #state
     {
         hb_sent_q = SentQ,
@@ -522,72 +508,81 @@ send_heartbeat(State, true) ->
     State2.
 
 %% Schedule the next heartbeat
-schedule_heartbeat(State) ->
-    schedule_heartbeat(State, get_heartbeat_enabled(State)).
-
-schedule_heartbeat(State, false) ->
-    State;
-schedule_heartbeat(State = #state{hb_interval_tref = undefined}, true) ->
+schedule_heartbeat(State = #state{hb_interval_tref = undefined}) ->
     HBInterval = get_heartbeat_interval(State),
     TRef = erlang:send_after(HBInterval, self(), send_heartbeat),
     State#state{hb_interval_tref = TRef};
-schedule_heartbeat(State = #state{hb_interval_tref = _TRef}, true) ->
+schedule_heartbeat(State = #state{hb_interval_tref = _TRef}) ->
     State.
 
 
-get_heartbeat_enabled() ->
-    app_helper:get_env(riak_repl, default_rt_heartbeat_enabled, true).
 
-get_heartbeat_interval() ->
-    case app_helper:get_env(riak_repl, default_rt_heartbeat_interval) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            ?DEFAULT_HBINTERVAL
-    end.
-
-get_heartbeat_timeout() ->
-    case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            ?DEFAULT_HBTIMEOUT
-    end.
 
 
 
 -ifdef(TEST).
 
-get_heartbeat_enabled(_) ->
-    get_heartbeat_enabled().
-
 get_heartbeat_interval(_) ->
-    get_heartbeat_interval().
+    case get_heartbeat_interval_node() of
+        undefined ->  ?DEFAULT_HBTIMEOUT;
+        N -> N
+    end.
 
 get_heartbeat_timeout(_) ->
-    get_heartbeat_timeout().
+    case get_heartbeat_timeout_node() of
+        undefined -> ?DEFAULT_HBINTERVAL;
+        N -> N
+    end.
 
 -else.
 
-get_heartbeat_enabled(#state{remote = RemoteName}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_enabled, RemoteName}) of
-        Enabled when is_boolean(Enabled) -> Enabled;
-        _ -> get_heartbeat_enabled()
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                  Heartbeat Interval
+%% ------------------------------------------------------------------------------------------------------------------ %%
+
+get_heartbeat_interval(State) ->
+    case get_heartbeat_interval_node() of
+        undefined -> get_heartbeat_interval_cluster(State);
+        N -> N
     end.
 
-get_heartbeat_interval(#state{remote = RemoteName}) ->
+get_heartbeat_interval_node() ->
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_interval) of
+        Time when is_integer(Time) ->
+            Time * 1000;
+        _ ->
+            undefined
+    end.
+
+get_heartbeat_interval_cluster(#state{remote = RemoteName}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_interval, RemoteName}) of
         Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> get_heartbeat_interval()
+        _ -> ?DEFAULT_HBTIMEOUT
     end.
 
-get_heartbeat_timeout(#state{remote = RemoteName}) ->
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                  Heartbeat Timeout
+%% ------------------------------------------------------------------------------------------------------------------ %%
+
+get_heartbeat_timeout(State) ->
+    case get_heartbeat_timeout_node() of
+        undefined -> get_heartbeat_timeout_cluster(State);
+        N -> N
+    end.
+
+get_heartbeat_timeout_node() ->
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout) of
+        Time when is_integer(Time) ->
+            Time * 1000;
+        _ ->
+            undefined
+    end.
+
+get_heartbeat_timeout_cluster(#state{remote = RemoteName}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, RemoteName}) of
         Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> get_heartbeat_timeout()
+        _ -> ?DEFAULT_HBINTERVAL
     end.
-
-
 -endif.
 
 

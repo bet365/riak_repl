@@ -16,7 +16,7 @@ start_link(Remote) ->
     supervisor:start_link(?MODULE, [Remote]).
 
 shutdown(Remote) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     lists:foreach(fun(Id) -> riak_repl2_reference_rtq:shutdown(Remote, Id) end, lists:seq(1, Concurrency)).
 
 %%%===================================================================
@@ -25,7 +25,7 @@ shutdown(Remote) ->
 
 
 init([Remote]) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     Children = [make_child(Remote, Id) || Id <- lists:seq(1, Concurrency)],
     {ok, {{one_for_one, 10, 10}, Children}}.
 

@@ -745,28 +745,59 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
     QSizeBytes.
 
 get_queue_max_bytes() ->
-    %% Default maximum realtime queue size to 100Mb
     app_helper:get_env(riak_repl, default_queue_max_bytes, ?DEFAULT_MAX_BYTES).
 
 get_remote_max_bytes(_) ->
     app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES).
+
 
 -else.
 qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
 
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                      Queue Max Bytes
+%% ------------------------------------------------------------------------------------------------------------------ %%
 get_queue_max_bytes() ->
+    case get_queue_max_bytes_node() of
+        undefined -> get_queue_max_bytes_cluster();
+        N -> N
+    end.
+
+get_queue_max_bytes_node() ->
+    case app_helper:get_env(riak_repl, default_queue_max_bytes) of
+        N when is_integer(N) -> N;
+        _ -> undefined
+    end.
+
+get_queue_max_bytes_cluster() ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes) of
-        undefined -> app_helper:get_env(riak_repl, default_queue_max_bytes, ?DEFAULT_MAX_BYTES);
+        undefined -> ?DEFAULT_MAX_BYTES;
         MaxBytes -> MaxBytes
     end.
 
-get_remote_max_bytes(#remote{name = Name}) ->
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                      Consumer Max Bytes
+%% ------------------------------------------------------------------------------------------------------------------ %%
+get_remote_max_bytes(Remote) ->
+    case get_remote_max_bytes_node() of
+        undefined -> get_remote_max_bytes_cluster(Remote);
+        N -> N
+    end.
+
+get_remote_max_bytes_node() ->
+    case app_helper:get_env(riak_repl, default_consumer_max_bytes) of
+        N when is_integer(N) -> N;
+        _ -> undefined
+    end.
+
+get_remote_max_bytes_cluster(#remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
-        undefined -> app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES);
+        undefined -> ?DEFAULT_MAX_BYTES;
         MaxBytes -> MaxBytes
     end.
+
 -endif.
 
 

@@ -95,7 +95,7 @@ get_rtsource_conn_pids(Pid) ->
 
 
 init([RemoteName]) ->
-    Concurrency = app_helper:get_env(riak_repl, rtq_concurrency, erlang:system_info(schedulers)),
+    Concurrency = riak_repl_util:get_rtq_concurrency(),
     Connections = lists:foldl(
                     fun(N, Acc) ->
                         orddict:store(N, #connections{}, Acc)
@@ -261,7 +261,7 @@ terminate(Reason, _State=#state{remote = Remote, connections = Connections}) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-%%%=====================================================================================================================
+%%%====================================================================================================================
 
 
 %%%===================================================================
@@ -271,8 +271,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% ensure that the iplist timeout ref is undefined as well
 %% if it is not undefined, it means we have no ip's in the list and are in a loop to get a non-empty list
 start_rebalance_timer(State = #state{ipl_timeout_tref = undefined, rb_timeout_tref = undefined}) ->
-    DelaySecs = app_helper:get_env(riak_repl, rt_rebalance_delay, ?DEFAULT_RT_REBALANCE_DELAY),
-    TimeDelay = DelaySecs * 1000,
+    TimeDelay = get_rebalance_delay(),
     RbTimeoutTref = erlang:send_after(TimeDelay, self(), rebalance_now),
     State#state{rb_timeout_tref = RbTimeoutTref};
 start_rebalance_timer(State) ->
@@ -282,8 +281,7 @@ start_rebalance_timer(State) ->
 start_bad_sink_timer(State = #state{bad_sink_nodes = []}) ->
     State;
 start_bad_sink_timer(State = #state{bs_timeout_tref = undefined}) ->
-    DelaySecs = app_helper:get_env(riak_repl, rt_retry_bad_sinks, ?DEFAULT_RT_RETRY_BAD_SINKS),
-    TimeDelay = DelaySecs * 1000,
+    TimeDelay = get_retry_bad_sinks_delay(),
     BsTimeoutTref = erlang:send_after(TimeDelay, self(), try_bad_sink_nodes),
     State#state{bs_timeout_tref = BsTimeoutTref};
 start_bad_sink_timer(State) ->
@@ -307,7 +305,7 @@ connection_failed(_Id, _Addr, State) ->
     start_rebalance_timer(State3).
 
 %%%===================================================================
-%% Accept Connection %% TODO: when we finish balancing, we need to do a rebalance check
+%% Accept Connection
 %%%===================================================================
 accept_connection(Socket, Transport, Addr, _Proto, _Props, 0, State = #state{bad_sink_nodes = BadSinkNodes}) ->
     catch Transport:close(Socket),
@@ -540,27 +538,59 @@ connect_to_sink(Addr, Id, State) ->
             {State, Id}
     end.
 
+
+%%%=====================================================================================================================
+%%% Environment Variables
+%%%=====================================================================================================================
+
+%%%===================================================================
+%% Get Rebalance Delay
+%%%===================================================================
+get_rebalance_delay() ->
+    case app_helper:get_env(riak_repl, rt_rebalance_delay) of
+        N when is_integer(N) and N > 0 ->
+            N * 1000;
+        _ -> ?DEFAULT_RT_REBALANCE_DELAY
+    end.
+
+%%%===================================================================
+%% Get Retry Bad Sink Delay
+%%%===================================================================
+get_retry_bad_sinks_delay() ->
+    case app_helper:get_env(riak_repl, rt_retry_bad_sinks) of
+        N when is_integer(N) and N > 0 ->
+            N * 1000;
+        _ -> ?DEFAULT_RT_RETRY_BAD_SINKS
+    end.
+
 %%%===================================================================
 %% Get the number of connections for our remote (DONE)
 %%%===================================================================
-get_number_of_connections_per_queue() ->
-    case app_helper:get_env(riak_repl, default_number_of_connections_per_queue) of
-        N when is_integer(N) and N > 0 ->
-            N;
-        _ ->
-            one_per_sink_node
-    end.
 -ifdef(TEST).
+
 get_number_of_connections_per_queue(_) ->
-    get_number_of_connections_per_queue().
+    app_helper:get_env(riak_repl, default_number_of_connections_per_queue, one_per_sink_node).
+
 -else.
+
 get_number_of_connections_per_queue(Name) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Name}) of
-        N when is_integer(N) and N > 0 ->
-            N;
-        _ ->
-            get_number_of_connections_per_queue()
+    case get_number_of_connections_per_queue_node() of
+        undefined -> get_number_of_connections_per_queue_cluster(Name);
+        N -> N
     end.
+
+get_number_of_connections_per_queue_node() ->
+    case app_helper:get_env(riak_repl, default_number_of_connections_per_queue) of
+        N when is_integer(N) and N > 0 -> N;
+        _ -> undefined
+    end.
+
+get_number_of_connections_per_queue_cluster(Name) ->
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Name}) of
+        N when is_integer(N) and N > 0 -> N;
+        _ -> one_per_sink_node
+    end.
+
 -endif.
 %%%===================================================================================================================%%
 %%                                              Update State                                                          %%
@@ -823,10 +853,16 @@ get_status(State) ->
 
 
 get_connection_counts(#state{connections = Connections}) ->
+    Cumlative =
+        orddict:fold(
+            fun(_Id, #connections{connection_counts = C}, Acc) ->
+                orddict:merge(fun(_, V1, V2) -> V1 + V2 end, C, Acc)
+            end, orddict:new(), Connections),
     orddict:fold(
-        fun(_, #connections{connection_counts = C}, Acc) ->
-            orddict:merge(fun(_, V1, V2) -> V1 + V2 end, C, Acc)
-        end, orddict:new(), Connections).
+        fun({Ip, Port}, Count, Acc) ->
+            FormatedAddr = riak_repl_util:format_ip_and_port(Ip, Port),
+            orddict:store(FormatedAddr, Count , Acc)
+        end, orddict:new(), Cumlative).
 
 get_latency(State = #state{connections = Connections}) ->
     %% Latency information
@@ -878,7 +914,7 @@ generate_latency_from_distribtuion(LatencyPerSink, #state{remote = Remote}) ->
     orddict:map(fun(_Key, Distribution) -> calculate_latency(Distribution) end, AllLatencyDistributions).
 
 calculate_latency(#distribution_collector{number_data_points = 0}) ->
-    {{mean, 0}, {percentile_95, 0}, {percentile_99, 0}, {percentile_100, 0}};
+    [{mean, 0}, {percentile_95, 0}, {percentile_99, 0}, {percentile_100, 0}];
 calculate_latency(Dist) ->
     #distribution_collector
     {number_data_points = N, aggregate_values = AV, aggregate_values_sqrd = AVS, max = Max} = Dist,
@@ -887,4 +923,4 @@ calculate_latency(Dist) ->
     Std = math:sqrt(Var),
     P95 = Mean + 1.645*Std,
     P99 = Mean + 2.326*Std,
-    {{mean, round(Mean)}, {percentile_95, round(P95)}, {percentile_99, round(P99)}, {percentile_100, round(Max)}}.
+    [{mean, round(Mean)}, {percentile_95, round(P95)}, {percentile_99, round(P99)}, {percentile_100, round(Max)}].

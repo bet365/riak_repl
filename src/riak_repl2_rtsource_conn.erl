@@ -523,13 +523,13 @@ schedule_heartbeat(State = #state{hb_interval_tref = _TRef}) ->
 -ifdef(TEST).
 
 get_heartbeat_interval(_) ->
-    case get_heartbeat_interval_node() of
+    case get_heartbeat_interval_default() of
         undefined ->  ?DEFAULT_HBTIMEOUT;
         N -> N
     end.
 
 get_heartbeat_timeout(_) ->
-    case get_heartbeat_timeout_node() of
+    case get_heartbeat_timeout_default() of
         undefined -> ?DEFAULT_HBINTERVAL;
         N -> N
     end.
@@ -541,23 +541,21 @@ get_heartbeat_timeout(_) ->
 %% ------------------------------------------------------------------------------------------------------------------ %%
 
 get_heartbeat_interval(State) ->
-    case get_heartbeat_interval_node() of
-        undefined -> get_heartbeat_interval_cluster(State);
+    case get_heartbeat_interval_for_remote(State) of
+        undefined -> get_heartbeat_interval_default();
         N -> N
     end.
 
-get_heartbeat_interval_node() ->
+get_heartbeat_interval_default() ->
     case app_helper:get_env(riak_repl, default_rt_heartbeat_interval) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            undefined
+        Time when is_integer(Time) -> Time * 1000;
+        _ -> ?DEFAULT_HBTIMEOUT
     end.
 
-get_heartbeat_interval_cluster(#state{remote = RemoteName}) ->
+get_heartbeat_interval_for_remote(#state{remote = RemoteName}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_interval, RemoteName}) of
         Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> ?DEFAULT_HBTIMEOUT
+        _ -> undefined
     end.
 
 %% ------------------------------------------------------------------------------------------------------------------ %%
@@ -565,23 +563,21 @@ get_heartbeat_interval_cluster(#state{remote = RemoteName}) ->
 %% ------------------------------------------------------------------------------------------------------------------ %%
 
 get_heartbeat_timeout(State) ->
-    case get_heartbeat_timeout_node() of
-        undefined -> get_heartbeat_timeout_cluster(State);
+    case get_heartbeat_timeout_for_remote(State) of
+        undefined -> get_heartbeat_timeout_default();
         N -> N
     end.
 
-get_heartbeat_timeout_node() ->
+get_heartbeat_timeout_default() ->
     case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout) of
-        Time when is_integer(Time) ->
-            Time * 1000;
-        _ ->
-            undefined
+        Time when is_integer(Time) -> Time * 1000;
+        _ -> ?DEFAULT_HBINTERVAL
     end.
 
-get_heartbeat_timeout_cluster(#state{remote = RemoteName}) ->
+get_heartbeat_timeout_for_remote(#state{remote = RemoteName}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, RemoteName}) of
         Interval when is_integer(Interval) -> Interval * 1000;
-        _ -> ?DEFAULT_HBINTERVAL
+        _ -> undefined
     end.
 -endif.
 
@@ -590,7 +586,7 @@ get_heartbeat_timeout_cluster(#state{remote = RemoteName}) ->
 %% Update Latency
 %% ===================================================================
 update_latency(Time, State = #state{latency = #distribution_collector{timestamp = Tstamp}}) ->
-    ResetAfter = app_helper:get_env(riak_repl, reset_consumer_latency, 60) * 1000,
+    ResetAfter = get_consumer_latency_reset(),
     TimeDiff = timer:now_diff(os:timestamp(), Tstamp) / 1000,
     update_latency(Time, State, TimeDiff >= ResetAfter).
 
@@ -623,6 +619,12 @@ update_latency(Time, State = #state{latency = Latency}, false) ->
     Latency2 = #distribution_collector
     {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2},
     State#state{latency = Latency2}.
+
+get_consumer_latency_reset() ->
+    case app_helper:get_env(riak_repl, reset_consumer_latency) of
+        N when is_integer(N) and N > 0 -> N * 1000;
+        _ -> 60000
+    end.
 
 
 %% ===================================================================

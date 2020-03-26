@@ -544,21 +544,21 @@ get_retry_limit(_) ->
 -else.
 
 get_retry_limit(State) ->
-    case get_retry_limit_node() of
-        undefined -> get_retry_limit_cluster(State);
+    case get_retry_limit_for_remote(State) of
+        undefined -> get_retry_limit_default();
         N -> N
     end.
 
-get_retry_limit_node() ->
+get_retry_limit_default() ->
     case app_helper:get_env(riak_repl, default_retry_limit) of
         N when is_integer(N) -> N;
-        _ -> undefined
+        _ -> ?DEFAULT_RETRY_LIMIT
     end.
 
-get_retry_limit_cluster(#state{name = Name}) ->
+get_retry_limit_for_remote(#state{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {retry_limit, Name}) of
         N when is_integer(N) -> N;
-        _ -> ?DEFAULT_RETRY_LIMIT
+        _ -> undefined
     end.
 
 -endif.

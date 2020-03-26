@@ -19,10 +19,9 @@
     shutdown/1,
     stop/1,
     is_running/1,
-
-
     drain_queue/1,
     is_empty/1,
+    get_queue_max_bytes/0,
 
     summarize/1,
     dumpq/1,
@@ -477,7 +476,7 @@ remotes_needs_trim([Remote | Rest], RemotesToTrim, OkRemotes) ->
         true -> remotes_needs_trim(Rest, [Remote|RemotesToTrim], OkRemotes);
         false -> remotes_needs_trim(Rest, RemotesToTrim, [Remote | OkRemotes])
     end.
-
+%% TODO: is this correct to do! we are not taking into account the ets memory overhead!
 remote_need_trim(Remote = #remote{rsize_bytes = RBytes}) ->
     RBytes > get_remote_max_bytes(Remote).
 
@@ -739,16 +738,27 @@ is_queue_empty(Name, Remotes) ->
 
 
 
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                      Queue Max Bytes
+%% ------------------------------------------------------------------------------------------------------------------ %%
+get_queue_max_bytes() ->
+    MaxBytes =
+        case app_helper:get_env(riak_repl, queue_max_bytes) of
+            N when is_integer(N) -> N;
+            _ -> ?DEFAULT_MAX_BYTES
+        end,
+    MaxBytes div riak_repl_util:get_rtq_concurrency().
+%% ------------------------------------------------------------------------------------------------------------------ %%
+
 -ifdef(TEST).
 qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
     %% when EQC testing, don't account for ETS overhead
     QSizeBytes.
 
-get_queue_max_bytes() ->
-    app_helper:get_env(riak_repl, default_queue_max_bytes, ?DEFAULT_MAX_BYTES).
 
 get_remote_max_bytes(_) ->
-    app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES).
+    MaxBytes = app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES),
+    MaxBytes div riak_repl_util:get_rtq_concurrency().
 
 
 -else.
@@ -756,46 +766,24 @@ qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
 
-%% ------------------------------------------------------------------------------------------------------------------ %%
-%%                                      Queue Max Bytes
-%% ------------------------------------------------------------------------------------------------------------------ %%
-get_queue_max_bytes() ->
-    case get_queue_max_bytes_node() of
-        undefined -> get_queue_max_bytes_cluster();
-        N -> N
-    end.
-
-get_queue_max_bytes_node() ->
-    case app_helper:get_env(riak_repl, default_queue_max_bytes) of
-        N when is_integer(N) -> N;
-        _ -> undefined
-    end.
-
-get_queue_max_bytes_cluster() ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes) of
-        undefined -> ?DEFAULT_MAX_BYTES;
-        MaxBytes -> MaxBytes
-    end.
-
-%% ------------------------------------------------------------------------------------------------------------------ %%
-%%                                      Consumer Max Bytes
-%% ------------------------------------------------------------------------------------------------------------------ %%
 get_remote_max_bytes(Remote) ->
-    case get_remote_max_bytes_node() of
-        undefined -> get_remote_max_bytes_cluster(Remote);
-        N -> N
-    end.
+    MaxBytes =
+        case get_max_bytes_for_remote(Remote) of
+            undefined -> get_remote_max_bytes_default();
+            N -> N
+        end,
+    MaxBytes div riak_repl_util:get_rtq_concurrency().
 
-get_remote_max_bytes_node() ->
+get_remote_max_bytes_default() ->
     case app_helper:get_env(riak_repl, default_consumer_max_bytes) of
-        N when is_integer(N) -> N;
-        _ -> undefined
+        N when is_integer(N) and N > 0 -> N;
+        _ -> ?DEFAULT_MAX_BYTES
     end.
 
-get_remote_max_bytes_cluster(#remote{name = Name}) ->
+get_max_bytes_for_remote(#remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
-        undefined -> ?DEFAULT_MAX_BYTES;
-        MaxBytes -> MaxBytes
+        N when is_integer(N) and N > 0 -> N;
+        _ -> undefined
     end.
 
 -endif.

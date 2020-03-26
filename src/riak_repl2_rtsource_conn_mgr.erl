@@ -28,6 +28,7 @@
 -define(TCP_OPTIONS,  [{keepalive, true}, {nodelay, true}, {packet, 0}, {active, false}]).
 -define(DEFAULT_RT_REBALANCE_DELAY, 10).
 -define(DEFAULT_RT_RETRY_BAD_SINKS, 120).
+-define(DEFAULT_NUMBER_OF_CONNECTIONS_PER_QUEUE, one_per_sink_node).
 
 -record(state, {
     remote = undefined,                                 %% remote sink cluster name
@@ -574,21 +575,21 @@ get_number_of_connections_per_queue(_) ->
 -else.
 
 get_number_of_connections_per_queue(Name) ->
-    case get_number_of_connections_per_queue_node() of
-        undefined -> get_number_of_connections_per_queue_cluster(Name);
+    case get_number_of_connections_per_queue_for_remote(Name) of
+        undefined -> get_number_of_connections_per_queue_default();
         N -> N
     end.
 
-get_number_of_connections_per_queue_node() ->
+get_number_of_connections_per_queue_default() ->
     case app_helper:get_env(riak_repl, default_number_of_connections_per_queue) of
         N when is_integer(N) and N > 0 -> N;
-        _ -> undefined
+        _ -> ?DEFAULT_NUMBER_OF_CONNECTIONS_PER_QUEUE
     end.
 
-get_number_of_connections_per_queue_cluster(Name) ->
+get_number_of_connections_per_queue_for_remote(Name) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Name}) of
         N when is_integer(N) and N > 0 -> N;
-        _ -> one_per_sink_node
+        _ -> undefined
     end.
 
 -endif.

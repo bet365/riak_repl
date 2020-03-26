@@ -549,8 +549,7 @@ connect_to_sink(Addr, Id, State) ->
 %%%===================================================================
 get_rebalance_delay() ->
     case app_helper:get_env(riak_repl, rt_rebalance_delay) of
-        N when is_integer(N) and N > 0 ->
-            N * 1000;
+        N when is_integer(N) and N > 0 -> N * 1000;
         _ -> ?DEFAULT_RT_REBALANCE_DELAY
     end.
 
@@ -559,8 +558,7 @@ get_rebalance_delay() ->
 %%%===================================================================
 get_retry_bad_sinks_delay() ->
     case app_helper:get_env(riak_repl, rt_retry_bad_sinks) of
-        N when is_integer(N) and N > 0 ->
-            N * 1000;
+        N when is_integer(N) and N > 0 -> N * 1000;
         _ -> ?DEFAULT_RT_RETRY_BAD_SINKS
     end.
 

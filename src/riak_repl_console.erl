@@ -434,18 +434,20 @@ disconnect([IP, PortStr]) ->
     ok.
 
 
-realtime(["consumer_max_bytes", Remote, MaxBytes]) ->
-    set_reference_rtq_consumer_max_bytes(Remote, MaxBytes),
+realtime([Cmd, Remote, Arg]) ->
+    case Cmd of
+        "heartbeat_timeout" ->
+            set_heartbeat_timeout(Remote, Arg);
+        "heartbeat_interval" ->
+            set_heartbeat_interval(Remote, Arg);
+        "consumer_max_bytes" ->
+            set_reference_rtq_consumer_max_bytes(Remote, Arg);
+        "connections_per_queue" ->
+            set_number_of_connections_per_queue(Remote, Arg);
+        "retry_limit" ->
+            set_reference_rtq_retry_limit(Remote, Arg)
+    end,
     ok;
-
-realtime(["retry_limit", Remote, Limit]) ->
-    set_reference_rtq_retry_limit(Remote, Limit),
-    ok;
-
-realtime(["connections_per_queue", Remote, NoConnections]) ->
-    set_number_of_connections_per_queue(Remote, NoConnections),
-    ok;
-
 realtime([Cmd, Remote]) ->
     case Cmd of
         "enable" ->
@@ -1138,8 +1140,37 @@ object_filtering_print_config([Mode, Remote]) ->
 %% ========================================================================================================= %%
 %% Realtime API
 %% ========================================================================================================= %%
+set_heartbeat_interval(Remote, Limit) ->
+    case safe_list_to_integer(Limit) of
+        error ->
+            ?LOG_USER_CMD("Failed to heartbeat interval: ~p, as it is not an integer", [Limit]);
+        Int ->
+            EnabledClusters = [Name || {Name, _} <- riak_repl2_rtsource_conn_sup:enabled()],
+            case lists:member(Remote, EnabledClusters) of
+                false ->
+                    ?LOG_USER_CMD("Failed to set heartbeat interval: ~p does not exist", [Remote]);
+                true ->
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, Remote}, Int),
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Heartbeat Interval: ~p", [Remote, Int])
+            end
+    end.
 
-set_reference_rtq_retry_limit(Remote, Limit) ->
+set_heartbeat_timeout(Remote, Limit) ->
+    case safe_list_to_integer(Limit) of
+        error ->
+            ?LOG_USER_CMD("Failed to heartbeat timeout: ~p, as it is not an integer", [Limit]);
+        Int ->
+            EnabledClusters = [Name || {Name, _} <- riak_repl2_rtsource_conn_sup:enabled()],
+            case lists:member(Remote, EnabledClusters) of
+                false ->
+                    ?LOG_USER_CMD("Failed to set heartbeat timeout: ~p does not exist", [Remote]);
+                true ->
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, Remote}, Int),
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Heartbeat Timeout: ~p", [Remote, Int])
+            end
+    end.
+
+set_number_of_connections_per_queue(Remote, Limit) ->
     case safe_list_to_integer(Limit) of
         error ->
             ?LOG_USER_CMD("Failed to set number of connections per queue: ~p, as it is not an integer", [Limit]);

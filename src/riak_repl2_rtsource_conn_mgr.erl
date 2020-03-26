@@ -26,8 +26,8 @@
 -define(CLIENT_SPEC(Id), {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?SERVER, ?CALLBACK_ARGS(Id)}}).
 -define(CALLBACK_ARGS(Id), {self(), Id}).
 -define(TCP_OPTIONS,  [{keepalive, true}, {nodelay, true}, {packet, 0}, {active, false}]).
--define(DEFAULT_RT_REBALANCE_DELAY, 10).
--define(DEFAULT_RT_RETRY_BAD_SINKS, 120).
+-define(DEFAULT_RT_REBALANCE_DELAY, 10000).
+-define(DEFAULT_RT_RETRY_BAD_SINKS, 120000).
 -define(DEFAULT_NUMBER_OF_CONNECTIONS_PER_QUEUE, one_per_sink_node).
 
 -record(state, {

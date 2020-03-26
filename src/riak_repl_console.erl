@@ -434,16 +434,16 @@ disconnect([IP, PortStr]) ->
     ok.
 
 
-%% set consumer Queues
-realtime(["consumer_max_bytes", MaxBytes, Remote]) ->
-    ?LOG_USER_CMD("Setting Max Bytes: ~p for Consumer: ~p on this node only", [MaxBytes, Remote]),
-    set_rtq_consumer_max_bytes(Remote, MaxBytes),
+realtime(["consumer_max_bytes", Remote, MaxBytes]) ->
+    set_reference_rtq_consumer_max_bytes(Remote, MaxBytes),
     ok;
 
-%% set global queue
-realtime(["queue_max_bytes", MaxBytes]) ->
-    ?LOG_USER_CMD("Setting Realtime Queue Max Bytes: ~p on this node only", [MaxBytes]),
-    set_rtq_max_bytes(MaxBytes),
+realtime(["retry_limit", Remote, Limit]) ->
+    set_reference_rtq_retry_limit(Remote, Limit),
+    ok;
+
+realtime(["connections_per_queue", Remote, NoConnections]) ->
+    set_number_of_connections_per_queue(Remote, NoConnections),
     ok;
 
 realtime([Cmd, Remote]) ->
@@ -1136,35 +1136,55 @@ object_filtering_print_config([Mode, Remote]) ->
 
 
 %% ========================================================================================================= %%
-%% Realtime Queue Max Bytes
+%% Realtime API
 %% ========================================================================================================= %%
 
-set_rtq_consumer_max_bytes(MaxBytes, Remote) ->
-    case convert_max_bytes(MaxBytes) of
+set_reference_rtq_retry_limit(Remote, Limit) ->
+    case safe_list_to_integer(Limit) of
+        error ->
+            ?LOG_USER_CMD("Failed to set number of connections per queue: ~p, as it is not an integer", [Limit]);
+        Int ->
+            EnabledClusters = [Name || {Name, _} <- riak_repl2_rtsource_conn_sup:enabled()],
+            case lists:member(Remote, EnabledClusters) of
+                false ->
+                    ?LOG_USER_CMD("Failed to set number of connections per queue Remote: ~p does not exist", [Remote]);
+                true ->
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Remote}, Int),
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Number Of Connections Per Queue: ~p", [Remote, Int])
+            end
+    end.
+
+set_reference_rtq_retry_limit(Remote, Limit) ->
+    case safe_list_to_integer(Limit) of
+        error ->
+            ?LOG_USER_CMD("Failed to set retry limit: ~p, as it is not an integer", [Limit]);
+        Int ->
+            EnabledClusters = [Name || {Name, _} <- riak_repl2_rtsource_conn_sup:enabled()],
+            case lists:member(Remote, EnabledClusters) of
+                false ->
+                    ?LOG_USER_CMD("Failed to set retry limit as Remote: ~p does not exist", [Remote]);
+                true ->
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {retry_limit, Remote}, Int),
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Retry Limit: ~p", [Remote, Int])
+            end
+    end.
+
+set_reference_rtq_consumer_max_bytes(Remote, MaxBytes) ->
+    case safe_list_to_integer(MaxBytes) of
         error ->
             ?LOG_USER_CMD("Failed to set consumer max bytes: ~p, as it is not an integer", [MaxBytes]);
-        IMaxBytes ->
+        Int ->
             EnabledClusters = [Name || {Name, _} <- riak_repl2_rtsource_conn_sup:enabled()],
             case lists:member(Remote, EnabledClusters) of
                 false ->
                     ?LOG_USER_CMD("Failed to set consumer max bytes, as Remote: ~p does not exist", [Remote]);
                 true ->
-                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Remote}, IMaxBytes),
-                    ?LOG_USER_CMD("Succeded to set consumer max bytes. Consumer: ~p, Max Bytes: ~p", [Remote, MaxBytes])
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Remote}, Int),
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Max Bytes: ~p", [Remote, MaxBytes])
             end
-
     end.
 
-set_rtq_max_bytes(MaxBytes) ->
-    case convert_max_bytes(MaxBytes) of
-        error ->
-            ?LOG_USER_CMD("Failed to set queue max bytes: ~p, as it is not an integer", [MaxBytes]);
-        IMaxBytes ->
-            riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, queue_max_bytes, IMaxBytes),
-            ?LOG_USER_CMD("Succeded to set queue max bytes. Max Bytes: ~p", [MaxBytes])
-    end.
-
-convert_max_bytes(MaxBytes) ->
+safe_list_to_integer(MaxBytes) ->
     try
         list_to_integer(MaxBytes)
     catch _:_ ->

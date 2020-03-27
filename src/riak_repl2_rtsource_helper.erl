@@ -21,8 +21,7 @@
 
 -define(SERVER, ?MODULE).
 -define(SHORT_TIMEOUT, 1000).
--define(DEFAULT_RECEIVE_TIMEOUT, 10000).
--define(DEFAULT_ACK_TIMEOUT, 60000).
+
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
     terminate/2, code_change/3]).

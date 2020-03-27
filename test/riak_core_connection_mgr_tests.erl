@@ -29,7 +29,7 @@
 
 %% internal functions
 -export([testService/5,
-         connected/7,
+         connected/6,
          connect_failed/3]).
 
 %% Locator selector types
@@ -43,13 +43,13 @@
 %% Remote cluster
 -define(REMOTE_CLUSTER_NAME, "betty").
 -define(REMOTE_CLUSTER_ADDR, {"127.0.0.1", 4096}).
--define(REMOTE_CLUSTER_ADDR_LOCATED, {{"127.0.0.1", 4096},false}).
--define(REMOTE_ADDRS, [{{"127.0.0.1",5001},false}, {{"127.0.0.1",5002},false}, {{"127.0.0.1",5003},false}, ?REMOTE_CLUSTER_ADDR_LOCATED]).
+-define(REMOTE_CLUSTER_ADDR_LOCATED, {"127.0.0.1", 4096}).
+-define(REMOTE_ADDRS, [{"127.0.0.1",5001}, {"127.0.0.1",5002}, {"127.0.0.1",5003}, ?REMOTE_CLUSTER_ADDR_LOCATED]).
 
 
 -define(SINK_CLUSTER_NAME, "sink").
 -define(SINK_CLUSTER_ADDR, {"127.0.0.1", 9000}).
--define(SINK_ADDRS, [{{"127.0.0.1",9101},true}, {{"127.0.0.1",9102},true}, {{"127.0.0.1",9103},true}, {{"127.0.0.1",9104},false}, {{"127.0.0.1",9105},false}]).
+-define(SINK_ADDRS, [{"127.0.0.1",9101}, {"127.0.0.1",9102}, {"127.0.0.1",9103}, {"127.0.0.1",9104}, {"127.0.0.1",9105}]).
 
 -define(MAX_CONS, 2).
 -define(TCP_OPTIONS, [{keepalive, true},
@@ -73,7 +73,7 @@ register_remote_locator() ->
     ok = riak_core_connection_mgr:register_locator(?REMOTE_LOCATOR_TYPE, Locator).
 
 register_addr_locator() ->
-    Locator = fun(Name, _Policy) -> {ok, [{Name,false}]} end,
+    Locator = fun(Name, _Policy) -> {ok, [Name]} end,
     ok = riak_core_connection_mgr:register_locator(?ADDR_LOCATOR_TYPE, Locator).
 
 register_empty_locator() ->
@@ -215,208 +215,9 @@ connections_test_() ->
 
                  ] end
       }]}.
-
-
-connection_helper_logic_test_() ->
-  {spawn,
-    [
-      {setup,
-        fun() ->
-          Apps = riak_repl_test_util:maybe_start_lager(),
-          application:start(ranch),
-          riak_core_ring_events:start_link(),
-          riak_core_ring_manager:start_link(test),
-          {ok, _} = riak_core_connection_mgr:start_link(),
-          start_fake_core_connection(),
-          Apps
-        end,
-        fun(StartedApps) ->
-          process_flag(trap_exit, true),
-          riak_core_connection_mgr:stop(),
-          riak_core_ring_manager:stop(),
-          catch exit(riak_core_ring_events, kill),
-          application:stop(ranch),
-          process_flag(trap_exit, false),
-          riak_repl_test_util:stop_apps(StartedApps),
-          catch(meck:unload(riak_core_connection)),
-          ok
-        end,
-        fun(_) -> [
-
-          {"register remote locator",
-            fun() ->
-              register_remote_locator(),
-              Target = {?REMOTE_LOCATOR_TYPE, ?SINK_CLUSTER_NAME},
-              Strategy = default,
-              Got = riak_core_connection_mgr:apply_locator(Target, Strategy),
-              ?assertEqual({ok, ?SINK_ADDRS}, Got)
-
-            end
-          },
-
-          {"primary connections test",
-            fun() ->
-              test_primary_core_connection(),
-
-              Table = ets:new(ip_addresses, [set, public, named_table]),
-              ets:insert(Table, ?SINK_ADDRS),
-
-              ExpectedArgs = {expectedToPass, [{1,0}, {1,0}], Table},
-              Target = {?REMOTE_LOCATOR_TYPE, ?SINK_CLUSTER_NAME},
-              ClientSpec = {{testproto, [{1,0}]}, {?TCP_OPTIONS, ?MODULE, ExpectedArgs}},
-              Strategy = default,
-              riak_core_connection_mgr:connect(Target, ClientSpec, Strategy),
-
-              timer:sleep(1000),
-              ExpectedValue = true,
-              ExpectedAddrs = [{{"127.0.0.1",9104},false}, {{"127.0.0.1",9105},false}],
-              ActualAddrs = ets:tab2list(Table),
-              ActualValue = check_addrs(ActualAddrs, ExpectedAddrs, true),
-              ets:delete(Table),
-              ?assertEqual(ExpectedValue, ActualValue)
-            end
-          },
-
-          {"secondary connections test",
-            fun() ->
-              test_secondary_core_connection(),
-
-              Table = ets:new(ip_addresses, [set, public, named_table]),
-              ets:insert(Table, ?SINK_ADDRS),
-
-              ExpectedArgs = {expectedToPass, [{1,0}, {1,0}], Table},
-              Target = {?REMOTE_LOCATOR_TYPE, ?SINK_CLUSTER_NAME},
-              ClientSpec = {{testproto, [{1,0}]}, {?TCP_OPTIONS, ?MODULE, ExpectedArgs}},
-              Strategy = default,
-              riak_core_connection_mgr:connect(Target, ClientSpec, Strategy),
-
-              timer:sleep(1000),
-              ExpectedValue = true,
-              ExpectedAddrs = [{{"127.0.0.1",9101},true}, {{"127.0.0.1",9102},true}, {{"127.0.0.1",9103},true}, {{"127.0.0.1",9105},false}],
-              ActualAddrs = ets:tab2list(Table),
-              ActualValue = check_addrs(ActualAddrs, ExpectedAddrs, true),
-              ets:delete(Table),
-              ?assertEqual(ExpectedValue, ActualValue)
-            end
-          },
-
-          {"not all primarys connections test",
-            fun() ->
-              test_not_all_primarys_core_connection(),
-
-              Table = ets:new(ip_addresses, [set, public, named_table]),
-              ets:insert(Table, ?SINK_ADDRS),
-
-              ExpectedArgs = {expectedToPass, [{1,0}, {1,0}], Table},
-              Target = {?REMOTE_LOCATOR_TYPE, ?SINK_CLUSTER_NAME},
-              ClientSpec = {{testproto, [{1,0}]}, {?TCP_OPTIONS, ?MODULE, ExpectedArgs}},
-              Strategy = default,
-              riak_core_connection_mgr:connect(Target, ClientSpec, Strategy),
-
-              timer:sleep(1000),
-              ExpectedValue = true,
-              ExpectedAddrs = [{{"127.0.0.1",9102},true}, {{"127.0.0.1",9104},false}, {{"127.0.0.1",9105},false}],
-              ActualAddrs = ets:tab2list(Table),
-              ActualValue = check_addrs(ActualAddrs, ExpectedAddrs, true),
-              ets:delete(Table),
-              ?assertEqual(ExpectedValue, ActualValue)
-            end
-          },
-
-          {"last secondary connection test",
-            fun() ->
-              test_last_secondary_core_connection(),
-
-              Table = ets:new(ip_addresses, [set, public, named_table]),
-              ets:insert(Table, ?SINK_ADDRS),
-
-              ExpectedArgs = {expectedToPass, [{1,0}, {1,0}], Table},
-              Target = {?REMOTE_LOCATOR_TYPE, ?SINK_CLUSTER_NAME},
-              ClientSpec = {{testproto, [{1,0}]}, {?TCP_OPTIONS, ?MODULE, ExpectedArgs}},
-              Strategy = default,
-              riak_core_connection_mgr:connect(Target, ClientSpec, Strategy),
-
-              timer:sleep(1000),
-              ExpectedValue = true,
-              ExpectedAddrs = [{{"127.0.0.1",9101},true}, {{"127.0.0.1",9102},true}, {{"127.0.0.1",9103},true}, {{"127.0.0.1",9104},false}],
-              ActualAddrs = ets:tab2list(Table),
-              ActualValue = check_addrs(ActualAddrs, ExpectedAddrs, true),
-              ets:delete(Table),
-              ?assertEqual(ExpectedValue, ActualValue)
-            end
-          }
-
-
-
-        ]
-    end
-}]}.
-
-
 %%------------------------
 %% Helper functions
 %%------------------------
-
-check_addrs(_,_, false) ->
-  false;
-check_addrs([],_,true) ->
-  true;
-check_addrs([Output|Rest], Expected, true) ->
-  check_addrs(Rest, Expected, lists:member(Output, Expected)).
-
-
-start_fake_core_connection() ->
-  catch(meck:unload(riak_core_connection)),
-  meck:new(riak_core_connection, [passthrough]).
-
-test_primary_core_connection() ->
-  meck:expect(riak_core_connection, sync_connect,
-    fun(Addr, Primary, ClientSpec) ->
-      {{Proto, [ProtoVers]}, {_TcpOptions, _CallbackMod, CallbackArgs}} = ClientSpec,
-      connected(undefined, undefined, Addr, {Proto, ProtoVers, ProtoVers}, CallbackArgs, undefined, Primary),
-      ok
-    end).
-
-test_secondary_core_connection() ->
-  meck:expect(riak_core_connection, sync_connect,
-    fun(Addr, Primary, ClientSpec) ->
-      case Primary of
-        true ->
-          {error, failing_primary_on_purpose};
-        false ->
-          {{Proto, [ProtoVers]}, {_TcpOptions, _CallbackMod, CallbackArgs}} = ClientSpec,
-          connected(undefined, undefined, Addr, {Proto, ProtoVers, ProtoVers}, CallbackArgs, undefined, Primary),
-          ok
-      end
-    end).
-
-test_not_all_primarys_core_connection() ->
-  meck:expect(riak_core_connection, sync_connect,
-    fun(Addr, Primary, ClientSpec) ->
-      case Addr of
-        {"127.0.0.1",9102} ->
-          {error, failed_on_purpose};
-        _ ->
-          {{Proto, [ProtoVers]}, {_TcpOptions, _CallbackMod, CallbackArgs}} = ClientSpec,
-          connected(undefined, undefined, Addr, {Proto, ProtoVers, ProtoVers}, CallbackArgs, undefined, Primary),
-          ok
-      end
-    end).
-
-test_last_secondary_core_connection() ->
-  meck:expect(riak_core_connection, sync_connect,
-    fun(Addr, Primary, ClientSpec) ->
-      case Addr of
-        {"127.0.0.1",9105} ->
-          {{Proto, [ProtoVers]}, {_TcpOptions, _CallbackMod, CallbackArgs}} = ClientSpec,
-          connected(undefined, undefined, Addr, {Proto, ProtoVers, ProtoVers}, CallbackArgs, undefined, Primary),
-          ok;
-        _ ->
-          {error, failed_on_purpose}
-      end
-    end).
-
-
 start_service() ->
     %% start dispatcher
     ExpectedRevs = [{1,0}, {1,0}],
@@ -436,7 +237,7 @@ testService(_Socket, _Transport, {ok, {Proto, MyVer, RemoteVer}}, Args, _Props) 
     {ok, self()}.
 
 %% Client side protocol callbacks
-connected(_Socket, _Transport, Addr={_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props, _Primary) ->
+connected(_Socket, _Transport, Addr={_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props) ->
   case Args of
     {_TestType, [ExpectedMyVer, ExpectedRemoteVer]} ->
       ?assert(Proto == testproto),

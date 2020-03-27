@@ -127,7 +127,7 @@ conection_test_() ->
                                                 % test protocol match
                            ClientProtocol = {test1proto, [{0,1},{1,1}]},
                            ClientSpec = {ClientProtocol, {?TCP_OPTIONS, ?MODULE, [{1,1},{1,0}]}},
-                           riak_core_connection:connect(?TEST_ADDR, false, ClientSpec),
+                           riak_core_connection:connect(?TEST_ADDR, ClientSpec),
                            timer:sleep(1000)
                    end},
 
@@ -142,7 +142,7 @@ conection_test_() ->
                            %% try to connect via a client that speaks 0.1 and 3.1. No Match with host!
                            ClientProtocol = {test1protoFailed, [{0,1},{3,1}]},
                            ClientSpec = {ClientProtocol, {?TCP_OPTIONS, ?MODULE, failed_client_args}},
-                           Got = riak_core_connection:sync_connect(?TEST_ADDR, false, ClientSpec),
+                           Got = riak_core_connection:sync_connect(?TEST_ADDR, ClientSpec),
                            ?assertEqual({error, protocol_version_not_supported}, Got),
 
                            timer:sleep(2000)

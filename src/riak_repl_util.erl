@@ -85,7 +85,7 @@
 
 get_rtq_concurrency() ->
   case app_helper:get_env(riak_repl, rtq_concurrency) of
-    N when is_integer(N) and N > 0 -> N;
+    N when is_integer(N), N > 0 -> N;
     _ -> erlang:system_info(schedulers)
   end.
 

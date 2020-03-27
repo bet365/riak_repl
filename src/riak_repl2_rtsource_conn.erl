@@ -618,7 +618,7 @@ update_latency(Time, State = #state{latency = Latency}, false) ->
 
 get_consumer_latency_reset() ->
     case app_helper:get_env(riak_repl, reset_consumer_latency) of
-        N when is_integer(N) and N > 0 -> N * 1000;
+        N when is_integer(N), N > 0 -> N * 1000;
         _ -> ?DEFAULT_TIMEOUT
     end.
 

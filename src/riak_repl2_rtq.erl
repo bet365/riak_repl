@@ -776,13 +776,13 @@ get_remote_max_bytes(Remote) ->
 
 get_remote_max_bytes_default() ->
     case app_helper:get_env(riak_repl, default_consumer_max_bytes) of
-        N when is_integer(N) and N > 0 -> N;
+        N when is_integer(N), N > 0 -> N;
         _ -> ?DEFAULT_MAX_BYTES
     end.
 
 get_max_bytes_for_remote(#remote{name = Name}) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
-        N when is_integer(N) and N > 0 -> N;
+        N when is_integer(N), N > 0 -> N;
         _ -> undefined
     end.
 

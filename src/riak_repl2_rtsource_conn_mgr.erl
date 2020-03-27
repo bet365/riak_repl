@@ -103,8 +103,9 @@ init([RemoteName]) ->
                     end, orddict:new(), lists:seq(1, Concurrency)),
     {ok, SinkNodes} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(RemoteName),
     State = #state{connections = Connections, remote = RemoteName, sink_nodes = SinkNodes},
-    NewState = rebalance_connections(State),
-    {ok, NewState}.
+    State1 = set_balanced_connections(State),
+    State2 = rebalance_connections(State1),
+    {ok, State2}.
 
 %%%=====================================================================================================================
 handle_call({connected, Socket, Transport, Addr, Proto, Props, Id}, _From, State) ->
@@ -549,7 +550,7 @@ connect_to_sink(Addr, Id, State) ->
 %%%===================================================================
 get_rebalance_delay() ->
     case app_helper:get_env(riak_repl, rt_rebalance_delay) of
-        N when is_integer(N) and N > 0 -> N * 1000;
+        N when is_integer(N), N > 0 -> N * 1000;
         _ -> ?DEFAULT_RT_REBALANCE_DELAY
     end.
 
@@ -558,7 +559,7 @@ get_rebalance_delay() ->
 %%%===================================================================
 get_retry_bad_sinks_delay() ->
     case app_helper:get_env(riak_repl, rt_retry_bad_sinks) of
-        N when is_integer(N) and N > 0 -> N * 1000;
+        N when is_integer(N), N > 0 -> N * 1000;
         _ -> ?DEFAULT_RT_RETRY_BAD_SINKS
     end.
 
@@ -580,13 +581,13 @@ get_number_of_connections_per_queue(Name) ->
 
 get_number_of_connections_per_queue_default() ->
     case app_helper:get_env(riak_repl, default_number_of_connections_per_queue) of
-        N when is_integer(N) and N > 0 -> N;
+        N when is_integer(N), N > 0 -> N;
         _ -> ?DEFAULT_NUMBER_OF_CONNECTIONS_PER_QUEUE
     end.
 
 get_number_of_connections_per_queue_for_remote(Name) ->
     case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Name}) of
-        N when is_integer(N) and N > 0 -> N;
+        N when is_integer(N), N > 0 -> N;
         _ -> undefined
     end.
 

@@ -196,13 +196,13 @@ handle_call(stop, _From, State) ->
 handle_call(is_running, _From, State = #state{shutting_down = ShuttingDown}) ->
     {reply, not ShuttingDown, State};
 
-handle_call({is_empty, Name}, _From, State = #state{remotes = Remotes}) ->
-    Result = is_queue_empty(Name, Remotes),
+handle_call(is_empty, _From, State) ->
+    Result = is_queue_empty(State),
     {reply, Result, State};
 
-handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
-    Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(Name, Remotes) end, Remotes),
-    {reply, Result, State};
+%%handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
+%%    Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(State) end, Remotes),
+%%    {reply, Result, State};
 
 
 %%%=====================================================================================================================
@@ -725,16 +725,24 @@ update_remote_total_drops(Remote = #remote{total_drops = Drops}, DropCounter) ->
     Remote#remote{total_drops = Drops + DropCounter}.
 
 
-
-is_queue_empty(Name, Remotes) ->
-    case lists:keytake(Name, #remote.name, Remotes) of
-        {value,  #remote{rsize_bytes = RBytes}, _Remotes2} ->
-            case RBytes == 0 of
-                true -> false;
-                false -> true
-            end;
-        false -> lager:error("Unknown queue")
+is_queue_empty(#state{qtab = QTab}) ->
+    case ets:first(QTab) of
+        '$end_of_table' ->
+            true;
+        _ ->
+            false
     end.
+
+%%is_queue_empty(Name, Remotes) ->
+%%    case lists:keytake(Name, #remote.name, Remotes) of
+%%        {value,  #remote{rsize_bytes = RBytes}, _Remotes2} ->
+%%            case RBytes == 0 of
+%%                true -> false;
+%%                false -> true
+%%            end;
+%%        false ->
+%%            lager:error("Unknown queue")
+%%    end.
 
 
 

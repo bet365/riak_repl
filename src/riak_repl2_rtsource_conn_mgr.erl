@@ -51,8 +51,7 @@
     connections_monitor_addrs = orddict:new(),         %% monitor references mapped to addr
     connections_monitor_pids = orddict:new(),          %% monitor references mapped to pid
     connection_counts = orddict:new(),                 %% number of established connections per ip addr,
-    balanced_connection_counts = orddict:new(),        %% the balanced version of connection_counts (the ideal to hit)
-    balanced = false
+    balanced_connection_counts = orddict:new()        %% the balanced version of connection_counts (the ideal to hit)
 }).
 
 %%%===================================================================

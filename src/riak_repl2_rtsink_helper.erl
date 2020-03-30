@@ -48,7 +48,7 @@ init([Parent]) ->
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State}.
 
-handle_cast({write_objects, BinObjs, DoneFun, Ver}, State) ->
+handle_cast({write_objects_v3, BinObjs, DoneFun, Ver}, State) ->
     do_write_objects_v3(BinObjs, DoneFun, Ver),
     {noreply, State};
 
@@ -75,6 +75,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% Receive TCP data - decode framing and dispatch
 do_write_objects_v3(BinObjs, DoneFun, WireVersion) ->
+    io:format(user, "MADE IT!!! ~n", []),
     Worker = poolboy:checkout(riak_repl2_rtsink_pool, true, infinity),
     MRef = monitor(process, Worker),
     Me = self(),

@@ -554,7 +554,6 @@ set_socket_check_pending_v3(State = #state{max_pending = MaxPending}) ->
             State
     end.
 
-
 maybe_push(Binary, Meta, ObjectFilteringRules) ->
     case app_helper:get_env(riak_repl, realtime_cascades, always) of
         never ->
@@ -565,7 +564,9 @@ maybe_push(Binary, Meta, ObjectFilteringRules) ->
             List = riak_repl_util:from_wire(Binary),
             Meta2 = orddict:erase(skip_count, Meta),
             Meta3 = add_object_filtering_blacklist_to_meta(Meta2, ObjectFilteringRules),
-            riak_repl2_rtq:push(length(List), Binary, Meta3)
+            Concurrency = riak_repl_util:get_rtq_concurrency(),
+            Hash = erlang:phash2(Binary, Concurrency) +1,
+            riak_repl2_rtq:push(Hash, length(List), Binary, Meta3)
     end.
 
 add_object_filtering_blacklist_to_meta(Meta, []) ->

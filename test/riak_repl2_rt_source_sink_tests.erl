@@ -123,6 +123,7 @@ v2_to_v2_comms(_State) ->
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
                        DoneFun([]),
+                       timer:sleep(1000),
                        ?assert(riak_repl2_rtq:is_empty(1))
                end}
              ]
@@ -173,6 +174,7 @@ v1_to_v1_comms(_State) ->
                                    ok
                            end,
                        meck:expect(riak_repl_fullsync_worker, do_binputs, SyncWorkerFun),
+                       riak_repl2_rtq:push(1, 1, term_to_binary([<<"der object">>])),
                        MeckOk = wait_for_continue(),
                        ?assertEqual(ok, MeckOk),
                        meck:unload(riak_repl_fullsync_worker)
@@ -183,6 +185,7 @@ v1_to_v1_comms(_State) ->
                        {ok, DoneFun} = extract_state_msg(),
                        %%?assert(is_function(DoneFun)),
                        DoneFun([]),
+                       timer:sleep(1000),
                        ?assert(riak_repl2_rtq:is_empty(1))
                end}
              ]
@@ -274,6 +277,7 @@ start_sink(Version) ->
     Pid = proc_lib:spawn_link(?MODULE, listen_sink, []),
     receive
         sink_listening ->
+            timer:sleep(500),
             {ok, Pid}
     after 10000 ->
             {error, timeout}
@@ -291,14 +295,8 @@ start_source(NegotiatedVer) ->
     meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy) ->
         spawn_link(fun() ->
             {_Proto, {TcpOpts, Module, Args}} = ClientSpec,
-            case gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]) of
-              {ok, Socket} ->
-                ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Args, []);
-              _ ->
-                {Pid, _} = Args,
-                io:format(user, "ERROR!!! State @ connected: ~p~n", [sys:get_state(Pid)]),
-                ok
-            end
+            {ok, Socket} = gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]),
+            ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Args, [])
         end),
         {ok, make_ref()}
     end),

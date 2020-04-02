@@ -5,6 +5,9 @@
 -define(SETUP_ENV, application:set_env(riak_repl, rtq_max_bytes, 10*1024*1024)).
 -define(CLEAN_ENV, application:unset_env(riak_repl, rtq_max_bytes)).
 
+
+%% TODO: MECK this -> riak_repl2_reference_rtq:push
+
 rtq_trim_test() ->
 
     catch(meck:unload(riak_core_metadata)),
@@ -18,22 +21,24 @@ rtq_trim_test() ->
             application:set_env(B, K, V)
         end),
 
-    folsom:start(),
     %% make sure the queue is 10mb
     ?SETUP_ENV,
-    {ok, Pid} = riak_repl2_rtq:start_test(),
+    {ok, Pid} = riak_repl2_rtq:start_link(1),
     try
-        gen_server:call(Pid, {register, rtq_test}),
+        {0, QTab} = riak_repl2_rtq:register(1, rtq_test),
+
         %% insert over 20mb in the queue
         MyBin = crypto:rand_bytes(1024*1024),
-        [gen_server:cast(Pid, {push, 1, MyBin}) || _ <- lists:seq(0, 20)],
+        [riak_repl2_rtq:push(1, 1, MyBin) || _ <- lists:seq(0, 20)],
 
-        %% we get all 10 bytes back, because in TEST mode the RTQ disregards
-        %% ETS overhead
-        Size = accumulate(Pid, 0, 10),
+        %% we get all 10 bytes back, because in TEST mode the RTQ disregards ETS overhead
+        {Size, LastSeq} = get_queue_size(QTab),
         ?assert(Size =< 10*1024*1024),
+        ?assert(LastSeq == 10),
+
         %% the queue is now empty
-        ?assert(gen_server:call(Pid, {is_empty, rtq_test}))
+        _ = [riak_repl2_rtq:ack(1, rtq_test, X) || X <- lists:seq(1, 10)],
+        ?assert(riak_repl2_rtq:is_empty(1))
     after
         catch(meck:unload(riak_core_metadata)),
         ?CLEAN_ENV,
@@ -48,6 +53,22 @@ ask(Pid) ->
                     gen_server:cast(Pid, {ack, rtq_test, Seq, os:timestamp()}),
                     ok
         end}).
+
+
+get_queue_size(QTab) ->
+    calculate_size_data_in_queue(QTab, ets:first(QTab), 0).
+
+calculate_size_data_in_queue(QTab, '$end_of_table', Size) ->
+    {Size, ets:last(QTab)};
+calculate_size_data_in_queue(QTab, Seq, Size) ->
+    case ets:lookup(QTab, Seq) of
+        [] ->
+            calculate_size_data_in_queue(QTab, ets:next(QTab, Seq), Size);
+        [{_, _,Bin, _, _}] ->
+            calculate_size_data_in_queue(QTab, ets:next(QTab, Seq), Size + byte_size(Bin))
+    end.
+
+
 
 
 accumulate(_, Acc, 0) ->
@@ -228,6 +249,7 @@ overload_protection_start_test_() ->
 
     ].
 
+%% TODO: this needs resolved
 overload_test_() ->
     {foreach,
      fun() ->
@@ -384,6 +406,8 @@ push_object(Bucket, Key) ->
     Obj = riak_object:new(Bucket, Key, RandomData),
     riak_repl2_rtq:push(1, Obj, [{bucket_name, Bucket}]),
     Obj.
+
+
 
 pull(N) ->
     lists:foldl(fun(_Nth, _LastSeq) ->

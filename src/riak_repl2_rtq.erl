@@ -32,7 +32,6 @@
 
 % private api
 -export([report_drops/2]).
--export([start_test/0]).
 
 
 -define(DEFAULT_OVERLOAD, 2000).
@@ -95,9 +94,6 @@ start_link(Id, Options) ->
             ok
     end,
     gen_server:start_link({local, name(Id)}, ?MODULE, [Id, Options], []).
-
-start_test() ->
-    gen_server:start(?MODULE, [], []).
 
 register(Id, Name) ->
     gen_server:call(name(Id), {register, Name}, infinity).

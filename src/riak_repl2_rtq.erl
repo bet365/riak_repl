@@ -8,12 +8,11 @@
 [
     name/1,
     start_link/1,
-    start_link/2,
     register/2,
     unregister/2,
-    push/5,
-    push/4,
     push/3,
+    push/4,
+    push/5,
     ack/3,
     status/1,
     shutdown/1,
@@ -21,17 +20,30 @@
     is_running/1,
     drain_queue/1,
     is_empty/1,
-    get_queue_max_bytes/0,
-
-    summarize/1,
-    dumpq/1,
-    evict/2,
-    evict/3,
-    ack_sync/3
+    get_queue_max_bytes/0
 ]).
 
 % private api
 -export([report_drops/2]).
+
+% backward compat (may delete)
+-export(
+[
+    summarize/1,
+    dumpq/1,
+    evict/2,
+    evict/3
+]).
+
+% for testing
+-export(
+[
+    start/1,
+    push_sync/4,
+    push_sync/3,
+    push_sync/5,
+    ack_sync/3
+]).
 
 
 -define(DEFAULT_OVERLOAD, 2000).
@@ -80,11 +92,6 @@ overload_ets_name(Id) ->
 
 
 start_link(Id) ->
-    Overload = app_helper:get_env(riak_repl, rtq_overload_threshold, ?DEFAULT_OVERLOAD),
-    Recover = app_helper:get_env(riak_repl, rtq_overload_recover, ?DEFAULT_RECOVER),
-    Opts = [{overload_threshold, Overload}, {overload_recover, Recover}],
-    start_link(Id, Opts).
-start_link(Id, Options) ->
     ETS = overload_ets_name(Id),
     case ets:info(ETS) of
         undefined ->
@@ -93,7 +100,7 @@ start_link(Id, Options) ->
         _ ->
             ok
     end,
-    gen_server:start_link({local, name(Id)}, ?MODULE, [Id, Options], []).
+    gen_server:start_link({local, name(Id)}, ?MODULE, [Id], []).
 
 register(Id, Name) ->
     gen_server:call(name(Id), {register, Name}, infinity).
@@ -113,7 +120,6 @@ stop(Id) ->
 is_running(Id) ->
     gen_server:call(name(Id), is_running, infinity).
 
-%% TODO: deal with repl migration stuff
 push(Id, NumItems, Bin) ->
     push(Id, NumItems, Bin, []).
 push(Id, NumItems, Bin, Meta) ->
@@ -140,6 +146,38 @@ drain_queue(Id) ->
 is_empty(Id) ->
     gen_server:call(name(Id), is_empty, infinity).
 
+
+%%%========================================================================
+%%% For Testing
+%%%========================================================================
+start(Id) ->
+    ETS = overload_ets_name(Id),
+    case ets:info(ETS) of
+        undefined ->
+            ETS = ets:new(ETS, [named_table, public, {read_concurrency, true}]),
+            ets:insert(ETS, {overloaded, false});
+        _ ->
+            ok
+    end,
+    gen_server:start({local, name(Id)}, ?MODULE, [Id], []).
+
+push_sync(Id, NumItems, Bin) ->
+    push_sync(Id, NumItems, Bin, []).
+push_sync(Id, NumItems, Bin, Meta) ->
+    push_sync(Id, NumItems, Bin, Meta, []).
+push_sync(Id, NumItems, Bin, Meta, PreCompleted) ->
+    ETS = overload_ets_name(Id),
+    case ets:lookup(ETS, overloaded) of
+        [{overloaded, true}] ->
+            lager:debug("rtq overloaded"),
+            riak_repl2_rtq_overload_counter:drop(Id);
+        [{overloaded, false}] ->
+            gen_server:call(name(Id), {push_sync, NumItems, Bin, Meta, PreCompleted}, infinity)
+    end.
+
+ack_sync(Id, Name, Seq) ->
+    gen_server:call(name(Id), {ack_sync, Name, Seq}, infinity).
+
 %%%========================================================================
 %%% Backward Compatability Functions (will eventually be removed/ changed)
 %%%========================================================================
@@ -155,19 +193,18 @@ evict(Id, Seq) ->
 evict(Id, Seq, Key) ->
     gen_server:call(name(Id), {evict, Seq, Key}, infinity).
 
-ack_sync(Id, Name, Seq) ->
-    gen_server:call(name(Id), {ack_sync, Name, Seq}, infinity).
-
 
 %%%===================================================================
-%%% gen_server calls
+%%% Init
 %%%===================================================================
-init([Id, Options]) ->
-    Overloaded = proplists:get_value(overload_threshold, Options, ?DEFAULT_OVERLOAD),
-    Recover = proplists:get_value(overload_recover, Options, ?DEFAULT_RECOVER),
-    {ok, #state{id = Id, overload = Overloaded, recover = Recover}}. % lots of initialization done by defaults
+init([Id]) ->
+    Overload = app_helper:get_env(riak_repl, rtq_overload_threshold, ?DEFAULT_OVERLOAD),
+    Recover = app_helper:get_env(riak_repl, rtq_overload_recover, ?DEFAULT_RECOVER),
+    {ok, #state{id = Id, overload = Overload, recover = Recover}}. % lots of initialization done by defaults
 
-
+%%%=====================================================================================================================
+%% Calls: API
+%%%=====================================================================================================================
 handle_call({register, Name}, _From, State = #state{qtab = QTab, qseq = QSeq}) ->
     NewState = register_remote(Name, State),
     {reply, {QSeq, QTab}, NewState};
@@ -181,8 +218,7 @@ handle_call(status, _From, State) ->
     {reply, Status, State};
 
 handle_call(shutting_down, _From, State = #state{shutting_down=false}) ->
-    %% this will allow the realtime repl hook to determine if it should send
-    %% to another host
+    %% this will allow the realtime repl hook to determine if it should send to another host
     _ = riak_repl2_rtq_proxy:start(),
     {reply, ok, State#state{shutting_down = true}};
 
@@ -196,22 +232,26 @@ handle_call(is_empty, _From, State) ->
     Result = is_queue_empty(State),
     {reply, Result, State};
 
-%%handle_call(all_queues_empty, _From, State = #state{remotes = Remotes}) ->
-%%    Result = lists:all(fun (#remote{name = Name}) -> is_queue_empty(State) end, Remotes),
-%%    {reply, Result, State};
+handle_call(drain_queue, _From, State = #state{shutting_down = true}) ->
+    Reply = do_drain_queue(State),
+    {reply, Reply, State};
+handle_call(drain_queue, _From, State = #state{shutting_down = false}) ->
+    {reply, {error, queue_not_shutting_down}, State};
+
+%%%=====================================================================================================================
+%% Calls: For Testing
+%%%=====================================================================================================================
+handle_call({ack_sync, Name, Seq}, _From, State) ->
+    {reply, ok, ack_seq(Name, Seq, State)};
+
+handle_call({push_sync, NumItems, Bin, Meta, Completed}, _From, State) ->
+    State2 = maybe_flip_overload(State),
+    {reply, ok, do_push(NumItems, Bin, Meta, Completed, State2)};
 
 
 %%%=====================================================================================================================
 %% Calls: Backward Compatibility
 %%%=====================================================================================================================
-handle_call({push, NumItems, Bin}, From, State) ->
-    handle_call({push, NumItems, Bin, [], []}, From, State);
-handle_call({push, NumItems, Bin, Meta, []}, From, State) ->
-    handle_call({push, NumItems, Bin, Meta, []}, From, State);
-handle_call({push, NumItems, Bin, Meta, Completed}, _From, State) ->
-    State2 = maybe_flip_overload(State),
-    {reply, ok, do_push(NumItems, Bin, Meta, Completed, State2)};
-
 handle_call(summarize, _From, State = #state{qtab = QTab}) ->
     Fun = fun({Seq, _NumItems, Bin, _Meta, _Completed}, Acc) ->
         Obj = riak_repl_util:from_wire(Bin),
@@ -241,22 +281,16 @@ handle_call({evict, Seq, Key}, _From, State = #state{qtab = QTab}) ->
             {reply, {not_found, Seq}, State}
     end;
 
-handle_call(drain_queue, _From, State = #state{shutting_down = true}) ->
-    Reply = do_drain_queue(State),
-    {reply, Reply, State};
-handle_call(drain_queue, _From, State = #state{shutting_down = false}) ->
-    {reply, {error, queue_not_shutting_down}, State};
-
-handle_call({ack_sync, Name, Seq}, _From, State) ->
-    {reply, ok, ack_seq(Name, Seq, State)};
-
 handle_call(_Msg, _From, State) ->
     {reply, ok, State}.
-%%%=====================================================================================================================
 
-%%%===================================================================
-%%% gen_server casts
-%%%===================================================================
+%%%=====================================================================================================================
+%% Casts: API
+%%%=====================================================================================================================
+handle_cast({push, NumItems, Bin}, State) ->
+    handle_cast({push, NumItems, Bin, []}, State);
+handle_cast({push, NumItems, Bin, Meta}, State) ->
+    handle_cast({push, NumItems, Bin, Meta, []}, State);
 handle_cast({push, _NumItems, _Bin, _Meta, _Completed}, State=#state{remotes=[]}) ->
     {noreply, State};
 handle_cast({push, NumItems, Bin, Meta, PreCompleted}, State) ->
@@ -273,17 +307,11 @@ handle_cast({report_drops, N}, State) ->
     State3 = maybe_flip_overload(State2),
     {noreply, State3};
 
-%%%=====================================================================================================================
-%% Casts: Backward Compatibility
-%%%=====================================================================================================================
-% have to have backward compatability for cluster upgrades
-handle_cast({push, NumItems, Bin}, State) ->
-    handle_cast({push, NumItems, Bin, [], []}, State);
-handle_cast({push, NumItems, Bin, Meta}, State) ->
-    handle_cast({push, NumItems, Bin, Meta, []}, State);
-
 handle_cast(_Msg, State) ->
     {noreply, State}.
+
+%%%=====================================================================================================================
+%% Info/ Terminate/ Code Change
 %%%=====================================================================================================================
 handle_info(_Msg, State) ->
     {noreply, State}.
@@ -295,9 +323,11 @@ terminate(Reason, State = #state{id = N}) ->
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
-%% ================================================================================================================== %%
 
-%% Internal Functions For Gen Server Calls
+%% ============================================== %%
+%% Internal Functions
+%% ============================================== %%
+
 
 %% ================================================================================================================== %%
 %% Register
@@ -448,7 +478,6 @@ set_skip_meta(Meta) ->
 push_to_remotes([], _Id, _QEntry) ->
     ok;
 push_to_remotes([RemoteName | Rest], Id, QEntry) ->
-    %% TODO try catch this? (its a cast)
     riak_repl2_reference_rtq:push(RemoteName, Id, QEntry),
     push_to_remotes(Rest, Id, QEntry).
 
@@ -472,7 +501,8 @@ remotes_needs_trim([Remote | Rest], RemotesToTrim, OkRemotes) ->
         true -> remotes_needs_trim(Rest, [Remote|RemotesToTrim], OkRemotes);
         false -> remotes_needs_trim(Rest, RemotesToTrim, [Remote | OkRemotes])
     end.
-%% TODO: is this correct to do! we are not taking into account the ets memory overhead!
+
+%% we do not take into account ets memory overhead for the remote queues
 remote_need_trim(Remote = #remote{rsize_bytes = RBytes}) ->
     RBytes > get_remote_max_bytes(Remote).
 
@@ -516,7 +546,7 @@ maybe_trim_remotes_single_entry(Remotes, PreCompleted, ShrinkSize) ->
             end
         end, {PreCompleted, [], []}, Remotes).
 
-maybe_trim_remote_single_entry(Remote, Completed, ShrinkSize) ->
+maybe_trim_remote_single_entry(Completed, Remote, ShrinkSize) ->
     case lists:member(Remote#remote.name, Completed) of
         true ->
             {trim, Completed, Remote};
@@ -747,7 +777,7 @@ is_queue_empty(#state{qtab = QTab}) ->
 %% ------------------------------------------------------------------------------------------------------------------ %%
 get_queue_max_bytes() ->
     MaxBytes =
-        case app_helper:get_env(riak_repl, queue_max_bytes) of
+        case app_helper:get_env(riak_repl, rtq_max_bytes) of
             N when is_integer(N) -> N;
             _ -> ?DEFAULT_MAX_BYTES
         end,

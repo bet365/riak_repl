@@ -42,7 +42,8 @@
     push_sync/4,
     push_sync/3,
     push_sync/5,
-    ack_sync/3
+    ack_sync/3,
+    report_drops_sync/2
 ]).
 
 
@@ -178,6 +179,9 @@ push_sync(Id, NumItems, Bin, Meta, PreCompleted) ->
 ack_sync(Id, Name, Seq) ->
     gen_server:call(name(Id), {ack_sync, Name, Seq}, infinity).
 
+report_drops_sync(Id, N) ->
+    gen_server:call(name(Id), {report_drops_sync, N}, infinity).
+
 %%%========================================================================
 %%% Backward Compatability Functions (will eventually be removed/ changed)
 %%%========================================================================
@@ -248,10 +252,6 @@ handle_call({push_sync, NumItems, Bin, Meta, Completed}, _From, State) ->
     State2 = maybe_flip_overload(State),
     {reply, ok, do_push(NumItems, Bin, Meta, Completed, State2)};
 
-
-%%%=====================================================================================================================
-%% Calls: Backward Compatibility
-%%%=====================================================================================================================
 handle_call(summarize, _From, State = #state{qtab = QTab}) ->
     Fun = fun({Seq, _NumItems, Bin, _Meta, _Completed}, Acc) ->
         Obj = riak_repl_util:from_wire(Bin),
@@ -260,6 +260,16 @@ handle_call(summarize, _From, State = #state{qtab = QTab}) ->
           end,
     {reply, ets:foldl(Fun, [], QTab), State};
 
+handle_call({report_drops_sync, N}, _From, State) ->
+    QSeq = State#state.qseq + N,
+    Drops = State#state.overload_drops + N,
+    State2 = State#state{qseq = QSeq, overload_drops = Drops},
+    State3 = maybe_flip_overload(State2),
+    {reply, ok, State3};
+
+%%%=====================================================================================================================
+%% Calls: Backward Compatibility
+%%%=====================================================================================================================
 handle_call(dumpq, _From, State = #state{qtab = QTab}) ->
     {reply, ets:tab2list(QTab), State};
 

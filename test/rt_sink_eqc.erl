@@ -446,7 +446,7 @@ abstract_rtsink_helper() ->
     meck:expect(riak_repl2_rtsink_helper, stop, fun(sink_helper) ->
         ok
     end),
-    meck:expect(riak_repl2_rtsink_helper, write_objects, fun(sink_helper, _BinObjs, DoneFun, _Ver) ->
+    meck:expect(riak_repl2_rtsink_helper, write_objects_v3, fun(sink_helper, _BinObjs, DoneFun, _Ver) ->
         ReturnTo ! {rtsink_helper, done_fun, DoneFun},
         ok
     end).

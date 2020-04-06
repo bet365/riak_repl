@@ -245,6 +245,7 @@ handle_cast({drop, BucketType}, #state{bt_timer = undefined, bt_interval = Inter
 handle_cast({drop, BucketType}, State) ->
     {noreply, bt_dropped(BucketType, State)}.
 
+
 %% tcp/ ssl data
 handle_info({P, _S, TcpBin}, State) when P == tcp; P == ssl ->
     #state{cont = Cont} = State,
@@ -398,7 +399,7 @@ recv(TcpBin, State) ->
     end.
 
 write_data(Msg, Cont, State) ->
-    #state{ write_data_function = WriteDataFunction} = State,
+    #state{write_data_function = WriteDataFunction} = State,
     case WriteDataFunction(Msg, State) of
         {ok, NewState} ->
             recv(Cont, NewState);

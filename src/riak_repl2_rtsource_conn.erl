@@ -56,6 +56,7 @@
     get_latency/2
 ]).
 
+-export([get_ref/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -161,6 +162,12 @@ get_latency(Pid, Timeout) ->
             error
     end.
 
+%% ==============================
+%% For Testing
+%% ==============================
+get_ref(Pid) ->
+    gen_server:call(Pid, get_ref, infinity).
+
 % ======================================================================================================================
 
 %% gen_server callbacks
@@ -169,6 +176,9 @@ get_latency(Pid, Timeout) ->
 init([Remote, Id, ConnMgr]) ->
     Ref = erlang:monitor(process, ConnMgr),
     {ok, #state{remote = Remote, id = Id, connection_mgr_pid = ConnMgr, connection_mgr_ref = Ref}}.
+
+handle_call(get_ref, _From, State = #state{ref = Ref}) ->
+    {reply, Ref, State};
 
 handle_call(stop, _From, State) ->
   {stop, {shutdown, stopped}, ok, State};

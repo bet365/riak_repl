@@ -11,7 +11,8 @@
     ack/4,
     register/3,
     shutdown/2,
-    status/2
+    status/2,
+    stop/2
 ]).
 
 %% gen_server callbacks
@@ -88,6 +89,9 @@ register(RemoteName, Id, Ref)->
 shutdown(RemoteName, Id) ->
     gen_server:call(name(RemoteName, Id), shutting_down, infinity).
 
+stop(RemoteName, Id) ->
+    gen_server:call(name(RemoteName, Id), stop, infinity).
+
 status(RemoteName, Id) ->
     try
         gen_server:call(name(RemoteName, Id), status)
@@ -106,6 +110,9 @@ init([RemoteName, Id]) ->
     {QSeq, QTab} = riak_repl2_rtq:register(Id, RemoteName),
     NewState = #state{id = Id, name = RemoteName, qtab = QTab},
     {ok, populate_reference_table(ets:first(QTab), QSeq, NewState)}.
+
+handle_call(stop, _From, State) ->
+    {stop, normal, State};
 
 handle_call({register, Ref}, {Pid, _Tag}, State) ->
     #state

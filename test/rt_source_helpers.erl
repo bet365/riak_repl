@@ -18,10 +18,10 @@ ensure_registered(RemoteName) ->
 ensure_registered(_RemoteName, N) when N < 1 ->
     {error, registration_timeout};
 ensure_registered(RemoteName, N) ->
-    Status = riak_repl2_rtq:status(),
+    Status = riak_repl2_rtq_sup:status(),
     %% ?debugFmt("RTQ Status: ~p~n", [Status]),
-    Consumers = proplists:get_value(consumers, Status),
-    case proplists:get_value(RemoteName, Consumers) of
+    Remotes = proplists:get_value(remotes, Status),
+    case proplists:get_value(RemoteName, Remotes) of
         undefined ->
             timer:sleep(1000),
             ensure_registered(RemoteName, N - 1);
@@ -71,22 +71,14 @@ abstract_connection_mgr({RemoteHost, RemotePort} = RemoteName) ->
         proc_lib:spawn_link(fun() ->
             %% ?debugFmt("connection_mgr connect for ~p", [ServiceAndRemote]),
             Version = stateful:version(),
-            {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
+            {_Proto, {TcpOpts, Module, Args}} = ClientSpec,
              %% ?debugFmt("connection_mgr callback module: ~p", [Module]),
             {ok, Socket} = gen_tcp:connect(RemoteHost, RemotePort, [binary | TcpOpts]),
             %% ?debugFmt("connection_mgr calling connection callback for ~p", [Pid]),
-            ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Pid, [], false)
+            ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Args, [])
         end),
         {ok, make_ref()}
     end).
-
-
-abstract_data_mgr() ->
-    riak_repl_test_util:reset_meck(riak_repl2_rtsource_conn_data_mgr, [no_link, passthrough]),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, write, fun(realtime_connections, _Remote, _Node, _IPPort, _Primary) ->
-        ok end),
-    meck:expect(riak_repl2_rtsource_conn_data_mgr, delete, fun(realtime_connections, _Remote, _Node) ->
-        ok end).
 
 
 start_rt() ->
@@ -102,7 +94,8 @@ start_rt() ->
 start_rtq() ->
     %% ?debugFmt("where is riak_repl2_rtq: ~p", [whereis(riak_repl2_rtq)]),
     %% riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
-    riak_repl2_rtq:start_link().
+    application:set_env(riak_repl, rtq_concurrency, 1),
+    riak_repl2_rtq:start_link(1).
 
 start_tcp_mon() ->
     riak_repl_test_util:kill_and_wait(riak_core_tcp_mon),

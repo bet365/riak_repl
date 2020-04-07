@@ -111,7 +111,7 @@ status_test_() ->
     ] end}.
 
 %%%===================================================================
-%%% Summarize Test
+%%% Summarize Test (is this needed?)
 %%%===================================================================
 summarize_test_() ->
     {setup,
@@ -149,7 +149,9 @@ summarize_test_() ->
 }.
 
 
-
+%%%===================================================================
+%%% Evict Test (is this needed?)
+%%%===================================================================
 evict_test_() ->
     {foreach,
         fun() ->
@@ -210,6 +212,9 @@ object_format() -> riak_core_capability:get({riak_kv, object_format}, v0).
 get_approximate_size(O) -> riak_object:approximate_size(object_format(), O).
 
 
+%%%===================================================================
+%%% Overload Protection Tests
+%%%===================================================================
 overload_protection_start_test_() ->
     {setup,
         fun() ->
@@ -256,10 +261,12 @@ overload_protection_start_test_() ->
         end}.
 
 
-overload_test_() ->
+%%%===================================================================
+%%% RTQ Drop Tests
+%%%===================================================================
+drop_test_() ->
     {setup,
         fun() ->
-
             meck_setup(),
             application:set_env(riak_repl, rtq_max_bytes, 10*1024*1024),
             application:unset_env(riak_repl, default_consumer_max_bytes, 10*1024*1024),
@@ -267,144 +274,169 @@ overload_test_() ->
             application:set_env(riak_repl, rtq_overload_threshold, 5),
             application:set_env(riak_repl, rtq_overload_recover, 1),
             riak_repl_test_util:abstract_stats(),
-            {ok, _P1} = riak_repl2_rtq:start(1),
             {ok, _P2} = riak_repl2_rtq_overload_counter:start_link(1, [{report_interval, 1000}]),
-            riak_repl2_rtq:register(1, "overload_test")
+            ok
         end,
         fun(_) ->
             riak_repl2_rtq_overload_counter:stop(1),
-            riak_repl2_rtq:stop(1),
-            catch exit(whereis(riak_repl2_rtq), kill),
             catch exit(whereis(riak_repl2_rtq_overload_counter), kill),
             meck_cleanup(),
             unset_environment_variables(),
-            ets:delete(rtq_overload_ets_1),
             riak_repl_test_util:maybe_unload_mecks([riak_repl_stats]),
             meck:unload(),
             ok
         end,
-        fun({QSeq, QTab}) ->
+        fun(_) ->
             [
                 {"rtq increments sequence number on drop",
                     fun() ->
+                        {ok, _} = riak_repl2_rtq:start(1),
+                        {QSeq, QTab} = riak_repl2_rtq:register(1, "overload_test"),
                         riak_repl2_rtq:push_sync(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
                         Seq1 = QSeq +1,
                         riak_repl2_rtq:report_drops_sync(1, 5),
                         riak_repl2_rtq:push_sync(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
                         Seq2 = ets:last(QTab),
-                        ?assertEqual(Seq1 + 5 + 1, Seq2)
+                        ?assertEqual(Seq1 + 5 + 1, Seq2),
+                        ok = riak_repl2_rtq:stop(1)
                     end
                 },
 
-                %% TODO: move rtq start into these functions, becuase it is just continuing from the previous test (SEQ problems)
                 {"rtq overload reports drops",
                     fun() ->
+                        {ok, _} = riak_repl2_rtq:start(1),
+                        {QSeq, QTab} = riak_repl2_rtq:register(1, "overload_test"),
                         riak_repl2_rtq:push_sync(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-                        Seq1 = QSeq,
+                        Seq1 = QSeq +1,
                         [riak_repl2_rtq_overload_counter:drop(1) || _ <- lists:seq(1, 5)],
                         timer:sleep(1200),
                         riak_repl2_rtq:push_sync(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
                         Seq2 = ets:last(QTab),
-                        ?assertEqual(Seq1 + 5 + 1, Seq2)
+                        ?assertEqual(Seq1 + 5 + 1, Seq2),
+                        ok = riak_repl2_rtq:stop(1)
                     end
                 }
-%%                {"overload and recovery",
-%%                    fun() ->
-%%                        % rtq can't process anything else while it's trying to deliver,
-%%                        % so we're going to use that to clog up it's queue.
-%%                        % Msgq = 0
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        % msg queue = 0 (it's handled)
-%%                        block_rtq_pull(),
-%%                        % msg queue = 0 (it's handled)
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        % msg queue = 1 (blocked by deliver)
-%%                        block_rtq_pull(),
-%%                        % msg queue = 2 (blocked by deliver)
-%%                        [riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,5)],
-%%                        % msg queue = 7 (blocked by deliver)
-%%                        unblock_rtq_pull(),
-%%                        % msq queue = 5 (push handled, blocking deliver handled)
-%%                        % that push should have flipped the overload switch
-%%                        % meaning these will be dropped
-%%                        % these will end up dropped
-%%                        [riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,5)],
-%%                        % msq queue = 7, drops = 5
-%%                        unblock_rtq_pull(),
-%%                        timer:sleep(1200),
-%%                        % msg queue = 0, totol objects dropped = 5
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        Seq1 = pull(5),
-%%                        Seq2 = pull(1),
-%%                        ?assertEqual(Seq1 + 1 + 5, Seq2),
-%%                        Status = riak_repl2_rtq:status(),
-%%                        ?assertEqual(5, proplists:get_value(overload_drops, Status))
-%%                    end
-%%                },
-%%                {"rtq does recover on drop report",
-%%                    fun() ->
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        block_rtq_pull(),
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        [riak_repl2_rtq ! goober || _ <- lists:seq(1, 10)],
-%%                        Seq1 = unblock_rtq_pull(),
-%%                        Seq2 = pull(1),
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        timer:sleep(1200),
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        Seq3 = pull(1),
-%%                        ?assertEqual(1, Seq1),
-%%                        ?assertEqual(2, Seq2),
-%%                        ?assertEqual(4, Seq3)
-%%                    end
-%%                },
-%%                {"rtq overload sets rt_dirty to true",
-%%                    fun() ->
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        block_rtq_pull(),
-%%                        riak_repl2_rtq:push(1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
-%%                        [riak_repl2_rtq ! goober || _ <- lists:seq(1, 10)],
-%%                        unblock_rtq_pull(),
-%%                        History = meck:history(riak_repl_stats),
-%%                        ?assertMatch([{_MeckPid, {riak_repl_stats, rt_source_errors, []}, ok}], History)
-%%                    end
-%%                }
             ]
         end
     }.
-%%
-%%
-%%
-%%
-%%
-%%
-%%pull(N) ->
-%%    lists:foldl(fun(_Nth, _LastSeq) ->
-%%        pull()
-%%    end, 0, lists:seq(1, N)).
-%%
-%%pull() ->
-%%    Self = self(),
-%%    riak_repl2_rtq:pull("overload_test", fun({Seq, _, _, _}) ->
-%%        Self ! {seq, Seq},
-%%        ok
-%%    end),
-%%    get_seq().
-%%
-%%get_seq() ->
-%%    receive {seq, S} -> S end.
-%%
-%%block_rtq_pull() ->
-%%    Self = self(),
-%%    riak_repl2_rtq:pull("overload_test", fun({Seq, _, _, _}) ->
-%%        receive
-%%            continue ->
-%%                ok
-%%        end,
-%%        Self ! {seq, Seq},
-%%        ok
-%%    end).
-%%
-%%unblock_rtq_pull() ->
-%%    riak_repl2_rtq ! continue,
-%%    get_seq().
+
+
+
+%%%===================================================================
+%%% Overload & Recovery Tests
+%%%===================================================================
+overload_test_() ->
+    {setup,
+        fun() ->
+
+            catch(meck:unload(riak_core_metadata)),
+            meck:new(riak_core_metadata, [passthrough]),
+            meck:expect(riak_core_metadata, get, 2,
+                fun(_B, _K) ->
+                    undefined
+                end),
+
+            catch(meck:unload(riak_repl2_reference_rtq)),
+            meck:new(riak_repl2_reference_rtq, [passthrough]),
+            meck:expect(riak_repl2_reference_rtq, push, 3,
+                fun(_,_,_) ->
+                    receive
+                        continue ->
+                            ok
+                    end
+                end),
+
+            application:set_env(riak_repl, rtq_max_bytes, 10*1024*1024),
+            application:unset_env(riak_repl, default_consumer_max_bytes, 10*1024*1024),
+            application:set_env(riak_repl, rtq_concurrency, 1),
+            application:set_env(riak_repl, rtq_overload_threshold, 5),
+            application:set_env(riak_repl, rtq_overload_recover, 1),
+            riak_repl_test_util:abstract_stats(),
+            {ok, _P2} = riak_repl2_rtq_overload_counter:start_link(1, [{report_interval, 500}]),
+            ok
+        end,
+        fun(_) ->
+            riak_repl2_rtq_overload_counter:stop(1),
+            catch exit(whereis(riak_repl2_rtq_overload_counter), kill),
+            meck_cleanup(),
+            unset_environment_variables(),
+            riak_repl_test_util:maybe_unload_mecks([riak_repl_stats]),
+            meck:unload(),
+            ok
+        end,
+        fun(_) ->
+            [
+                {"rtq overload sets rt_dirty to true",
+                    fun() ->
+                        {ok, Pid} = riak_repl2_rtq:start(1),
+                        {_QSeq, _QTab} = riak_repl2_rtq:register(1, "overload_test"),
+
+                        %% put the queue into overload by placing 6 msgs on there, and unblocking one (to trigger the change in over load status)
+                        [riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,7)],
+                        unblock_rtq(Pid),
+                        timer:sleep(1000),
+                        riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
+
+                        %% unblock the queue
+                        _ = [unblock_rtq(Pid) || _ <- lists:seq(1,7)],
+                        timer:sleep(1000),
+
+                        History = meck:history(riak_repl_stats),
+                        ?assertMatch([{_MeckPid, {riak_repl_stats, rt_source_errors, []}, ok}], History),
+                        ok = riak_repl2_rtq:stop(1)
+                    end
+                },
+                {"overload and recovery",
+                    fun() ->
+                        {ok, Pid} = riak_repl2_rtq:start(1),
+                        {QSeq, QTab} = riak_repl2_rtq:register(1, "overload_test"),
+
+                        %% put the queue into overload by placing 6 msgs on there, and unblocking one (to trigger the change in over load status)
+                        [riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,7)],
+                        unblock_rtq(Pid),
+                        timer:sleep(1000),
+
+                        %% drop 5 msgs
+                        [riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,5)],
+                        timer:sleep(1000),
+
+                        %% unblock the queue
+                        _ = [unblock_rtq(Pid) || _ <- lists:seq(1,6)],
+                        timer:sleep(1000),
+
+                        ?assertEqual(QSeq + 7, ets:last(QTab)),
+                        Status = riak_repl2_rtq_sup:status(),
+                        ?assertEqual(5, proplists:get_value(overload_drops, Status)),
+                        ok = riak_repl2_rtq:stop(1)
+                    end
+                },
+                {"rtq does recover on drop report",
+                    fun() ->
+                        {ok, Pid} = riak_repl2_rtq:start(1),
+                        {_QSeq, QTab} = riak_repl2_rtq:register(1, "overload_test"),
+
+                        %% put the queue into overload by placing 6 msgs on there, and unblocking one (to trigger the change in over load status)
+                        [riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]) || _ <- lists:seq(1,7)],
+                        unblock_rtq(Pid),
+                        timer:sleep(1000),
+                        riak_repl2_rtq:push(1, 1, term_to_binary([<<"object">>]), [{bucket_name, <<"eqc_test">>}]),
+                        [riak_repl2_rtq_1 ! goober || _ <- lists:seq(1, 10)],
+                        [{_, Overloaded1}] = ets:lookup(rtq_overload_ets_1, overloaded),
+
+                        %% unblock the queue
+                        _ = [unblock_rtq(Pid) || _ <- lists:seq(1,7)],
+                        timer:sleep(1000),
+                        [{_, Overloaded2}] = ets:lookup(rtq_overload_ets_1, overloaded),
+
+                        ?assertEqual(true, Overloaded1),
+                        ?assertEqual(false, Overloaded2),
+                        ?assertEqual(7, ets:last(QTab)),
+                        ok = riak_repl2_rtq:stop(1)
+                    end
+                }
+            ]
+        end
+    }.
+
+unblock_rtq(Pid) ->
+    Pid ! continue.

@@ -51,8 +51,8 @@
 %%       fun setup/0,
 %%       fun cleanup/1,
 %%       [%% Run the quickcheck tests
-%%        {timeout, 300,
-%%         ?_assertEqual(true, eqc:quickcheck(eqc:numtests(5, ?QC_OUT(?MODULE:prop_main()))))}
+%%        {timeout, 30,
+%%         ?_assertEqual(true, eqc:quickcheck(eqc:numtests(250, ?QC_OUT(?MODULE:prop_main()))))}
 %%       ]
 %%      }
 %%     ]

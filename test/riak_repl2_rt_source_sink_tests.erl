@@ -295,10 +295,15 @@ start_source(NegotiatedVer) ->
     meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy) ->
         spawn_link(fun() ->
             {_Proto, {TcpOpts, Module, Args}} = ClientSpec,
-            {ok, Socket} = gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]),
-            ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Args, [])
-        end),
-        {ok, make_ref()}
+            case gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]) of
+              {ok, Socket} ->
+                ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Args, []);
+              _Reason ->
+                ok
+%%                Module:connect_failed(Proto, Reason, Args, {"localhost", ?SINK_PORT})
+            end,
+          {ok, make_ref()}
+        end)
     end),
 
     {ok, SourcePid} = riak_repl2_rtsource_conn_mgr:start_link("sink_cluster"),

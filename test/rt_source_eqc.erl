@@ -33,6 +33,7 @@
 setup() ->
     application:set_env(riak_repl, rt_heartbeat_timeout, 1200),
     application:set_env(riak_repl, rt_heartbeat_interval, 1200),
+    application:set_env(riak_repl, rtq_concurrency, 1),
     application:load(sasl),
     application:set_env(sasl, sasl_error_logger, {file, "rt_source_eqc_sasl.log"}),
     error_logger:tty(false),

@@ -112,7 +112,7 @@ init([RemoteName, Id]) ->
     {ok, populate_reference_table(ets:first(QTab), QSeq, NewState)}.
 
 handle_call(stop, _From, State) ->
-    {stop, normal, State};
+    {stop, normal, ok, State};
 
 handle_call({register, Ref}, {Pid, _Tag}, State) ->
     #state

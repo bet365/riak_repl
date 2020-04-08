@@ -92,9 +92,6 @@ start_rt() ->
     riak_repl2_rt:start_link().
 
 start_rtq() ->
-    %% ?debugFmt("where is riak_repl2_rtq: ~p", [whereis(riak_repl2_rtq)]),
-    %% riak_repl_test_util:kill_and_wait(riak_repl2_rtq),
-    application:set_env(riak_repl, rtq_concurrency, 1),
     riak_repl2_rtq:start_link(1).
 
 start_tcp_mon() ->

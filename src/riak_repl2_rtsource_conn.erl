@@ -64,23 +64,6 @@
 
 -define(DEFAULT_TIMEOUT, 60000).
 
--define(TCP_OPTIONS,  [{keepalive, true},
-                       {nodelay, true},
-                       {packet, 0},
-                       {active, false}]).
-
-%% nodes running 1.3.1 have a bug in the service_mgr module.
-%% this bug prevents it from being able to negotiate a version list longer
-%% than 2. Until we no longer support communicating with that version,
-%% we need to artifically truncate the version list.
-%% TODO: expand version list or remove comment when we no
-%% longer support 1.3.1
-%% prefered version list: [{2,0}, {1,5}, {1,1}, {1,0}]
-
-
--define(CLIENT_SPEC, {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]},
-                      {?TCP_OPTIONS, ?MODULE, self()}}).
-
 -record(state,
 {
     id,
@@ -632,11 +615,17 @@ get_consumer_latency_reset() ->
         _ -> ?DEFAULT_TIMEOUT
     end.
 
-
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
 -ifdef(TEST).
+
+-define(TCP_OPTIONS,  [{keepalive, true},
+    {nodelay, true},
+    {packet, 0},
+    {active, false}]).
+
+-define(CLIENT_SPEC(Pid), {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?MODULE, Pid}}).
 
 riak_repl2_rtsource_conn_test_() ->
     {spawn, [{
@@ -647,109 +636,92 @@ riak_repl2_rtsource_conn_test_() ->
     }]}.
 
 setup() ->
-    % ?debugMsg("enter setup()"),
-    % make sure there aren't leftovers around from prior tests
-    sanitize(),
     % now set up the environment for this test
     process_flag(trap_exit, true),
     riak_repl_test_util:start_test_ring(),
     riak_repl_test_util:abstract_gen_tcp(),
     riak_repl_test_util:abstract_stats(),
     riak_repl_test_util:abstract_stateful(),
-    % ?debugMsg("leave setup()"),
-
-    folsom:start(),
-
     ok.
 
-cleanup(_Ctx) ->
-    % ?debugFmt("enter cleanup(~p)", [_Ctx]),
-    R = sanitize(),
-    % ?debugFmt("leave cleanup(~p) -> ~p", [_Ctx, R]),
-    R.
-
-sanitize() ->
-    % ?debugMsg("enter sanitize()"),
+cleanup(_) ->
+    application:unset_env(riak_repl, rtq_concurrency),
     rt_source_helpers:kill_fake_sink(),
-    riak_repl_test_util:kill_and_wait([
-        riak_repl2_rt,
-        riak_repl2_rtq,
-        riak_core_tcp_mon]),
-
+    riak_repl_test_util:kill_and_wait([riak_repl2_rt, riak_core_tcp_mon]),
+    riak_repl2_rtq:stop(1),
+    catch riak_repl2_reference_rtq:stop("sink_cluster", 1),
     riak_repl_test_util:stop_test_ring(),
-
-    riak_repl_test_util:maybe_unload_mecks([
-        riak_core_service_mgr,
-        riak_core_connection_mgr,
-        gen_tcp]),
+    riak_repl_test_util:maybe_unload_mecks([riak_core_service_mgr, riak_core_connection_mgr, gen_tcp]),
     meck:unload(),
-    % ?debugMsg("leave sanitize()"),
     ok.
 
 %% test for https://github.com/basho/riak_repl/issues/247
 %% cache the peername so that when the local socket is closed
 %% peername will still be around for logging
 cache_peername_test_case() ->
-    % ?debugMsg("enter cache_peername_test_case()"),
+    RemoteName = "sink_cluster",
     {ok, _RTPid} = rt_source_helpers:start_rt(),
-    {ok, _RTQPid} = rt_source_helpers:start_rtq(),
+    application:set_env(riak_repl, rtq_concurrency, 1),
+    {ok, RTQPid} = riak_repl2_rtq:start_link(1),
+    {ok, RefQPid} = riak_repl2_reference_rtq:start_link(RemoteName, 1),
+    unlink(RTQPid),
+    unlink(RefQPid),
     {ok, _TCPMonPid} = rt_source_helpers:start_tcp_mon(),
     {ok, _FsPid, FsPort} = rt_source_helpers:init_fake_sink(),
-    FsName = {"127.0.0.1", FsPort},
-    ok = setup_connection_for_peername(FsName),
+    Addr = {"127.0.0.1", FsPort},
+    ok = setup_connection_for_peername(Addr),
+    timer:sleep(1000),
+    Pid = connect(RemoteName),
+    catch exit(Pid, test_complete),
+    ok.
 
-    ?assertEqual(ok, connect(FsName)).
-    % ?debugMsg("leave cache_peername_test_case()").
+%% Connect to the 'fake' sink
+connect(RemoteName) ->
+    stateful:set(version, {realtime, {1,0}, {1,0}}),
+    stateful:set(remote, RemoteName),
+    {ok, Pid} = riak_repl2_rtsource_conn:start(RemoteName, 1, self()),
+    _ = riak_core_connection_mgr:connect({rt_repl, RemoteName}, ?CLIENT_SPEC(Pid)),
+    RTQStats = riak_repl2_rtq_sup:status(),
+    ExpectedRTQStats =
+        [
+            {percent_bytes_used, 0.0},
+            {bytes,0},
+            {max_bytes,104857600},
+            {remotes, [{"sink_cluster", [{bytes,0}, {max_bytes,104857600}, {drops,0}]}]},
+            {overload_drops,0}
+        ],
+    ?assertEqual(ExpectedRTQStats, RTQStats),
+    Pid.
 
 %% Set up the test
-setup_connection_for_peername(RemoteName) ->
-    % ?debugFmt("enter setup_connection_for_peername(~p)", [RemoteName]),
+setup_connection_for_peername(Addr) ->
     riak_repl_test_util:reset_meck(riak_core_connection_mgr, [no_link, passthrough]),
     meck:expect(riak_core_connection_mgr, connect,
-                fun(_ServiceAndRemote, ClientSpec) ->
-                        proc_lib:spawn_link(?MODULE, riak_core_connection_mgr_connect, [ClientSpec, RemoteName]),
-                        {ok, make_ref()}
-                end).
-riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = RemoteName) ->
+        fun(_ServiceAndRemote, ClientSpec) ->
+            proc_lib:spawn_link(?MODULE, riak_core_connection_mgr_connect, [ClientSpec, Addr]),
+            {ok, make_ref()}
+        end).
+riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = Addr) ->
     Version = stateful:version(),
     {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
     {ok, Socket} = gen_tcp:connect(RemoteHost, RemotePort, [binary | TcpOpts]),
-
-    ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Pid, []),
+    Ref = make_ref(),
+    ok = Module:connected(Pid, Ref, Socket, gen_tcp, Addr, Version, []),
 
     % simulate local socket problem
     inet:close(Socket),
 
     % get the State from the source connection.
     {status,Pid,_,[_,_,_,_,[_,_,{data,[{_,State}]}]]} = sys:get_status(Pid),
+
     % getting the peername from the socket should produce error string
     ?assertEqual("error:einval", peername(inet, Socket)),
 
     % while getting the peername from the State should produce the cached string
     % format the string we expect from peername(State) ...
     {ok, HostIP} = inet:getaddr(RemoteHost, inet),
-    RemoteText = lists:flatten(io_lib:format("~B.~B.~B.~B:~B",
-                    tuple_to_list(HostIP) ++ [RemotePort])),
+    RemoteText = lists:flatten(io_lib:format("~B.~B.~B.~B:~B", tuple_to_list(HostIP) ++ [RemotePort])),
     % ... and hook the function to check for it
     ?assertEqual(RemoteText, peername(State)).
-
-%% Connect to the 'fake' sink
-%% TODO: this is a useless test now! we no longer use legacy status!
-connect(RemoteName) ->
-    % ?debugFmt("enter connect(~p)", [RemoteName]),
-
-    stateful:set(version, {realtime, {1,0}, {1,0}}),
-    stateful:set(remote, RemoteName),
-
-    {ok, SourcePid} = riak_repl2_rtsource_conn:start_link(RemoteName),
-
-    {status, Status} = riak_repl2_rtsource_conn:legacy_status(SourcePid),
-    RTQStats = proplists:get_value(realtime_queue_stats, Status),
-
-    ?assertEqual([{percent_bytes_used, 0.0},
-                  {bytes,0},
-                  {max_bytes,104857600},
-                  {consumers,[]},
-                  {overload_drops,0}], RTQStats).
 
 -endif.

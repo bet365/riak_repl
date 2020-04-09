@@ -1150,7 +1150,7 @@ set_heartbeat_interval(Remote, Limit) ->
                 false ->
                     ?LOG_USER_CMD("Failed to set heartbeat interval: ~p does not exist", [Remote]);
                 true ->
-                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, Remote}, Int),
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_interval, Remote}, Int),
                     ?LOG_USER_CMD("Succeded; Consumer: ~p, Heartbeat Interval: ~p", [Remote, Int])
             end
     end.

@@ -26,6 +26,7 @@
     set_socket/3,
     status/1,
     status/2,
+    summarized_status/2,
     get_peername/1,
     send_shutdown/1
 ]).
@@ -69,7 +70,9 @@
 
     %% protocol =< 4
     write_data_function, %% the function we use for writting the object to riak
-    expected_seq_v4 = 1  %% the source will send seq number 1 first (the rest will be in order)
+    expected_seq_v4 = 1,  %% the source will send seq number 1 first (the rest will be in order)
+    retries = 0,
+    total_bt_drops = 0
 }).
 
 %% ================================================================================================================== %%
@@ -113,6 +116,9 @@ status(Pid) ->
 
 status(Pid, Timeout) ->
     gen_server:call(Pid, status, Timeout).
+
+summarized_status(Pid, Timeout) ->
+    gen_server:call(Pid, summarized_status, Timeout).
 
 get_peername(Pid) ->
   gen_server:call(Pid, get_peername).
@@ -158,6 +164,9 @@ init([OkProto, Remote]) ->
 handle_call(status, _From, State) ->
     {reply, get_status(State), State};
 
+handle_call(summarized_status, _From, State) ->
+    {reply, get_summarized_status(State), State};
+
 
 handle_call({set_socket, Socket, Transport}, _From, State) ->
     Transport:setopts(Socket, [{active, once}]), % pick up errors in tcp_error msg
@@ -185,12 +194,12 @@ handle_cast(ack_v4, State = #state{expected_seq_v4 = Seq}) ->
 
 %% new mechanism to inform the source we struggled to place the object and we are retrying
 %% on N number of failures we will not retry.
-handle_cast(retrying, State = #state{expected_seq_v4 = Seq}) ->
+handle_cast(retrying, State = #state{expected_seq_v4 = Seq, retries = Retries}) ->
     #state{transport = T, socket = S} = State,
     TcpIOL = riak_repl2_rtframe:encode(retrying, Seq),
     case T:send(S, TcpIOL) of
         ok ->
-            {noreply, State};
+            {noreply, State#state{retries = Retries+1}};
         {error, Reason} ->
             {stop, {error, Reason}, State}
     end;
@@ -347,13 +356,11 @@ get_status(State) ->
         acked_seq = AckedSeq
     } = State,
 
-    {PoolboyState, PoolboyQueueLength, PoolboyOverflow, PoolboyMonitorsActive} = poolboy:status(riak_repl2_rtsink_pool),
     Pending = pending(State),
     SocketStats = riak_core_tcp_mon:socket_status(State#state.socket),
     [
         {source, Remote},
         {pid, riak_repl_util:safe_pid_to_list(self())},
-        {connected, true},
         {transport, T},
         {socket, riak_core_tcp_mon:format_socket_stats(SocketStats,[])},
         {hb_last, HBLast},
@@ -364,12 +371,58 @@ get_status(State) ->
         {source_drops, SourceDrops},
         {expect_seq, ExpSeq},
         {acked_seq, AckedSeq},
-        {pending, Pending},
-        {poolboy_state, PoolboyState},
-        {poolboy_queue_length, PoolboyQueueLength},
-        {poolboy_overflow, PoolboyOverflow},
-        {poolboy_monitors_active, PoolboyMonitorsActive}
+        {pending, Pending}
     ].
+
+get_summarized_status(State) ->
+    #state{proto = Proto, peername = Addr} = State,
+    {_, {Version, _}, {Version, _}} = Proto,
+    {IP, _Port} = Addr,
+    FormattedIP = lists:flatten(io_lib:format("~s",[inet_parse:ntoa(IP)])),
+
+    case Version > 3 of
+        true ->
+            v4_summarized_stats(Version, FormattedIP, State);
+        false ->
+            v3_summarized_stats(Version, FormattedIP, State)
+    end.
+
+v4_summarized_stats(Version, FormattedIP, State) ->
+    #state
+    {
+        remote = Remote,
+        retries = Retries,
+        total_bt_drops = BTDrops,
+        expected_seq_v4 = ExpectedSeq
+
+    } = State,
+
+    {{Remote, FormattedIP, Version},
+        orddict:from_list([
+            {objects_received, ExpectedSeq -1},
+            {retries, Retries},
+            {bucket_type_drops, BTDrops}
+        ])
+    }.
+
+v3_summarized_stats(Version, FormattedIP, State) ->
+    #state
+    {
+        remote = Remote,
+        total_bt_drops = BTDrops,
+        deactivated = Deactivated,
+        source_drops = SourceDrops
+    } = State,
+    Pending = pending(State),
+
+    {{Remote, FormattedIP, Version},
+        orddict:from_list([
+            {deactivated, Deactivated},
+            {source_drops, SourceDrops},
+            {pending, Pending},
+            {bucket_type_drops, BTDrops}
+        ])
+    }.
 %% ================================================================================================================== %%
 %% Handle Incoming Data
 %% ================================================================================================================== %%
@@ -430,7 +483,7 @@ report_socket_close(State = #state{cont = Cont}) ->
 %% ================================================================================================================== %%
 %% Protocol 4
 %% ================================================================================================================== %%
-do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expected_seq_v4 = Seq}) ->
+do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expected_seq_v4 = Seq, total_bt_drops = TBTD}) ->
     #state{wire_version = WireVersion, helper = Helper} = State,
 
     case riak_repl_bucket_type_util:bucket_props_match(Meta) of
@@ -443,7 +496,7 @@ do_write_objects_v4({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{exp
             %% and we send a message to source to inform it of the drop
             BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
             gen_server:cast(self(), {drop, BucketType}),
-            State2 = State#state{expected_seq_v4 = Seq +1},
+            State2 = State#state{expected_seq_v4 = Seq +1, total_bt_drops = TBTD +1},
             case send_bucket_type_drop(Seq, State) of
                 ok ->
                     {ok, State2};
@@ -487,7 +540,7 @@ send_bucket_type_drop(Seq, #state{transport = T, socket = S}) ->
 %% ===================================== %%
 
 %% latest repl version with metadata
-do_write_objects_v3({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expect_seq = Seq}) ->
+do_write_objects_v3({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{expect_seq = Seq, total_bt_drops = TBTD}) ->
     Me = self(),
     #state{helper = Helper, wire_version = Ver, seq_ref = Ref} = State,
     DoneFun =
@@ -497,19 +550,22 @@ do_write_objects_v3({objects_and_meta, {Seq, BinObjs, Meta}}, State = #state{exp
             maybe_push(BinObjs, Meta, ObjectFilteringRules)
         end,
 
-    case riak_repl_bucket_type_util:bucket_props_match(Meta) of
-        true ->
-            riak_repl2_rtsink_helper:write_objects_v3(Helper, BinObjs, DoneFun, Ver);
-        false ->
-            BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
-            lager:debug("Bucket type:~p is not equal on both the source and sink; not writing object.",
-                [BucketType]),
-            gen_server:cast(Me, {drop, BucketType}),
-            Objects = riak_repl_util:from_wire(Ver, BinObjs),
-            ObjectFilteringRules = [riak_repl2_object_filter:get_realtime_blacklist(Obj) || Obj <- Objects],
-            DoneFun(ObjectFilteringRules)
-    end,
-    State1 = set_seq_number_v3(Seq, State),
+    State0 =
+        case riak_repl_bucket_type_util:bucket_props_match(Meta) of
+            true ->
+                riak_repl2_rtsink_helper:write_objects_v3(Helper, BinObjs, DoneFun, Ver),
+                State;
+            false ->
+                BucketType = riak_repl_bucket_type_util:prop_get(?BT_META_TYPE, ?DEFAULT_BUCKET_TYPE, Meta),
+                lager:debug("Bucket type:~p is not equal on both the source and sink; not writing object.",
+                    [BucketType]),
+                gen_server:cast(Me, {drop, BucketType}),
+                Objects = riak_repl_util:from_wire(Ver, BinObjs),
+                ObjectFilteringRules = [riak_repl2_object_filter:get_realtime_blacklist(Obj) || Obj <- Objects],
+                DoneFun(ObjectFilteringRules),
+                State#state{total_bt_drops = TBTD +1}
+        end,
+    State1 = set_seq_number_v3(Seq, State0),
     State2 = set_socket_check_pending_v3(State1),
     {ok, State2};
 

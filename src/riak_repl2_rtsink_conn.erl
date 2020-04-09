@@ -803,7 +803,6 @@ start_source(NegotiatedVer) ->
                     ok = Module:connected(Socket, gen_tcp, {"localhost", ?SINK_PORT}, ?PROTOCOL(NegotiatedVer), Args, []);
                 _Reason ->
                     ok
-%%                    Module:connect_failed(Proto, Reason, Args, {"localhost", ?SINK_PORT})
             end
         end),
         {ok, make_ref()}

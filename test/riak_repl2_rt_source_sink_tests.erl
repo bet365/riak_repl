@@ -123,7 +123,7 @@ v2_to_v2_comms(_State) ->
                fun() ->
                        {ok, DoneFun} = extract_state_msg(),
                        DoneFun([]),
-                       timer:sleep(1000),
+                       timer:sleep(2000),
                        ?assert(riak_repl2_rtq:is_empty(1))
                end}
              ]
@@ -185,7 +185,7 @@ v1_to_v1_comms(_State) ->
                        {ok, DoneFun} = extract_state_msg(),
                        %%?assert(is_function(DoneFun)),
                        DoneFun([]),
-                       timer:sleep(1000),
+                       timer:sleep(2000),
                        ?assert(riak_repl2_rtq:is_empty(1))
                end}
              ]

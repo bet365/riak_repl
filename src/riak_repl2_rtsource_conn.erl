@@ -38,7 +38,7 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--export([riak_core_connection_mgr_connect/2]).
+-export([riak_core_connection_mgr_connect/2, start_test/2]).
 -endif.
 
 %% API
@@ -154,6 +154,10 @@ get_ref(Pid) ->
 % ======================================================================================================================
 
 %% gen_server callbacks
+
+%% Init for start_test
+init([Remote, Id]) ->
+    {ok, #state{remote = Remote, id = Id}};
 
 %% Initialize
 init([Remote, Id, ConnMgr]) ->
@@ -625,7 +629,11 @@ get_consumer_latency_reset() ->
     {packet, 0},
     {active, false}]).
 
--define(CLIENT_SPEC(Pid), {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?MODULE, Pid}}).
+-define(CLIENT_SPEC, {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?MODULE, self()}}).
+
+start_test(Remote, Id) ->
+    gen_server:start(?MODULE, [Remote, Id], []).
+
 
 riak_repl2_rtsource_conn_test_() ->
     {spawn, [{
@@ -670,17 +678,14 @@ cache_peername_test_case() ->
     {ok, _FsPid, FsPort} = rt_source_helpers:init_fake_sink(),
     Addr = {"127.0.0.1", FsPort},
     ok = setup_connection_for_peername(Addr),
-    timer:sleep(1000),
-    Pid = connect(RemoteName),
-    catch exit(Pid, test_complete),
+    connect(RemoteName),
     ok.
 
 %% Connect to the 'fake' sink
 connect(RemoteName) ->
     stateful:set(version, {realtime, {1,0}, {1,0}}),
     stateful:set(remote, RemoteName),
-    {ok, Pid} = riak_repl2_rtsource_conn:start(RemoteName, 1, self()),
-    _ = riak_core_connection_mgr:connect({rt_repl, RemoteName}, ?CLIENT_SPEC(Pid)),
+    _ = riak_core_connection_mgr:connect({rt_repl, RemoteName}, ?CLIENT_SPEC),
     RTQStats = riak_repl2_rtq_sup:status(),
     ExpectedRTQStats =
         [
@@ -690,8 +695,7 @@ connect(RemoteName) ->
             {remotes, [{"sink_cluster", [{bytes,0}, {max_bytes,104857600}, {drops,0}]}]},
             {overload_drops,0}
         ],
-    ?assertEqual(ExpectedRTQStats, RTQStats),
-    Pid.
+    ?assertEqual(ExpectedRTQStats, RTQStats).
 
 %% Set up the test
 setup_connection_for_peername(Addr) ->
@@ -703,9 +707,10 @@ setup_connection_for_peername(Addr) ->
         end).
 riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = Addr) ->
     Version = stateful:version(),
-    {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
+    {_Proto, {TcpOpts, Module, _Pid}} = ClientSpec,
     {ok, Socket} = gen_tcp:connect(RemoteHost, RemotePort, [binary | TcpOpts]),
     Ref = make_ref(),
+    {ok, Pid} = riak_repl2_rtsource_conn:start_test("sink_cluster", 1),
     ok = Module:connected(Pid, Ref, Socket, gen_tcp, Addr, Version, []),
 
     % simulate local socket problem
@@ -722,6 +727,7 @@ riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = Addr) ->
     {ok, HostIP} = inet:getaddr(RemoteHost, inet),
     RemoteText = lists:flatten(io_lib:format("~B.~B.~B.~B:~B", tuple_to_list(HostIP) ++ [RemotePort])),
     % ... and hook the function to check for it
-    ?assertEqual(RemoteText, peername(State)).
+    ?assertEqual(RemoteText, peername(State)),
+    catch exit(Pid, test_complete).
 
 -endif.

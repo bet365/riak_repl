@@ -43,23 +43,33 @@ get_all_status() ->
             {poolboy_overflow, PoolboyOverflow},
             {poolboy_monitors_active, PoolboyMonitorsActive}
         ],
-
-    AllStats = lists:foldl(fun(Pid, Dict) -> merge_stats(Pid, Dict) end, [], supervisor:which_children(?MODULE)),
+    AllStats = lists:foldl(fun(Pid, Dict) -> merge_stats(Pid, Dict) end, [], started()),
     SinkStats = lists:foldl(
         fun({{Remote, IP, Version}, Stats}, Acc) ->
-            %%TODO: re-order the stats to make this tidy for print to console/ webpage for repl stats
-            []
-        end, [], AllStats).
+            SortedStats =
+                [
+                    {Remote,
+                        [
+                            {ip, IP},
+                            {version, Version},
+                            {stats, Stats}]
+                    }
+                ],
+            Acc ++ SortedStats
+        end, [], AllStats),
+    SinkStats ++ PoolboyStats.
 
 
 merge_stats(Pid, Dict) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     try
         {Key, StatsDict} = riak_repl2_rtsink_conn:summarized_status(Pid, Timeout),
+        {_, MsgLen} = erlang:process_info(Pid, message_queue_len),
+        StatsDict1 = orddict:store(message_queue_len, MsgLen, StatsDict),
         MergedStatsDict =
             case orddict:find(Key, Dict) of
-                StatsDict0 ->
-                    orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict);
+                {ok, StatsDict0} ->
+                    orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict1);
                 _ ->
                     StatsDict
             end,

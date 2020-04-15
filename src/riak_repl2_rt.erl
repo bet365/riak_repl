@@ -185,20 +185,14 @@ postcommit(RObj) ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call(status, _From, State = #state{sinks = SinkPids}) ->
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+handle_call(status, _From, State) ->
     Sources = [try
                    riak_repl2_rtsource_conn_mgr:status(Pid)
                catch
                    _:_ ->
                        {Remote, Pid, unavailable}
                end || {Remote, Pid} <- riak_repl2_rtsource_conn_sup:enabled()],
-    Sinks = [try
-                 riak_repl2_rtsink_conn:status(Pid, Timeout)
-             catch
-                 _:_ ->
-                     {will_be_remote_name, Pid, unavailable}
-             end || Pid <- SinkPids],
+    Sinks = riak_repl2_rtsink_conn_sup:status(),
     Status = [{enabled, enabled()},
               {started, started()},
               {q,       riak_repl2_rtq_sup:status()},

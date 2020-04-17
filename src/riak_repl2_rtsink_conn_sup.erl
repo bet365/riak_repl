@@ -67,10 +67,11 @@ merge_stats(Pid, Dict) ->
         {Key, StatsDict} = riak_repl2_rtsink_conn:summarized_status(Pid, Timeout),
         {_, MsgLen} = erlang:process_info(Pid, message_queue_len),
         StatsDict1 = orddict:store(message_queue_len, MsgLen, StatsDict),
+        StatsDict2 = orddict:update_counter(number_of_connections, 1, StatsDict1),
         MergedStatsDict =
             case orddict:find(Key, Dict) of
                 {ok, StatsDict0} ->
-                    orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict1);
+                    orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict2);
                 _ ->
                     StatsDict
             end,

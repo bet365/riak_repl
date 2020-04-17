@@ -50,6 +50,7 @@ get_all_status() ->
                 [
                     {Remote,
                         [
+                            {remote, Remote},
                             {ip, IP},
                             {version, Version},
                             {stats, Stats}]

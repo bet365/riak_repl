@@ -6,7 +6,8 @@
     start_link/0,
     enable/1,
     disable/1,
-    enabled/0
+    enabled/0,
+    status/0
 ]).
 
 -export([init/1]).
@@ -37,6 +38,9 @@ enabled() ->
     [{Remote, ConnMgr}  || {Remote, ConnMgr, _, [riak_repl2_rtsource_conn_mgr]}
         <- supervisor:which_children(?MODULE), is_pid(ConnMgr)].
 
+status() ->
+    get_all_status().
+
 %% @private
 init([]) ->
     %% once conn mgr is started by core.  Must be started/registered before sources are started
@@ -49,3 +53,16 @@ init([]) ->
 make_remote(Remote) ->
     {Remote, {riak_repl2_rtsource_conn_mgr, start_link, [Remote]},
         permanent, ?SHUTDOWN, worker, [riak_repl2_rtsource_conn_mgr]}.
+
+
+
+get_all_status() ->
+    [get_status(Pid) || {_, Pid} <- enabled()].
+
+get_status(Pid) ->
+    try
+        riak_repl2_rtsource_conn_mgr:status(Pid)
+    catch
+        _:_  ->
+            []
+    end .

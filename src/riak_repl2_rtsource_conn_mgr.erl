@@ -839,14 +839,16 @@ get_status(State) ->
 
     Stats =
         [
-            {remote, Remote},
-            {balanced, Balanced},
-            {balancing, Balancing},
-            {number_of_connections, NumberOfConnections},
-            {number_of_pending_connects, NumberOfPendingConnects},
-            {number_of_pending_disconnects, NumerberOfPendingDisconnects},
-            {connections, get_connection_counts(State)},
-            {latency, get_latency(State)}
+            {Remote,
+                {remote, Remote},
+                {balanced, Balanced},
+                {balancing, Balancing},
+                {number_of_connections, NumberOfConnections},
+                {number_of_pending_connects, NumberOfPendingConnects},
+                {number_of_pending_disconnects, NumerberOfPendingDisconnects},
+                {connections, get_connection_counts(State)},
+                {latency, get_latency(State)}
+            }
         ],
     Stats.
 

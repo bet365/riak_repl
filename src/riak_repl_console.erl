@@ -817,8 +817,10 @@ status2(Verbose, Version) ->
     FSRemotesStatus = fs_remotes_status(),
     PGRemotesStatus = pg_remotes_status(),
     LeaderStats = leader_stats(),
+
     ClientStats = client_stats(Version),
     ServerStats = server_stats(),
+
     CoordStats = coordinator_stats(),
     CoordSrvStats = coordinator_srv_stats(),
     CMgrStats = cluster_mgr_stats(),
@@ -1006,7 +1008,7 @@ client_stats_rpc() ->
     client_stats(v1).
 
 client_stats_rpc(v1) ->
-    RT2 = riak_repl2_rtsink_conn_sup:status() ++
+    RT2 = [{sink_stats, [{rt_sink_connected_to, riak_repl2_rtsink_conn_sup:status()}]}] ++
         [fs2_sink_stats(P) || P <- riak_repl2_fssink_sup:started()],
     Pids = [P || {_,P,_,_} <- supervisor:which_children(riak_repl_client_sup), P /= undefined],
     [{client_stats, [fs_client_stats(P) || P <- Pids]}, {sinks, RT2}];
@@ -1020,7 +1022,7 @@ client_stats_rpc(legacy) ->
 server_stats() ->
     case erlang:whereis(riak_repl_leader_gs) of
         Pid when is_pid(Pid) ->
-            RT2 = [rt2_source_stats(P) || {_R,P} <- riak_repl2_rtsource_conn_sup:enabled()],
+            RT2 = [{source_stats, [{rt_source_connected_to, riak_repl2_rtsource_conn_sup:status()}]}],
             LeaderNode = riak_repl_leader:leader_node(),
             case LeaderNode of
                 undefined ->
@@ -1081,16 +1083,16 @@ coordinator_srv_stats() ->
         _ -> []
     end.
 
-rt2_source_stats(Pid) ->
-    State = try
-                riak_repl2_rtsource_conn_mgr:status(Pid)
-            catch
-                _:_ ->
-                    too_busy
-            end,
-    FormattedPid = riak_repl_util:safe_pid_to_list(Pid),
-    {source_stats, [{pid,FormattedPid}, erlang:process_info(Pid, message_queue_len),
-        {rt_source_connected_to, State}]}.
+%%rt2_source_stats(Pid) ->
+%%    State = try
+%%                riak_repl2_rtsource_conn:status(Pid)
+%%            catch
+%%                _:_ ->
+%%                    too_busy
+%%            end,
+%%    FormattedPid = riak_repl_util:safe_pid_to_list(Pid),
+%%    {source_stats, [{pid,FormattedPid}, erlang:process_info(Pid, message_queue_len),
+%%        {rt_source_connected_to, State}]}.
 
 rt2_sink_stats(Pid) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),

@@ -689,6 +689,7 @@ connect(RemoteName) ->
     RTQStats = riak_repl2_rtq_sup:status(),
     ExpectedRTQStats =
         [
+            {concurrency, 1},
             {percent_bytes_used, 0.0},
             {bytes,0},
             {max_bytes,104857600},

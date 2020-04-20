@@ -57,12 +57,20 @@ make_remote(Remote) ->
 
 
 get_all_status() ->
-    [get_status(Pid) || {_, Pid} <- enabled()].
+    lists:foldl(
+        fun({_, Pid}, Acc) ->
+            case get_status(Pid) of
+                busy ->
+                    Acc;
+                Stats ->
+                    [Stats | Acc]
+            end
+        end, [], enabled()).
 
 get_status(Pid) ->
     try
         riak_repl2_rtsource_conn_mgr:status(Pid)
     catch
         _:_  ->
-            []
+            busy
     end .

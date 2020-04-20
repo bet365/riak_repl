@@ -836,21 +836,18 @@ get_status(State) ->
         number_of_pending_connects = NumberOfPendingConnects,
         number_of_pending_disconnects = NumerberOfPendingDisconnects
     } = State,
-
-    Stats =
+    {Remote,
         [
-            {Remote,
-                {remote, Remote},
-                {balanced, Balanced},
-                {balancing, Balancing},
-                {number_of_connections, NumberOfConnections},
-                {number_of_pending_connects, NumberOfPendingConnects},
-                {number_of_pending_disconnects, NumerberOfPendingDisconnects},
-                {connections, get_connection_counts(State)},
-                {latency, get_latency(State)}
-            }
-        ],
-    Stats.
+            {remote, Remote},
+            {balanced, Balanced},
+            {balancing, Balancing},
+            {number_of_connections, NumberOfConnections},
+            {number_of_pending_connects, NumberOfPendingConnects},
+            {number_of_pending_disconnects, NumerberOfPendingDisconnects},
+            {connections, get_connection_counts(State)},
+            {latency, get_latency(State)}
+        ]
+    }.
 
 
 get_connection_counts(#state{connections = Connections}) ->
@@ -875,6 +872,7 @@ get_latency(State = #state{connections = Connections}) ->
                     fun(_Ref, Pid, Acc2) ->
                         case riak_repl2_rtsource_conn:get_latency(Pid, Timeout) of
                             error -> Acc2;
+                            %% note that rtsource_conn has alaredy formatted this "Addr" peername
                             {Addr, LatencyDistribtion} -> merge_latency(Addr, LatencyDistribtion, Acc2)
                         end
                     end, Acc, Pids)

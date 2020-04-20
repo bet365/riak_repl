@@ -45,18 +45,20 @@ get_all_status() ->
         ],
     AllStats = lists:foldl(fun(Pid, Dict) -> merge_stats(Pid, Dict) end, [], started()),
     SinkStats = lists:foldl(
-        fun({{Remote, IP, Version}, Stats}, Acc) ->
-            SortedStats =
-                [
-                    {Remote,
-                        [
-                            {remote, Remote},
-                            {ip, IP},
-                            {version, Version},
-                            {stats, Stats}]
-                    }
-                ],
-            Acc ++ SortedStats
+        fun({Remote, RemoteStats}, Acc0) ->
+            AggRemoteStat =
+                lists:foldl(
+                    fun({_, Stats}, Acc1) ->
+                        orddict:merge(fun(_, V1, V2) -> V1 + V2 end, Stats, Acc1)
+                    end, [], RemoteStats),
+            SortedRemoteStats =
+                lists:foldl(
+                    fun({{IP, Version}, Stats}, Acc2) ->
+                        [{IP, [{version, Version}, {stats, Stats}]} | Acc2]
+                    end, [], RemoteStats),
+
+            FinalStats = [{Remote, SortedRemoteStats ++ [{Remote, [{stats, AggRemoteStat}]}]}],
+            Acc0 ++ FinalStats
         end, [], AllStats),
     SinkStats ++ PoolboyStats.
 
@@ -64,18 +66,26 @@ get_all_status() ->
 merge_stats(Pid, Dict) ->
     Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
     try
-        {Key, StatsDict} = riak_repl2_rtsink_conn:summarized_status(Pid, Timeout),
+        {{Remote, IP, Version}, StatsDict} = riak_repl2_rtsink_conn:summarized_status(Pid, Timeout),
         {_, MsgLen} = erlang:process_info(Pid, message_queue_len),
         StatsDict1 = orddict:store(message_queue_len, MsgLen, StatsDict),
         StatsDict2 = orddict:update_counter(number_of_connections, 1, StatsDict1),
-        MergedStatsDict =
-            case orddict:find(Key, Dict) of
-                {ok, StatsDict0} ->
-                    orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict2);
-                _ ->
-                    StatsDict
-            end,
-        orddict:store(Key, MergedStatsDict, Dict)
+        case orddict:find(Remote, Dict) of
+            {ok, RemoteDict} ->
+                case orddict:find({IP, Version}, RemoteDict) of
+                    {ok, StatsDict0} ->
+                        R0 = orddict:merge(fun(_, V1, V2) -> V1 + V2 end, StatsDict0, StatsDict2),
+                        R1 = orddict:store({IP, Version}, R0, RemoteDict),
+                        orddict:store(Remote, R1, Dict);
+                    _ ->
+                        R1 = orddict:store({IP, Version}, StatsDict2, RemoteDict),
+                        orddict:store(Remote, R1, Dict)
+                end;
+            _ ->
+                RemoteDict = orddict:new(),
+                R1 = orddict:store({IP, Version}, StatsDict2, RemoteDict),
+                orddict:store(Remote, R1, Dict)
+        end
     catch
         _:_ ->
             %% maybe have too_busy here so we know?

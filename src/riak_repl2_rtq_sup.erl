@@ -86,7 +86,7 @@ get_all_status() ->
         MaxBytes = proplists:get_value(max_bytes, AllStats),
         CurrentBytes = proplists:get_value(bytes, AllStats),
         PercentBytes = round( (CurrentBytes / MaxBytes) * 100000 ) / 1000,
-        [{percent_bytes_used, PercentBytes} | AllStats]
+        [{concurrency, Concurrency}, {percent_bytes_used, PercentBytes} | AllStats]
     catch _:_ ->
         []
     end.

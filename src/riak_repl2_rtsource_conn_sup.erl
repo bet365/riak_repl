@@ -7,7 +7,9 @@
     enable/1,
     disable/1,
     enabled/0,
-    status/0
+    status/0,
+    maybe_rebalance/0,
+    maybe_rebalance/1
 ]).
 
 -export([init/1]).
@@ -40,6 +42,27 @@ enabled() ->
 
 status() ->
     get_all_status().
+
+maybe_rebalance() ->
+    lists:foreach(fun({_, Pid}) -> riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid) end, enabled()).
+
+maybe_rebalance(RemoteList) when is_list(RemoteList) ->
+    lists:foreach(
+        fun({Remote, Pid}) ->
+            case lists:member(Remote, RemoteList) of
+                true ->
+                    riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid);
+                _ ->
+                    ok
+            end
+        end, enabled());
+maybe_rebalance(Remote) ->
+    case lists:keyfind(Remote, 1, enabled()) of
+        false ->
+            error;
+        {Remote, Pid} ->
+            riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid)
+    end.
 
 %% @private
 init([]) ->

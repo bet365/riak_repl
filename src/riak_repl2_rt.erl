@@ -98,12 +98,7 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     end,
 
     ToValidate = Started -- ToStop,
-    _ = [case lists:keyfind(Remote, 1, Connections) of
-             {_, Pid} ->
-                 riak_repl2_rtsource_conn_mgr:maybe_rebalance(Pid);
-             false ->
-                 ok
-         end || Remote <- ToValidate ],
+    riak_repl2_rtsource_conn_sup:maybe_rebalance(ToValidate),
 
     case ToEnable ++ ToDisable ++ ToStart ++ ToStop of
         [] ->

@@ -46,6 +46,8 @@
     report_drops_sync/2
 ]).
 
+-export([get_remote_max_bytes/1]).
+
 
 -define(DEFAULT_OVERLOAD, 2000).
 -define(DEFAULT_RECOVER, 1000).
@@ -64,12 +66,14 @@
     overload = ?DEFAULT_OVERLOAD :: pos_integer(), % if the message q exceeds this, the rtq is overloaded
     recover = ?DEFAULT_RECOVER :: pos_integer(), % if the rtq is in overload mode, it does not recover until =<
     overloaded = false :: boolean(),
-    overload_drops = 0 :: non_neg_integer(),
     shutting_down=false,
     qsize_bytes = 0,
     word_size=erlang:system_info(wordsize),
     remotes = [],
-    all_remote_names = []
+    all_remote_names = [],
+
+    overload_drops = 0 :: non_neg_integer(),
+    trimming_drops = 0 :: non_neg_integer()
 }).
 
 -record(remote,
@@ -403,13 +407,14 @@ make_status(State = #state{qtab = QTab, remotes = Remotes, id = Id}) ->
         lists:foldl(
             fun(Remote, Acc) ->
                 #remote{name = Name, total_drops = Drops, rsize_bytes = RSize} = Remote,
-                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Remote)}, {drops, Drops}],
+                Stats = [{bytes, RSize}, {max_bytes, get_remote_max_bytes(Name)}, {drops, Drops}],
                 RefStats = riak_repl2_reference_rtq:status(Id, Name),
                 [{Name, Stats ++ RefStats} | Acc]
             end, [], Remotes),
     [{bytes, qbytes(QTab, State)},
     {max_bytes, MaxBytes},
     {remotes, RemoteStats},
+    {trimming_drops, State#state.trimming_drops},
     {overload_drops, State#state.overload_drops}].
 
 %% ================================================================================================================== %%
@@ -514,7 +519,7 @@ remotes_needs_trim([Remote | Rest], RemotesToTrim, OkRemotes) ->
 
 %% we do not take into account ets memory overhead for the remote queues
 remote_need_trim(Remote = #remote{rsize_bytes = RBytes}) ->
-    RBytes > get_remote_max_bytes(Remote).
+    RBytes > get_remote_max_bytes(Remote#remote.name).
 
 
 trim_remote_queues([], '$end_of_table', State) ->
@@ -581,19 +586,13 @@ trim_remote_single_entry(Completed, Remote, ShrinkSize) ->
 %% ==================================================== %%
 maybe_trim_queue(State) ->
     maybe_trim_queue(State, 0).
-maybe_trim_queue(State = #state{qtab = QTab}, Counter) ->
+maybe_trim_queue(State = #state{qtab = QTab, trimming_drops = C}, Counter) ->
     case queue_needs_trim(State) of
         true ->
             NewState = trim_single_queue_entry(ets:first(QTab), State),
             maybe_trim_queue(NewState, Counter+1);
         false ->
-            case Counter of
-                0 -> ok;
-                _ ->
-                    lager:error("Dropped ~p objects in ~p entries due to reaching maximum queue size of ~p bytes",
-                        [Counter, get_queue_max_bytes()])
-            end,
-            State
+            State#state{trimming_drops = C + Counter}
     end.
 
 
@@ -801,7 +800,7 @@ qbytes(_QTab, #state{qsize_bytes = QSizeBytes}) ->
 
 
 get_remote_max_bytes(_) ->
-    MaxBytes = app_helper:get_env(riak_repl, default_consumer_max_bytes, ?DEFAULT_MAX_BYTES),
+    MaxBytes = app_helper:get_env(riak_repl, default_remote_max_bytes, ?DEFAULT_MAX_BYTES),
     MaxBytes div riak_repl_util:get_rtq_concurrency().
 
 
@@ -810,22 +809,22 @@ qbytes(QTab, #state{qsize_bytes = QSizeBytes, word_size=WordSize}) ->
     Words = ets:info(QTab, memory),
     (Words * WordSize) + QSizeBytes.
 
-get_remote_max_bytes(Remote) ->
+get_remote_max_bytes(RemoteName) ->
     MaxBytes =
-        case get_max_bytes_for_remote(Remote) of
+        case get_max_bytes_for_remote(RemoteName) of
             undefined -> get_remote_max_bytes_default();
             N -> N
         end,
     MaxBytes div riak_repl_util:get_rtq_concurrency().
 
 get_remote_max_bytes_default() ->
-    case app_helper:get_env(riak_repl, default_consumer_max_bytes) of
+    case app_helper:get_env(riak_repl, default_remote_max_bytes) of
         N when is_integer(N), N > 0 -> N;
         _ -> ?DEFAULT_MAX_BYTES
     end.
 
-get_max_bytes_for_remote(#remote{name = Name}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Name}) of
+get_max_bytes_for_remote(RemoteName) ->
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {remote_max_bytes, RemoteName}) of
         N when is_integer(N), N > 0 -> N;
         _ -> undefined
     end.

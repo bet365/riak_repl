@@ -869,7 +869,7 @@ start_source(NegotiatedVer) ->
     receive
         {sink_started, SinkPid} ->
             {ok, {SourcePid, SinkPid}}
-    after 1000 ->
+    after 5000 ->
         {error, timeout}
     end.
 

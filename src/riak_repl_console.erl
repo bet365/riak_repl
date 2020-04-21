@@ -30,6 +30,7 @@
     modes/1,
     set_modes/1,
     get_modes/0
+%%    settings/0
 ]).
 
 
@@ -366,8 +367,8 @@ realtime([Cmd, Remote, Arg]) ->
             set_heartbeat_timeout(Remote, Arg);
         "heartbeat_interval" ->
             set_heartbeat_interval(Remote, Arg);
-        "consumer_max_bytes" ->
-            set_reference_rtq_consumer_max_bytes(Remote, Arg);
+        "remote_max_bytes" ->
+            set_reference_rtq_remote_max_bytes(Remote, Arg);
         "connections_per_queue" ->
             set_number_of_connections_per_queue(Remote, Arg);
         "retry_limit" ->
@@ -387,7 +388,20 @@ realtime([Cmd, Remote]) ->
             riak_repl2_rt:start(Remote);
         "stop" ->
             ?LOG_USER_CMD("Stop Realtime Replication to cluster ~p", [Remote]),
-            riak_repl2_rt:stop(Remote)
+            riak_repl2_rt:stop(Remote);
+        "rebalance" ->
+            ?LOG_USER_CMD("Rebalance Issued", []),
+            riak_repl2_rtsource_conn_sup:maybe_rebalance([Remote]);
+        "heartbeat_timeout" ->
+            get_heartbeat_timeout(Remote);
+        "heartbeat_interval" ->
+            get_heartbeat_interval(Remote);
+        "remote_max_bytes" ->
+            get_reference_rtq_remote_max_bytes(Remote);
+        "connections_per_queue" ->
+            get_number_of_connections_per_queue(Remote);
+        "retry_limit" ->
+            get_reference_rtq_retry_limit(Remote)
     end,
     ok;
 realtime([Cmd]) ->
@@ -400,7 +414,9 @@ realtime([Cmd]) ->
             "stop" ->
                 ?LOG_USER_CMD("Stop Realtime Replication to all connected clusters",
                     []),
-                _ = [riak_repl2_rt:stop(Remote) || Remote <- Remotes]
+                _ = [riak_repl2_rt:stop(Remote) || Remote <- Remotes];
+            "rebalance" ->
+                riak_repl2_rtsource_conn_sup:maybe_rebalance()
         end,
     ok.
 
@@ -439,6 +455,12 @@ set_heartbeat_interval(Remote, Limit) ->
             end
     end.
 
+get_heartbeat_interval(Remote) ->
+    riak_repl2_rtsource_conn:get_heartbeat_interval(Remote).
+
+
+
+
 set_heartbeat_timeout(Remote, Limit) ->
     case safe_list_to_integer(Limit) of
         error ->
@@ -454,6 +476,11 @@ set_heartbeat_timeout(Remote, Limit) ->
             end
     end.
 
+get_heartbeat_timeout(Remote) ->
+    riak_repl2_rtsource_conn:get_heartbeat_timeout(Remote).
+
+
+
 set_number_of_connections_per_queue(Remote, Limit) ->
     case safe_list_to_integer(Limit) of
         error ->
@@ -465,9 +492,16 @@ set_number_of_connections_per_queue(Remote, Limit) ->
                     ?LOG_USER_CMD("Failed to set number of connections per queue Remote: ~p does not exist", [Remote]);
                 true ->
                     riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {number_of_connections_per_queue, Remote}, Int),
-                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Number Of Connections Per Queue: ~p", [Remote, Int])
+                    ?LOG_USER_CMD("Succeded; Consumer: ~p, Number Of Connections Per Queue: ~p~n", [Remote, Int]),
+                    riak_repl2_rtsource_conn_sup:maybe_rebalance([Remote]),
+                    ?LOG_USER_CMD("Rebalance Issued", [])
             end
     end.
+
+get_number_of_connections_per_queue(Remote) ->
+    riak_repl2_rtsource_conn_mgr:get_number_of_connections_per_queue(Remote).
+
+
 
 set_reference_rtq_retry_limit(Remote, Limit) ->
     case safe_list_to_integer(Limit) of
@@ -484,7 +518,12 @@ set_reference_rtq_retry_limit(Remote, Limit) ->
             end
     end.
 
-set_reference_rtq_consumer_max_bytes(Remote, MaxBytes) ->
+get_reference_rtq_retry_limit(Remote) ->
+    riak_repl2_reference_rtq:get_retry_limit(Remote).
+
+
+
+set_reference_rtq_remote_max_bytes(Remote, MaxBytes) ->
     case safe_list_to_integer(MaxBytes) of
         error ->
             ?LOG_USER_CMD("Failed to set consumer max bytes: ~p, as it is not an integer", [MaxBytes]);
@@ -494,10 +533,13 @@ set_reference_rtq_consumer_max_bytes(Remote, MaxBytes) ->
                 false ->
                     ?LOG_USER_CMD("Failed to set consumer max bytes, as Remote: ~p does not exist", [Remote]);
                 true ->
-                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {consumer_max_bytes, Remote}, Int),
+                    riak_core_metadata:put(?RIAK_REPL2_CONFIG_KEY, {remote_max_bytes, Remote}, Int),
                     ?LOG_USER_CMD("Succeded; Consumer: ~p, Max Bytes: ~p", [Remote, MaxBytes])
             end
     end.
+
+get_reference_rtq_remote_max_bytes(Remote) ->
+    riak_repl2_rtq:get_remote_max_bytes(Remote).
 
 safe_list_to_integer(MaxBytes) ->
     try

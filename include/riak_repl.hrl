@@ -46,8 +46,13 @@
 -define(BT_META_TYPED_BUCKET, typed_bucket).
 -define(BT_META_TYPE, bucket_type).
 -define(BT_META_PROPS_HASH, properties_hash_val).
+
 -define(BT_META_BLACKLIST, realtime_blacklist).
 -define(RIAK_REPL2_CONFIG_KEY, {riak_repl2, config}).
+
+-define(RT_HEARTBEAT_DEFAULT_TIMEOUT, 60000).
+-define(RT_HEARTBEAT_DEFAULT_INTERVAL, 60000).
+-define(RESET_CONSUMER_LATENCY_TIMEOUT, 60000).
 
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).

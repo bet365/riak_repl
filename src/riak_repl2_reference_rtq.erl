@@ -26,6 +26,8 @@
     code_change/3
 ]).
 
+-export([get_retry_limit/1]).
+
 -define(DEFAULT_RETRY_LIMIT, unlimited).
 
 %% Queues
@@ -276,7 +278,7 @@ get_retry_counter(#consumer{seq = Seq}, State) ->
     end.
 
 should_retry(RetryCounter, State) ->
-    case get_retry_limit(State) of
+    case get_retry_limit(State#state.name) of
         unlimited ->
             true;
         N ->
@@ -550,8 +552,8 @@ get_retry_limit(_) ->
 
 -else.
 
-get_retry_limit(State) ->
-    case get_retry_limit_for_remote(State) of
+get_retry_limit(RemoteName) ->
+    case get_retry_limit_for_remote(RemoteName) of
         undefined -> get_retry_limit_default();
         N -> N
     end.
@@ -562,8 +564,8 @@ get_retry_limit_default() ->
         _ -> ?DEFAULT_RETRY_LIMIT
     end.
 
-get_retry_limit_for_remote(#state{name = Name}) ->
-    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {retry_limit, Name}) of
+get_retry_limit_for_remote(RemoteName) ->
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {retry_limit, RemoteName}) of
         N when is_integer(N) -> N;
         _ -> undefined
     end.

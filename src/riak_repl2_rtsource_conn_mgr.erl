@@ -22,6 +22,8 @@
     get_rtsource_conn_pids/1
 ]).
 
+-export([get_number_of_connections_per_queue/1]).
+
 -define(SERVER, ?MODULE).
 -define(CLIENT_SPEC(Id), {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?SERVER, ?CALLBACK_ARGS(Id)}}).
 -define(CALLBACK_ARGS(Id), {self(), Id}).
@@ -37,7 +39,7 @@
     number_of_connection = 0,
     number_of_pending_connects = 0,
     number_of_pending_disconnects = 0,
-    balancing = true,
+    balancing = false,
     balanced = false,
     sink_nodes = [],
     bad_sink_nodes = [],
@@ -51,7 +53,7 @@
     connections_monitor_addrs = orddict:new(),         %% monitor references mapped to addr
     connections_monitor_pids = orddict:new(),          %% monitor references mapped to pid
     connection_counts = orddict:new(),                 %% number of established connections per ip addr,
-    balanced_connection_counts = orddict:new()        %% the balanced version of connection_counts (the ideal to hit)
+    balanced_connection_counts = orddict:new()         %% the balanced version of connection_counts (the ideal to hit)
 }).
 
 %%%===================================================================
@@ -103,8 +105,8 @@ init([RemoteName]) ->
     {ok, SinkNodes} = riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(RemoteName),
     State = #state{connections = Connections, remote = RemoteName, sink_nodes = SinkNodes},
     State1 = set_balanced_connections(State),
-    State2 = rebalance_connections(State1),
-    {ok, State2}.
+    erlang:send(self(), rebalance_now),
+    {ok, State1}.
 
 %%%=====================================================================================================================
 handle_call({connected, Socket, Transport, Addr, Proto, Props, Id}, _From, State) ->

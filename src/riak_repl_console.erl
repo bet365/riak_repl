@@ -456,7 +456,9 @@ set_heartbeat_interval(Remote, Limit) ->
     end.
 
 get_heartbeat_interval(Remote) ->
-    riak_repl2_rtsource_conn:get_heartbeat_interval(Remote).
+    Value = riak_repl2_rtsource_conn:get_heartbeat_interval(Remote),
+    io:format("Heartbeat interval for ~p: ~p ~n", [Remote, Value]),
+    ok.
 
 
 
@@ -477,7 +479,9 @@ set_heartbeat_timeout(Remote, Limit) ->
     end.
 
 get_heartbeat_timeout(Remote) ->
-    riak_repl2_rtsource_conn:get_heartbeat_timeout(Remote).
+    Value = riak_repl2_rtsource_conn:get_heartbeat_timeout(Remote),
+    io:format("Heartbeat timeout for ~p: ~p ~n", [Remote, Value]),
+    ok.
 
 
 
@@ -499,7 +503,9 @@ set_number_of_connections_per_queue(Remote, Limit) ->
     end.
 
 get_number_of_connections_per_queue(Remote) ->
-    riak_repl2_rtsource_conn_mgr:get_number_of_connections_per_queue(Remote).
+    Value = riak_repl2_rtsource_conn_mgr:get_number_of_connections_per_queue(Remote),
+    io:format("Number of connections per queue for ~p: ~p ~n", [Remote, Value]),
+    ok.
 
 
 
@@ -519,7 +525,9 @@ set_reference_rtq_retry_limit(Remote, Limit) ->
     end.
 
 get_reference_rtq_retry_limit(Remote) ->
-    riak_repl2_reference_rtq:get_retry_limit(Remote).
+    Value = riak_repl2_reference_rtq:get_retry_limit(Remote),
+    io:format("Retry limit for ~p: ~p ~n", [Remote, Value]),
+    ok.
 
 
 
@@ -539,7 +547,9 @@ set_reference_rtq_remote_max_bytes(Remote, MaxBytes) ->
     end.
 
 get_reference_rtq_remote_max_bytes(Remote) ->
-    riak_repl2_rtq:get_remote_max_bytes(Remote).
+    Value = riak_repl2_rtq:get_remote_max_bytes(Remote),
+    io:format("Remote max bytes for ~p: ~p ~n", [Remote, Value]),
+    ok.
 
 safe_list_to_integer(MaxBytes) ->
     try

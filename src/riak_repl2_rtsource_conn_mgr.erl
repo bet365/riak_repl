@@ -117,16 +117,8 @@ handle_call(status, _From, State) ->
     Stats = get_status(State),
     {reply, Stats, State};
 
-handle_call(get_rtsource_conn_pids, _From, State = #state{connections = Connections}) ->
-    Result =
-        orddict:fold(
-            fun(_, #connections{connections_monitor_pids = Pids}, Acc1) ->
-                orddict:fold(
-                    fun(_Ref, Pid, Acc2) ->
-                        [Pid | Acc2]
-                    end, Acc1, Pids)
-            end, [], Connections),
-    {reply, Result, State};
+handle_call(get_rtsource_conn_pids, _From, State) ->
+    {reply, get_all_pids(State), State};
 
 handle_call(stop, _From, State) ->
     {stop, shutdown, ok, State};
@@ -838,7 +830,7 @@ get_status(State) ->
         number_of_pending_connects = NumberOfPendingConnects,
         number_of_pending_disconnects = NumerberOfPendingDisconnects
     } = State,
-    {Remote,
+    {Remote, get_all_pids(State),
         [
             {remote, Remote},
             {balanced, Balanced},
@@ -846,8 +838,7 @@ get_status(State) ->
             {number_of_connections, NumberOfConnections},
             {number_of_pending_connects, NumberOfPendingConnects},
             {number_of_pending_disconnects, NumerberOfPendingDisconnects},
-            {connections, get_connection_counts(State)},
-            {latency, get_latency(State)}
+            {connections, get_connection_counts(State)}
         ]
     }.
 
@@ -864,64 +855,12 @@ get_connection_counts(#state{connections = Connections}) ->
             orddict:store(FormatedAddr, Count , Acc)
         end, orddict:new(), Cumlative).
 
-get_latency(State = #state{connections = Connections}) ->
-    %% Latency information
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
-    LatencyPerSink =
-        orddict:fold(
-            fun(_, #connections{connections_monitor_pids = Pids}, Acc) ->
-                orddict:fold(
-                    fun(_Ref, Pid, Acc2) ->
-                        case riak_repl2_rtsource_conn:get_latency(Pid, Timeout) of
-                            error -> Acc2;
-                            %% note that rtsource_conn has alaredy formatted this "Addr" peername
-                            {Addr, LatencyDistribtion} -> merge_latency(Addr, LatencyDistribtion, Acc2)
-                        end
-                    end, Acc, Pids)
-            end, orddict:new(), Connections),
-    generate_latency_from_distribtuion(LatencyPerSink, State).
 
-merge_latency(Addr, LatencyDistribtion, Acc) ->
-    case orddict:find(Addr, Acc) of
-        error ->
-            orddict:store(Addr, LatencyDistribtion, Acc);
-        {ok, OGLatencyDistribtion} ->
-            Latency3 = merge_latency(OGLatencyDistribtion, LatencyDistribtion),
-            orddict:store(Addr, Latency3, Acc)
-    end.
-
-merge_latency(L1, L2) ->
-    #distribution_collector
-    {number_data_points = N1, aggregate_values = AV1, aggregate_values_sqrd = AVS1, max = Max1} = L1,
-    #distribution_collector
-    {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2} = L2,
-    Max =  case Max1 >= Max2 of
-               true ->
-                   Max1;
-               false ->
-                   Max2
-           end,
-    #distribution_collector
-    {number_data_points = N1 + N2, aggregate_values = AV1 + AV2, aggregate_values_sqrd = AVS1 + AVS2, max = Max}.
-
-
-generate_latency_from_distribtuion(LatencyPerSink, #state{remote = Remote}) ->
-    RemoteLatencyDistribution =
-        orddict:fold(
-            fun(_, LatencyDistribution, Acc) ->
-                merge_latency(Acc, LatencyDistribution)
-            end, #distribution_collector{}, LatencyPerSink),
-    AllLatencyDistributions = orddict:store(Remote, RemoteLatencyDistribution, LatencyPerSink),
-    orddict:map(fun(_Key, Distribution) -> calculate_latency(Distribution) end, AllLatencyDistributions).
-
-calculate_latency(#distribution_collector{number_data_points = 0}) ->
-    [{mean, 0}, {percentile_95, 0}, {percentile_99, 0}, {percentile_100, 0}];
-calculate_latency(Dist) ->
-    #distribution_collector
-    {number_data_points = N, aggregate_values = AV, aggregate_values_sqrd = AVS, max = Max} = Dist,
-    Mean = AV / N,
-    Var = (AVS + (N*Mean*Mean) - (2*Mean*AV)) / N,
-    Std = math:sqrt(Var),
-    P95 = Mean + 1.645*Std,
-    P99 = Mean + 2.326*Std,
-    [{mean, round(Mean)}, {percentile_95, round(P95)}, {percentile_99, round(P99)}, {percentile_100, round(Max)}].
+get_all_pids(#state{connections = Connections}) ->
+    orddict:fold(
+        fun(_, #connections{connections_monitor_pids = Pids}, Acc1) ->
+            orddict:fold(
+                fun(_Ref, Pid, Acc2) ->
+                    [Pid | Acc2]
+                end, Acc1, Pids)
+        end, [], Connections).

@@ -66,11 +66,10 @@ start_link(RemoteName) ->
 connected(Socket, Transport, IPPort, Proto, {RTSourceConnMgrPid, Id}, Props) ->
     Transport:controlling_process(Socket, RTSourceConnMgrPid),
     try
-    gen_server:call(RTSourceConnMgrPid,
-        {connected, Socket, Transport, IPPort, Proto, Props, Id})
+    gen_server:call(RTSourceConnMgrPid, {connected, Socket, Transport, IPPort, Proto, Props, Id}, ?LONG_TIMEOUT)
     catch
-        _:Reason ->
-            lager:warning("Unable to contact RT Source Conn Manager (~p). Killing it to force a reconnect", RTSourceConnMgrPid),
+        Error:Reason ->
+            lager:error("Killing rtousrce_conn_mgr to force reconnect, Error: ~p, Reason: ~p", [Error, Reason]),
             exit(RTSourceConnMgrPid, {unable_to_contact, Reason}),
             ok
     end.

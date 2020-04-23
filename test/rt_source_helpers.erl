@@ -67,7 +67,7 @@ abstract_connection_mgr(RemotePort) when is_integer(RemotePort) ->
     abstract_connection_mgr({"localhost", RemotePort});
 abstract_connection_mgr({RemoteHost, RemotePort} = RemoteName) ->
     riak_repl_test_util:reset_meck(riak_core_connection_mgr, [no_link, passthrough]),
-    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _) ->
+    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _, _) ->
         proc_lib:spawn_link(fun() ->
             %% ?debugFmt("connection_mgr connect for ~p", [ServiceAndRemote]),
             Version = stateful:version(),

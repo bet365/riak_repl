@@ -292,7 +292,7 @@ start_source() ->
 start_source(NegotiatedVer) ->
     catch(meck:unload(riak_core_connection_mgr)),
     meck:new(riak_core_connection_mgr, [passthrough]),
-    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy) ->
+    meck:expect(riak_core_connection_mgr, connect, fun(_ServiceAndRemote, ClientSpec, _Strategy, _ShouldRetry) ->
         spawn_link(fun() ->
             {_Proto, {TcpOpts, Module, Args}} = ClientSpec,
             case gen_tcp:connect("localhost", ?SINK_PORT, [binary | TcpOpts]) of

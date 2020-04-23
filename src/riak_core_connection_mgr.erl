@@ -89,7 +89,8 @@
               strategy, % connection strategy
               cur,      % current connection endpoint
               state = init,  % init | connecting | connected | cancelled
-              status    % history of connection attempts
+              status,    % history of connection attempts,
+              should_retry
              }).
 
 %% connection manager state:
@@ -106,7 +107,7 @@
          resume/0,
          pause/0,
          is_paused/0,
-         connect/2, connect/3,
+         connect/2, connect/3, connect/4,
          disconnect/1,
          register_locator/2,
          apply_locator/2,
@@ -187,11 +188,14 @@ apply_locator(Name, Strategy) ->
 %% Supervision must be done by the calling process if desired. No supervision
 %% is done here.
 %%
+connect(Target, ClientSpec, Strategy, ShouldRetry) ->
+  gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy, ShouldRetry}).
+
 connect(Target, ClientSpec, Strategy) ->
-    gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy}).
+    gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy, true}).
 
 connect(Target, ClientSpec) ->
-    gen_server:call(?SERVER, {connect, Target, ClientSpec, default}).
+    gen_server:call(?SERVER, {connect, Target, ClientSpec, default, true}).
 
 %% @doc Disconnect from the remote side.
 disconnect(Target) ->
@@ -226,18 +230,17 @@ handle_call(is_paused, _From, State) ->
     {reply, State#state.is_paused, State};
 
 %% connect based on address. Return process id of helper
-handle_call({connect, Target, ClientSpec, Strategy}, _From, State) ->
+handle_call({connect, Target, ClientSpec, Strategy, ShouldRetry}, _From, State) ->
     Reference = make_ref(),
     Request = #req{ref = Reference,
                    target = Target,
                    pid = undefined,
                    spec = ClientSpec,
                    state = init,
-                   strategy = Strategy},
+                   strategy = Strategy,
+                   should_retry = ShouldRetry},
     %% add request to pending queue so it may be found in restarts
-    State2 = State#state{pending = lists:keystore(Reference, #req.ref,
-                                                  State#state.pending,
-                                                  Request)},
+    State2 = State#state{pending = lists:keystore(Reference, #req.ref, State#state.pending, Request)},
     lager:debug("Starting connect request to ~p, ref is ~p", [Target, Reference]),
     %% reset backoff for all endpoints to expedite connection against
     %% existing endpoint
@@ -389,8 +392,13 @@ handle_info({'EXIT', From, Reason}, State = #state{pending = Pending}) ->
                             %% oops. that request was cancelled. No retry
                             {noreply, State#state{pending = Pending2}};
                         _ ->
-                            lager:debug("Scheduling retry"),
-                            {noreply, schedule_retry(?EXHAUSTED_ENDPOINTS_RETRY_INTERVAL, Ref, State)}
+                          case Req#req.should_retry of
+                            true ->
+                              lager:debug("Scheduling retry"),
+                              {noreply, schedule_retry(?EXHAUSTED_ENDPOINTS_RETRY_INTERVAL, Ref, State)};
+                            false ->
+                              {noreply, fail_request(Reason, Req, State)}
+                          end
                     end;
 
                 Reason -> % something bad happened to the connection, reuse the request

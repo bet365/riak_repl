@@ -51,7 +51,7 @@
     get_address/1,
     get_socketname_primary/1,
     connected/7,
-    graceful_shutdown/2,
+    graceful_shutdown/1,
     object_sent/2,
     get_latency/2
 ]).
@@ -85,7 +85,7 @@
     connection_mgr_pid,
     connection_mgr_ref,
     shutting_down = false,
-    shutting_down_reason,
+    sink_shutdown = false,
     expect_seq_v4 = 1,
     object_sent_time,
     ref
@@ -130,9 +130,6 @@ get_address(Pid) ->
 get_socketname_primary(Pid) ->
   gen_server:call(Pid, get_socketname_primary).
 
-graceful_shutdown(Pid, Reason) ->
-    gen_server:cast(Pid, {graceful_shutdown, Reason}).
-
 object_sent(Pid, Time) ->
     gen_server:call(Pid, {object_sent, Time}, ?LONG_TIMEOUT).
 
@@ -142,6 +139,14 @@ get_latency(Pid, Timeout) ->
     catch
         _:_ ->
             error
+    end.
+
+graceful_shutdown(Pid) ->
+    try
+        gen_server:call(Pid, graceful_shutdown)
+    catch
+        _:_  ->
+        busy
     end.
 
 %% ==============================
@@ -167,7 +172,7 @@ handle_call(get_ref, _From, State = #state{ref = Ref}) ->
     {reply, Ref, State};
 
 handle_call(stop, _From, State) ->
-  {stop, {shutdown, stopped}, ok, State};
+  {stop, shutdown, ok, State};
 
 handle_call(address, _From, State = #state{address=A}) ->
     {reply, A, State};
@@ -229,12 +234,12 @@ handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) 
             {reply, ER, State}
     end;
 
+handle_call(graceful_shutdown, _From, State) ->
+    NewState = set_shutdown(State),
+    {reply, something, NewState};
+
 handle_call(get_helper_pid, _From, State=#state{helper_pid = H}) ->
     {reply, H, State}.
-
-handle_cast({graceful_shutdown, Reason}, State) ->
-    NewState = set_shutdown(Reason, State),
-    {noreply,NewState};
 
 handle_cast(_Request, State) ->
     {noreply, State}.
@@ -254,12 +259,7 @@ handle_info({Closed, _S}, State = #state{remote = Remote, cont = Cont})
             lager:warning("Realtime connection ~s to ~p closed with partial receive of ~b bytes\n",
                           [peername(State), Remote, NumBytes])
     end,
-    case shutdown_check(State) of
-        false ->
-            {stop, {shutdown, Closed}, State};
-        Shutdown ->
-            Shutdown
-    end;
+    perform_shutdown(State);
 
 handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
   when Error == tcp_error; Error == ssl_error ->
@@ -267,12 +267,7 @@ handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
     lager:warning("Realtime connection ~s to ~p network error ~p - ~b bytes pending\n",
                   [peername(State), Remote, Reason, size(Cont)]),
 
-    case shutdown_check(State) of
-        false ->
-            {stop, {error, {Error, Reason}}, State};
-        Shutdown ->
-            Shutdown
-    end;
+    perform_shutdown(State);
 
 handle_info(send_heartbeat, State) ->
     {noreply, send_heartbeat(State)};
@@ -294,17 +289,12 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
                           [peername(State), Remote, HBTimeout]),
             lager:info("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
 
-            case shutdown_check(State) of
-                false ->
-                    {stop, {shutdown, heartbeat_timeout}, State};
-                Shutdown ->
-                    Shutdown
-            end
+            perform_shutdown(State)
     end;
 
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason},
     State = #state{connection_mgr_ref = MonitorRef, connection_mgr_pid = Pid}) ->
-    {stop, {error, conn_mgr_died}, State};
+    {stop, conn_mgr_died, State};
 
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
@@ -384,13 +374,13 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
 
     %% inform helper so it does not accept anymore data
     {ok, Seq} = riak_repl2_rtsource_helper:shutting_down(Helper),
+    NewState = set_sink_shutdown(State),
 
     case (Seq +1 == ESeq) orelse (Seq == 0) of
         true ->
             %% we have the ack back for the last sequence number sent by the helper (terminate)
-            {stop, {shutdown, sink_shutdown}, State};
+            perform_shutdown(NewState);
         false ->
-            NewState = set_shutdown(sink_shutdown, State),
             recv(Cont, NewState)
     end;
 
@@ -416,12 +406,11 @@ handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq,
     ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
 
     %% check if we are shutting down gracefully
-    case shutdown_check(State1) of
+    case State1#state.shutting_down of
         false ->
             recv(Cont, State1#state{expect_seq_v4 = Seq +1});
-        Shutdown ->
-            Shutdown
-
+        _ ->
+            perform_shutdown(State1)
     end;
 
 handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
@@ -440,12 +429,11 @@ handle_incoming_data({ok, {bt_drop, Seq}, Cont}, State = #state{expect_seq_v4 = 
     ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
 
     %% check if we are shutting down gracefully
-    case shutdown_check(State1) of
+    case State#state.shutting_down of
         false ->
             recv(Cont, State1#state{expect_seq_v4 = Seq +1});
-        Shutdown ->
-            Shutdown
-
+        _ ->
+            perform_shutdown(State)
     end;
 
 handle_incoming_data({ok, {Type, Seq}, _}, State) ->
@@ -457,7 +445,9 @@ handle_wrong_seq(Type, Seq, State) ->
     %% wrong seq number
     lager:error("(~p) recevied incorrect sequence from sink: seq: ~p, expected_seq: ~p, peername:~p, remote:~p",
         [Type, Seq, ESeq, Peername, Remote]),
-    {stop, {error, wrong_seq}, State}.
+
+    %% we should be doing a shutdown check here to ensure conn_mgr doesn't hit a race condition
+    perform_shutdown(State).
 
 
 reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref}) ->
@@ -469,15 +459,20 @@ reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref}) ->
             schedule_heartbeat(State#state{hb_timeout_tref=undefined})
     end.
 
-set_shutdown(Reason, State = #state{shutting_down = false}) ->
-    State#state{shutting_down_reason = Reason, shutting_down = true};
-set_shutdown(_, State) ->
-    State.
 
-shutdown_check(State = #state{shutting_down = true, shutting_down_reason = Reason}) ->
-    {stop, {shutdown, Reason}, State};
-shutdown_check(_State) ->
-    false.
+set_sink_shutdown(State) ->
+    State#state{shutting_down = true, sink_shutdown = true}.
+
+set_shutdown(State) ->
+    State#state{shutting_down = true}.
+
+
+perform_shutdown(State = #state{shutting_down = true, sink_shutdown = true}) ->
+    {stop, sink_shutdown, State};
+perform_shutdown(State = #state{shutting_down = true}) ->
+    {stop, shutdown, State};
+perform_shutdown(State) ->
+    {stop, unexpected_shutdown, State}.
 
 %% ================================================================================================================== %%
 %% Heartbeat's

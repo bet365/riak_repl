@@ -96,7 +96,7 @@ code_change(_OldVsn, State, _Extra) ->
 maybe_send(_QEntry, From, State = #state{shutting_down = true}) ->
     gen_server:reply(From, shutting_down),
     %% now we are out of the reference_rtq we can shutdown gracefully
-    State;
+    {noreply, State};
 maybe_send(QEntry, From, State) ->
     #state
     {

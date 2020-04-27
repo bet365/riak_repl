@@ -171,7 +171,7 @@ handle_info({'DOWN', MonitorRef, process, Pid, Reason}, State) ->
                     SubState2#state{pids_disconnecting = NewDisconnectPids}
             end,
         case Reason of
-            sink_shutdown ->
+            {shutdown, sink} ->
                 State4 =
                     case lists:member(Addr, BadSinks) of
                         true ->
@@ -182,15 +182,23 @@ handle_info({'DOWN', MonitorRef, process, Pid, Reason}, State) ->
                 State5 = set_status(State4),
                 State6 = start_rebalance_timer(State5),
                 {noreply, State6};
-            shutdown ->
+            {shutdown, source} ->
                 {noreply, State3};
             _ ->
                 %% unexpected shutdown
                 %% issue re-connect for the failed connection
-                {State4, _} = connect_to_sink(Addr, Id, State3),
-                State5 = set_status(State4),
-                State6 = start_rebalance_timer(State5),
-                {noreply, State6}
+                %% check if it is in bad sinks first though
+                State5 =
+                    case lists:member(Addr, BadSinks) of
+                        true ->
+                            State3;
+                        false ->
+                            {State4, _} = connect_to_sink(Addr, Id, State3),
+                            State4
+                    end,
+                State6 = set_status(State5),
+                State7 = start_rebalance_timer(State6),
+                {noreply, State7}
         end
     catch
         Type:Error ->

@@ -76,8 +76,9 @@ handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
     spawn(fun() -> HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined), T:send(S, HBIOL) end),
     {noreply, State};
 
-handle_cast(Msg, _State) ->
-    lager:info("Realtime source helper received unexpected cast - ~p", [Msg]).
+handle_cast(Msg, State) ->
+    lager:info("Realtime source helper received unexpected cast - ~p", [Msg]),
+    {noreply, State}.
 
 
 handle_info(Msg, State) ->
@@ -137,7 +138,7 @@ encode_and_send(Seq2, QEntry, Remote, State = #state{transport = T, socket = S, 
         ok ->
             {noreply, State3};
         {error, Reason} ->
-            {stop, {error, Reason}, State3}
+            {stop, {shutdown, {error, Reason}}, State3}
     end.
 
 

@@ -294,7 +294,7 @@ handle_info({heartbeat_timeout, HBSent}, State ) ->
 
 handle_info({'DOWN', MonitorRef, process, Pid, _Reason},
     State = #state{connection_mgr_ref = MonitorRef, connection_mgr_pid = Pid}) ->
-    {stop, conn_mgr_died, State};
+    {stop, {shutdown, conn_mgr_died}, State};
 
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
@@ -468,11 +468,11 @@ set_shutdown(State) ->
 
 
 perform_shutdown(State = #state{shutting_down = true, sink_shutdown = true}) ->
-    {stop, sink_shutdown, State};
+    {stop, {shutdown, sink}, State};
 perform_shutdown(State = #state{shutting_down = true}) ->
-    {stop, shutdown, State};
+    {stop, {shutdown, source}, State};
 perform_shutdown(State) ->
-    {stop, unexpected_shutdown, State}.
+    {stop, {shutdown, unexpected}, State}.
 
 %% ================================================================================================================== %%
 %% Heartbeat's

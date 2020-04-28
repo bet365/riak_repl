@@ -28,7 +28,7 @@ unregister(Remote) ->
 
 is_empty() ->
     Concurrency = riak_repl_util:get_rtq_concurrency(),
-    lists:foreach(fun(Id) -> riak_repl2_rtq:is_empty(Id) end, lists:seq(1,Concurrency)).
+    lists:all(fun(Id) -> riak_repl2_rtq:is_empty(Id) end, lists:seq(1,Concurrency)).
 
 
 shutdown() ->

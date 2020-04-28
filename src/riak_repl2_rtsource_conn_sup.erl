@@ -106,7 +106,7 @@ get_status(Pid) ->
 
 get_latency(Remote, Pids) ->
     %% Latency information
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+    Timeout = app_helper:get_env(riak_repl, status_timeout, 500),
     LatencyPerSink = lists:foldl(
         fun(Pid, Acc) ->
             case riak_repl2_rtsource_conn:get_latency(Pid, Timeout) of

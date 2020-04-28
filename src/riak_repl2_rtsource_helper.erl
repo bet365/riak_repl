@@ -12,7 +12,7 @@
 [
     start_link/7,
     stop/1,
-    send_heartbeat/1,
+%%    send_heartbeat/1,
     send_object/2,
     shutting_down/1
 ]).
@@ -45,10 +45,10 @@ start_link(Remote, Id, Transport, Socket, Version, RTQRef, RTPid) ->
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
 
-send_heartbeat(Pid) ->
-    %% Cast the heartbeat, do not want to block the rtsource process
-    %% as it is responsible for checking heartbeat
-    gen_server:call(Pid, send_heartbeat, infinity).
+%%send_heartbeat(Pid) ->
+%%    %% Cast the heartbeat, do not want to block the rtsource process
+%%    %% as it is responsible for checking heartbeat
+%%    gen_server:cast(Pid, send_heartbeat).
 
 send_object(Pid, Obj) ->
     gen_server:call(Pid, {send_object, Obj}, ?SHORT_TIMEOUT).
@@ -69,19 +69,12 @@ handle_call({send_object, Entry}, From, State) ->
 handle_call(shutting_down, _From, State = #state{sent_seq = Seq}) ->
     {reply, {ok, Seq}, State#state{shutting_down = true}};
 
-handle_call(send_heartbeat, _From, State = #state{transport = T, socket = S}) ->
-    HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
-    case T:send(S, HBIOL) of
-        ok ->
-            {reply, ok, State};
-        {error, Reason} ->
-            {stop, {shutdown, {error, Reason}}, ok, State}
-    end;
+
 
 handle_call(stop, _From, State) ->
     {stop, {shutdown, routine}, ok, State}.
 
-%% deprecated
+
 %%handle_cast(send_heartbeat, State = #state{transport = T, socket = S}) ->
 %%    spawn(fun() -> HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined), T:send(S, HBIOL) end),
 %%    {noreply, State};

@@ -48,7 +48,7 @@ stop(Pid) ->
 send_heartbeat(Pid) ->
     %% Cast the heartbeat, do not want to block the rtsource process
     %% as it is responsible for checking heartbeat
-    gen_server:call(Pid, send_heartbeat).
+    gen_server:call(Pid, send_heartbeat, infinity).
 
 send_object(Pid, Obj) ->
     gen_server:call(Pid, {send_object, Obj}, ?SHORT_TIMEOUT).

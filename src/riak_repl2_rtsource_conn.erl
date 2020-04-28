@@ -76,6 +76,7 @@
     helper_pid,% riak_repl2_rtsource_helper pid
     hb_interval_tref,
     hb_timeout_tref,% heartbeat timeout timer reference
+    hb_timeout_ref, %% ref used to fix race condition
     hb_sent_q,   % queue of heartbeats now() that were sent
     hb_rtt,    % RTT in milliseconds for last completed heartbeat
     cont = <<>>, % continuation from previous TCP buffer
@@ -282,23 +283,21 @@ handle_info(send_heartbeat, State) ->
             {stop, {shutdown, {error, Reason}}, State}
     end;
 
-handle_info({heartbeat_timeout, HBSent}, State ) ->
-    #state{hb_sent_q = HBSentQ, hb_timeout_tref = HBTRef, remote = Remote} = State,
-    TimeSinceTimeout = timer:now_diff(now(), HBSent) div 1000,
+handle_info({heartbeat_timeout, Ref}, State ) ->
+    #state{hb_sent_q = HBSentQ, hb_timeout_ref = SavedRef, remote = Remote} = State,
 
-    %% hb_timeout_tref is the authority of whether we should
+    %% hb_timeout_ref is the authority of whether we should (it fixes the race condition caused by using the timer ref)
+    %% because the timer ref would get re-populated on a schedule_heartbeat
     %% restart the conection on heartbeat timeout or not.
-    case HBTRef of
-        undefined ->
-            lager:info("Realtime connection ~s to ~p heartbeat time since timeout ~p",
-                       [peername(State), Remote, TimeSinceTimeout]),
+    case Ref == SavedRef of
+        false ->
+            %% old ref, we do not care about (we have had incoming traffic since)
             {noreply, State};
-        _ ->
+        true ->
             HBTimeout = get_heartbeat_timeout(State#state.remote),
             lager:warning("Realtime connection ~s to ~p heartbeat timeout after ~p seconds\n",
                           [peername(State), Remote, HBTimeout]),
             lager:info("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
-
             perform_shutdown(State)
     end;
 
@@ -375,7 +374,7 @@ handle_incoming_data({ok, heartbeat, Cont}, State) ->
     {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
     HBRTT = timer:now_diff(now(), HBSent) div 1000,
     _ = cancel_timer(HBTRef),
-    State2 = State#state{hb_sent_q = HBSentQ2, hb_timeout_tref = undefined, hb_rtt = HBRTT},
+    State2 = State#state{hb_sent_q = HBSentQ2, hb_timeout_tref = undefined, hb_timeout_ref = undefined, hb_rtt = HBRTT},
     recv(Cont, schedule_heartbeat(State2));
 
 
@@ -385,6 +384,8 @@ handle_incoming_data({ok, node_shutdown, Cont}, State) ->
     %% inform helper so it does not accept anymore data
     {ok, Seq} = riak_repl2_rtsource_helper:shutting_down(Helper),
     NewState = set_sink_shutdown(State),
+
+    %% todo: heartbeat timeout reset
 
     case (Seq +1 == ESeq) orelse (Seq == 0) of
         true ->
@@ -460,13 +461,15 @@ handle_wrong_seq(Type, Seq, State) ->
     perform_shutdown(State).
 
 
-reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref}) ->
-    case Ref of
+reset_heartbeat_timer(State = #state{hb_timeout_tref = undefined, hb_timeout_ref = undefined}) ->
+    State;
+reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref1}) ->
+    case Ref1 of
         undefined ->
-            State;
+            State#state{hb_timeout_ref = undefined};
         _ ->
-            _ = cancel_timer(Ref),
-            schedule_heartbeat(State#state{hb_timeout_tref=undefined})
+            _ = cancel_timer(Ref1),
+            schedule_heartbeat(State#state{hb_timeout_tref=undefined, hb_timeout_ref = undefined})
     end.
 
 
@@ -495,14 +498,14 @@ send_heartbeat(State) ->
     #state{hb_sent_q = SentQ, transport = T, socket = S} = State,
     % Using now as need a unique reference for this heartbeat
     % to spot late heartbeat timeout messages
-%%    riak_repl2_rtsource_helper:send_heartbeat(HelperPid),
     HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
     case T:send(S, HBIOL) of
         ok ->
             Now = now(),
+            Ref = make_ref(),
             HBTimeout = get_heartbeat_timeout(State#state.remote),
-            TRef = erlang:send_after(HBTimeout, self(), {heartbeat_timeout, Now}),
-            State2 = State#state{hb_interval_tref = undefined, hb_timeout_tref = TRef, hb_sent_q = queue:in(Now, SentQ)},
+            TRef = erlang:send_after(HBTimeout, self(), {heartbeat_timeout, Ref}),
+            State2 = State#state{hb_interval_tref = undefined, hb_timeout_tref = TRef, hb_timeout_ref = Ref, hb_sent_q = queue:in(Now, SentQ)},
             lager:debug("hb_sent_q_len after sending heartbeat: ~p", [queue:len(SentQ)+1]),
             {ok, State2};
         {error, Reason} ->

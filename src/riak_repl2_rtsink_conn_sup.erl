@@ -64,7 +64,7 @@ get_all_status() ->
 
 
 merge_stats(Pid, Dict) ->
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+    Timeout = app_helper:get_env(riak_repl, status_timeout, 500),
     try
         {{Remote, IP, Version}, StatsDict} = riak_repl2_rtsink_conn:summarized_status(Pid, Timeout),
         {_, MsgLen} = erlang:process_info(Pid, message_queue_len),

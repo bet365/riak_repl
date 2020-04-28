@@ -489,8 +489,8 @@ send_heartbeat(State) ->
     } = State,
     % Using now as need a unique reference for this heartbeat
     % to spot late heartbeat timeout messages
-    Now = now(),
     riak_repl2_rtsource_helper:send_heartbeat(HelperPid),
+    Now = now(),
     HBTimeout = get_heartbeat_timeout(State#state.remote),
     TRef = erlang:send_after(HBTimeout, self(), {heartbeat_timeout, Now}),
     State2 = State#state{hb_interval_tref = undefined, hb_timeout_tref = TRef, hb_sent_q = queue:in(Now, SentQ)},

@@ -618,7 +618,7 @@ update_latency(Time, State = #state{latency = Latency}, false) ->
                false ->
                    Max1
            end,
-    Latency2 = #distribution_collector
+    Latency2 = Latency#distribution_collector
     {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2},
     State#state{latency = Latency2}.
 

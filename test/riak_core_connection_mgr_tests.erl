@@ -43,8 +43,13 @@
 %% Remote cluster
 -define(REMOTE_CLUSTER_NAME, "betty").
 -define(REMOTE_CLUSTER_ADDR, {"127.0.0.1", 4096}).
--define(REMOTE_ADDRS, [{"127.0.0.1",5001}, {"127.0.0.1",5002}, {"127.0.0.1",5003},
-                       ?REMOTE_CLUSTER_ADDR]).
+-define(REMOTE_CLUSTER_ADDR_LOCATED, {"127.0.0.1", 4096}).
+-define(REMOTE_ADDRS, [{"127.0.0.1",5001}, {"127.0.0.1",5002}, {"127.0.0.1",5003}, ?REMOTE_CLUSTER_ADDR_LOCATED]).
+
+
+-define(SINK_CLUSTER_NAME, "sink").
+-define(SINK_CLUSTER_ADDR, {"127.0.0.1", 9000}).
+-define(SINK_ADDRS, [{"127.0.0.1",9101}, {"127.0.0.1",9102}, {"127.0.0.1",9103}, {"127.0.0.1",9104}, {"127.0.0.1",9105}]).
 
 -define(MAX_CONS, 2).
 -define(TCP_OPTIONS, [{keepalive, true},
@@ -56,7 +61,7 @@
 %% Tell the connection manager how to find out "remote" end points.
 %% For testing, we just make up some local addresses.
 register_remote_locator() ->
-    Remotes = orddict:from_list([{?REMOTE_CLUSTER_NAME, ?REMOTE_ADDRS}]),
+    Remotes = orddict:from_list([{?REMOTE_CLUSTER_NAME, ?REMOTE_ADDRS}, {?SINK_CLUSTER_NAME, ?SINK_ADDRS}]),
     Locator = fun(Name, _Policy) ->
                       case orddict:find(Name, Remotes) of
                           false ->
@@ -81,7 +86,7 @@ connections_test_() ->
       {setup,
        fun() ->
                Apps = riak_repl_test_util:maybe_start_lager(),
-               ok = application:start(ranch),
+               application:start(ranch),
                riak_core_ring_events:start_link(),
                riak_core_ring_manager:start_link(test),
                {ok, _} = riak_core_service_mgr:start_link(?REMOTE_CLUSTER_ADDR),
@@ -114,7 +119,7 @@ connections_test_() ->
                                                     Target = {?ADDR_LOCATOR_TYPE, ?REMOTE_CLUSTER_ADDR},
                                                     Strategy = default,
                                                     Got = riak_core_connection_mgr:apply_locator(Target, Strategy),
-                                                    ?assertEqual({ok, [?REMOTE_CLUSTER_ADDR]}, Got)
+                                                    ?assertEqual({ok, [?REMOTE_CLUSTER_ADDR_LOCATED]}, Got)
                                             end},
 
                   {"bad locator args", fun() ->
@@ -210,11 +215,9 @@ connections_test_() ->
 
                  ] end
       }]}.
-
 %%------------------------
 %% Helper functions
 %%------------------------
-
 start_service() ->
     %% start dispatcher
     ExpectedRevs = [{1,0}, {1,0}],
@@ -234,11 +237,19 @@ testService(_Socket, _Transport, {ok, {Proto, MyVer, RemoteVer}}, Args, _Props) 
     {ok, self()}.
 
 %% Client side protocol callbacks
-connected(_Socket, _Transport, {_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props) ->
-    {_TestType, [ExpectedMyVer, ExpectedRemoteVer]} = Args,
-    ?assert(Proto == testproto),
-    ?assert(ExpectedMyVer == MyVer),
-    ?assert(ExpectedRemoteVer == RemoteVer).
+connected(_Socket, _Transport, Addr={_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, _Props) ->
+  case Args of
+    {_TestType, [ExpectedMyVer, ExpectedRemoteVer]} ->
+      ?assert(Proto == testproto),
+      ?assert(ExpectedMyVer == MyVer),
+      ?assert(ExpectedRemoteVer == RemoteVer);
+    {_TestType, [ExpectedMyVer, ExpectedRemoteVer], Table} ->
+      % remove the values from the ets table!
+      ets:delete(Table, Addr),
+      ?assert(Proto == testproto),
+      ?assert(ExpectedMyVer == MyVer),
+      ?assert(ExpectedRemoteVer == RemoteVer)
+  end.
 
 connect_failed({_Proto,_Vers}, {error, Reason}, Args) ->
 

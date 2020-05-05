@@ -25,7 +25,7 @@
 -author("Chris Tilt").
 -include_lib("eunit/include/eunit.hrl").
 
--export([test1service/5, connected/6, connect_failed/3]).
+-export([test1service/5, connected/7, connect_failed/3]).
 
 -define(TEST_ADDR, { "127.0.0.1", 4097}).
 -define(MAX_CONS, 2).
@@ -53,7 +53,7 @@ test1service(_Socket, _Transport, {ok, {Proto, MyVer, RemoteVer}}, Args, Props) 
     {ok, self()}.
 
 %% client connection callbacks
-connected(_Socket, _Transport, {_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, Props) ->
+connected(_Socket, _Transport, {_IP, _Port}, {Proto, MyVer, RemoteVer}, Args, Props, _Primary) ->
     [ExpectedMyVer, ExpectedRemoteVer] = Args,
     RemoteClusterName = proplists:get_value(clustername, Props),
     lager:debug("connected with Args ~p Props ~p", [Args, Props]),
@@ -77,7 +77,7 @@ conection_test_() ->
                Apps = riak_repl_test_util:maybe_start_lager(),
                riak_core_ring_events:start_link(),
                riak_core_ring_manager:start_link(test),
-               ok = application:start(ranch),
+               application:start(ranch),
                {ok, _} = riak_core_service_mgr:start_link(?TEST_ADDR),
                Apps
        end,

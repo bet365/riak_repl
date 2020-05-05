@@ -59,6 +59,12 @@
 %%    }.
 
 setup() ->
+    application:set_env(riak_repl, rtq_concurrency, 1),
+
+    catch(meck:unload(riak_core_metadata)),
+    meck:new(riak_core_metadata, [passthrough]),
+    meck:expect(riak_core_metadata, get, 2, fun(_B, _K) -> undefined end),
+
     ok = meck:new(riak_repl_stats, [passthrough]),
     ok = meck:expect(riak_repl_stats, rt_source_errors,
         fun() -> ok end),
@@ -67,7 +73,8 @@ setup() ->
     ok.
 
 cleanup(_) ->
-    meck:unload(riak_repl_stats),
+    application:unset_env(riak_repl, rtq_concurrency),
+    catch(meck:unload(riak_core_metadata)),
     unload_mecks(),
     ok.
 
@@ -164,7 +171,7 @@ teardown() ->
 
 setup1() ->
     riak_core_tcp_mon:start_link(),
-    riak_repl_test_util:abstract_stateful(),
+%%    riak_repl_test_util:abstract_stateful(),
     abstract_ring_manager(),
     abstract_ranch(),
     abstract_rtsink_helper(),
@@ -399,7 +406,7 @@ call_donefun({_Remote, #src_state{done_fun_queue = []}}, empty) ->
     {ok, empty};
 call_donefun({_Remote, SrcState}, NthDoneFun) ->
     {DoneFun, _Bin, _AlreadyRouted} = lists:nth(NthDoneFun, SrcState#src_state.done_fun_queue),
-    DoneFun(),
+    DoneFun([]),
     {Source, _Sink} = SrcState#src_state.pids,
     AckRes = fake_source_tcp_bug(Source),
     RTQRes = read_fake_rtq_bug(),
@@ -446,7 +453,7 @@ abstract_rtsink_helper() ->
     meck:expect(riak_repl2_rtsink_helper, stop, fun(sink_helper) ->
         ok
     end),
-    meck:expect(riak_repl2_rtsink_helper, write_objects, fun(sink_helper, _BinObjs, DoneFun, _Ver) ->
+    meck:expect(riak_repl2_rtsink_helper, write_objects_v3, fun(sink_helper, _BinObjs, DoneFun, _Ver) ->
         ReturnTo ! {rtsink_helper, done_fun, DoneFun},
         ok
     end).
@@ -480,7 +487,7 @@ bug_rt() ->
         WhoToTell ! {sink_pid, SinkPid},
         meck:passthrough([SinkPid])
     end),
-    riak_repl_test_util:kill_and_wait(riak_repl2_rt),
+    riak_repl_test_util:kill_and_wait(riak_repl2_rt, kill),
     riak_repl2_rt:start_link().
 
 read_rt_bug() ->
@@ -520,9 +527,10 @@ start_fake_rtq() ->
     riak_repl_test_util:reset_meck(riak_repl2_rtq, [no_link, passthrough]),
     Pid = proc_lib:spawn_link(?MODULE, fake_rtq, [WhoToTell]),
     register(fake_rtq, Pid),
-    meck:expect(riak_repl2_rtq, push, fun(NumItems, Bin, Meta) ->
-        gen_server:cast(fake_rtq, {push, NumItems, Bin, Meta})
-    end),
+    meck:expect(riak_repl2_rtq, push, 4,
+        fun(_Hash, NumItems, Bin, Meta) ->
+            gen_server:cast(fake_rtq, {push, NumItems, Bin, Meta})
+        end),
     {ok, Pid}.
 
 fake_rtq(Bug) ->
@@ -563,7 +571,7 @@ connect_source(Version, Remote) ->
         {active, false}],
     ClientSpec = {{realtime, [Version]}, {TcpOptions, fake_source, Pid}},
     IpPort = {{127,0,0,1}, ?SINK_PORT},
-    _ConnRes = riak_core_connection:sync_connect(IpPort, ClientSpec),
+    ok = riak_core_connection:sync_connect(IpPort, ClientSpec),
     {ok, Pid}.
 
 fake_source_push_obj(Source, Binary, AlreadyRouted) ->

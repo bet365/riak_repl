@@ -166,6 +166,12 @@ handle_info(init_ack, State=#state{socket=Socket,
     OurCaps = decide_our_caps(CommonMajor),
     TheirCaps = maybe_exchange_caps(CommonMajor, OurCaps, Socket, Transport),
     Strategy = decide_common_strategy(OurCaps, TheirCaps),
+    ObjectHashVersion = decide_common_object_hash_version(OurCaps, TheirCaps),
+
+    {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig} =
+        maybe_get_object_filtering_configurations(TheirCaps, Cluster),
+
+    FullsyncObjectFilter = {ObjectFilteringStatus, ObjectFilteringVersion, ObjectFilteringConfig},
 
     case Strategy of
         keylist ->
@@ -173,7 +179,9 @@ handle_info(init_ack, State=#state{socket=Socket,
             Transport:setopts(Socket, [{active, once}]),
             {ok, WorkDir} = riak_repl_fsm_common:work_dir(Transport, Socket, Cluster),
             {ok, FullsyncWorker} = riak_repl_keylist_client:start_link(Cluster, Transport,
-                                                                       Socket, WorkDir),
+                                                                       Socket, WorkDir,
+                                                                       FullsyncObjectFilter,
+                                                                       ObjectHashVersion),
             {noreply, State#state{cluster=Cluster, fullsync_worker=FullsyncWorker, work_dir=WorkDir,
                                   strategy=keylist}};
         aae ->
@@ -231,7 +239,15 @@ decide_our_caps(CommonMajor) ->
             {false,_} -> keylist;
             {true,_} -> aae
         end,
-    [{strategy, SupportedStrategy}].
+    ObjectHashVersion = {object_hash_version, app_helper:get_env(riak_repl, fullsync_object_hash_version, 1)},
+    [{strategy, SupportedStrategy}, ObjectHashVersion].
+
+decide_common_object_hash_version([], _TheirCaps) -> 0;
+decide_common_object_hash_version(_OurCaps, []) -> 0;
+decide_common_object_hash_version(OurCaps, TheirCaps) ->
+    OurVersion = proplists:get_value(object_hash_version, OurCaps, 0),
+    TheirVersion = proplists:get_value(object_hash_version, TheirCaps, 0),
+    lists:min([OurVersion, TheirVersion]).
 
 %% Depending on the protocol version number, send our capabilities
 %% as a list of properties, in binary.
@@ -248,4 +264,19 @@ maybe_exchange_caps(_, Caps, Socket, Transport) ->
             throw({Error, Reason})
     end.
 
-
+maybe_get_object_filtering_configurations(TheirCaps, ClusterName) ->
+    Default = {disabled, 0, []},
+    TheirObjectFiltering = proplists:get_value(object_filtering, TheirCaps, not_supported),
+    OurVersion = riak_repl2_object_filter:get_version(),
+    case TheirObjectFiltering of
+        {enabled, TheirVersion, TheirConfig} ->
+            case TheirVersion =< OurVersion of
+                true ->
+                    {_, A, B} = TheirConfig,
+                    OurConfig = {ClusterName, A, B},
+                    {enabled, TheirVersion, OurConfig};
+                false ->
+                    {enabled, OurVersion, riak_repl2_object_filter:get_maybe_downgraded_remote_config(TheirConfig, ClusterName)}
+            end;
+            _ -> Default
+    end.

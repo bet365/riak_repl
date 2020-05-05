@@ -89,7 +89,8 @@
               strategy, % connection strategy
               cur,      % current connection endpoint
               state = init,  % init | connecting | connected | cancelled
-              status    % history of connection attempts
+              status,    % history of connection attempts,
+              should_retry
              }).
 
 %% connection manager state:
@@ -106,7 +107,7 @@
          resume/0,
          pause/0,
          is_paused/0,
-         connect/2, connect/3,
+         connect/2, connect/3, connect/4,
          disconnect/1,
          register_locator/2,
          apply_locator/2,
@@ -187,11 +188,14 @@ apply_locator(Name, Strategy) ->
 %% Supervision must be done by the calling process if desired. No supervision
 %% is done here.
 %%
+connect(Target, ClientSpec, Strategy, ShouldRetry) ->
+  gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy, ShouldRetry}).
+
 connect(Target, ClientSpec, Strategy) ->
-    gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy}).
+    gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy, true}).
 
 connect(Target, ClientSpec) ->
-    gen_server:call(?SERVER, {connect, Target, ClientSpec, default}).
+    gen_server:call(?SERVER, {connect, Target, ClientSpec, default, true}).
 
 %% @doc Disconnect from the remote side.
 disconnect(Target) ->
@@ -226,18 +230,17 @@ handle_call(is_paused, _From, State) ->
     {reply, State#state.is_paused, State};
 
 %% connect based on address. Return process id of helper
-handle_call({connect, Target, ClientSpec, Strategy}, _From, State) ->
+handle_call({connect, Target, ClientSpec, Strategy, ShouldRetry}, _From, State) ->
     Reference = make_ref(),
     Request = #req{ref = Reference,
                    target = Target,
                    pid = undefined,
                    spec = ClientSpec,
                    state = init,
-                   strategy = Strategy},
+                   strategy = Strategy,
+                   should_retry = ShouldRetry},
     %% add request to pending queue so it may be found in restarts
-    State2 = State#state{pending = lists:keystore(Reference, #req.ref,
-                                                  State#state.pending,
-                                                  Request)},
+    State2 = State#state{pending = lists:keystore(Reference, #req.ref, State#state.pending, Request)},
     lager:debug("Starting connect request to ~p, ref is ~p", [Target, Reference]),
     %% reset backoff for all endpoints to expedite connection against
     %% existing endpoint
@@ -389,8 +392,13 @@ handle_info({'EXIT', From, Reason}, State = #state{pending = Pending}) ->
                             %% oops. that request was cancelled. No retry
                             {noreply, State#state{pending = Pending2}};
                         _ ->
-                            lager:debug("Scheduling retry"),
-                            {noreply, schedule_retry(?EXHAUSTED_ENDPOINTS_RETRY_INTERVAL, Ref, State)}
+                          case Req#req.should_retry of
+                            true ->
+                              lager:debug("Scheduling retry"),
+                              {noreply, schedule_retry(?EXHAUSTED_ENDPOINTS_RETRY_INTERVAL, Ref, State)};
+                            false ->
+                              {noreply, fail_request(Reason, Req, State)}
+                          end
                     end;
 
                 Reason -> % something bad happened to the connection, reuse the request
@@ -415,11 +423,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Private
 %%%===================================================================
-
-identity_locator({IP,Port}, _Policy) ->
-    {ok, [{IP,Port}]};
-identity_locator([Ips], _Policy) ->
-    {ok, Ips}.
 
 %% close the pending connection and cancel the request
 disconnect_from_target(Target, State = #state{pending = Pending}) ->
@@ -494,7 +497,7 @@ start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strat
             lager:debug("Connection Manager located no endpoints for: ~p. Will retry.", [Target]),
             %% schedule a retry and exit
             schedule_retry(Interval, Ref, State);
-        {ok, EpAddrs } ->
+        {ok, EpAddrs} ->
             lager:debug("Connection Manager located endpoints: ~p", [EpAddrs]),
             AllEps = update_endpoints(EpAddrs, State#state.endpoints),
             TryAddrs = filter_blacklisted_endpoints(EpAddrs, AllEps),
@@ -644,12 +647,12 @@ update_endpoint(Addr, Fun, State = #state{endpoints = EPs}) ->
             State#state{endpoints = orddict:store(Addr,EP2,EPs)}
     end.
 
-fail_request(Reason, #req{ref = Ref, spec = Spec},
+fail_request(Reason, #req{cur = Addr, ref = Ref, spec = Spec},
              State = #state{pending = Pending}) ->
     %% Tell the module it failed
     {Proto, {_TcpOptions, Module,Args}} = Spec,
     lager:debug("module ~p getting connect_failed", [Module]),
-    Module:connect_failed(Proto, {error, Reason}, Args),
+    Module:connect_failed(Proto, {error, Reason}, Args, Addr),
     %% Remove the request from the pending list
     State#state{pending = lists:keydelete(Ref, #req.ref, Pending)}.
 
@@ -679,6 +682,16 @@ filter_blacklisted_endpoints(EpAddrs, AllEps) ->
                     end),
     lists:filter(PredicateFun, EpAddrs).
 
+%% @doc Return the value for cm_cancellation_interval
+get_cancellation_interval() ->
+    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+
+
+identity_locator({IP,Port}, _Policy) ->
+  {ok, [{IP,Port}]};
+identity_locator([Ips], _Policy) ->
+  {ok, Ips}.
+
 %% @doc Return the ring.
 get_ring() ->
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
@@ -696,9 +709,21 @@ cluster_by_name_locator(ClusterName, _Policy) ->
 cluster_by_addr_locator(Addr, _Policy) ->
     {ok, [Addr]}.
 
-%% @doc Return the value for cm_cancellation_interval
-get_cancellation_interval() ->
-    app_helper:get_env(riak_repl, cm_cancellation_interval, ?CM_CANCELLATION_INTERVAL).
+fullsync_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+fullsync_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+realtime_locator(_, {use_only, Addrs}) ->
+    {ok, Addrs};
+realtime_locator(Name, legacy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+proxy_get_locator(Name, _Policy) ->
+    riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name).
+
+
+
 
 %% @doc Initialize the default set of locator functions.
 initialize_locators() ->
@@ -712,4 +737,13 @@ initialize_locators() ->
     WithClusterAddr = orddict:store(cluster_by_addr,
                                     fun cluster_by_addr_locator/2,
                                     WithClusterName),
-    WithClusterAddr.
+    WithFSRepl = orddict:store(fs_repl,
+                                    fun fullsync_locator/2,
+                                    WithClusterAddr),
+    WithRTRepl = orddict:store(rt_repl,
+                                    fun realtime_locator/2,
+                                    WithFSRepl),
+    WithProxyGet = orddict:store(proxy_get,
+                                    fun proxy_get_locator/2,
+                                    WithRTRepl),
+    WithProxyGet.

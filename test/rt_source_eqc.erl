@@ -21,7 +21,6 @@
     remotes_up
 }).
 
-
 %% ===================================================================
 %% Helper Funcs
 %% ===================================================================
@@ -32,7 +31,9 @@
 }).
 
 setup() ->
-    % ?debugMsg("enter setup()"),
+    application:set_env(riak_repl, rt_heartbeat_timeout, 1200),
+    application:set_env(riak_repl, rt_heartbeat_interval, 1200),
+    application:set_env(riak_repl, rtq_concurrency, 1),
     application:load(sasl),
     application:set_env(sasl, sasl_error_logger, {file, "rt_source_eqc_sasl.log"}),
     error_logger:tty(false),
@@ -46,21 +47,17 @@ setup() ->
     {ok, _RTPid} = rt_source_helpers:start_rt(),
     {ok, _RTQPid} = rt_source_helpers:start_rtq(),
     {ok, _TCPMonPid} = rt_source_helpers:start_tcp_mon(),
-    %% {ok, _Pid1} = riak_core_service_mgr:start_link(ClusterAddr),
-    %% {ok, _Pid2} = riak_core_connection_mgr:start_link(),
-    %% {ok, _Pid3} = riak_core_cluster_conn_sup:start_link(),
-    %% {ok, _Pid4 } = riak_core_cluster_mgr:start_link(),
     {ok, FsPid, FsPort} = rt_source_helpers:init_fake_sink(),
     ok = rt_source_helpers:abstract_connection_mgr(FsPort),
     R = #ctx{fs_pid = FsPid, fs_port = FsPort},
-    % ?debugFmt("leave setup() -> ~p", [R]),
     R.
 
 cleanup(_Ctx) ->
     % ?debugFmt("enter cleanup(~p)", [_Ctx]),
     rt_source_helpers:kill_fake_sink(),
     riak_repl_test_util:kill_and_wait(riak_core_tcp_mon),
-    riak_repl2_rtq:stop(),
+    riak_repl2_rtq:stop(1),
+    application:unset_env(riak_repl, rtq_concurrency),
     riak_repl_test_util:kill_and_wait(riak_repl2_rt),
     riak_repl_test_util:stop_test_ring(),
     meck:unload(),
@@ -122,7 +119,9 @@ g_remote_name() ->
 remote_name(#state{remotes_available = []}) ->
     erlang:error(no_name_available);
 remote_name(#state{remotes_available = Remotes}) ->
-    oneof(Remotes).
+    Name = oneof(Remotes),
+    % we need unique names as we are now starting a supervisor not a gen_server for connectionss
+    list_to_atom(lists:flatten(io_lib:format("~p ~p", [Name, random:uniform(999999)]))).
 
 precondition(#state{master_queue = MasterQ} = S, {call, _, Connect, [Remote, MasterQ]}) when Connect =:= connect_to_v1; Connect =:= connect_to_v2 ->
     %% ?debugFmt("Remote requested: ~p Remotes available: ~p", [Remote, S#state.remotes_available]),
@@ -184,12 +183,12 @@ initial_state() ->
     #state{}.
 
 kill_rtq() ->
-    case whereis(riak_repl2_rtq) of
+    case whereis(riak_repl2_rtq_1) of
         undefined ->
             ok;
         _ ->
-            riak_repl2_rtq:stop(),
-            catch exit(riak_repl2_rtq, kill)
+            riak_repl2_rtq:stop(1),
+            catch exit(riak_repl2_rtq_1, kill)
     end.
 
 next_state(S, Res, {call, _, connect_to_v1, [Remote, _MQ]}) ->
@@ -207,6 +206,7 @@ next_state(S, _Res, {call, _, disconnect, [{Remote, _}]}) ->
         Sources == [] ->
             [];
         true ->
+            lager:info("Master queue: ~p", [S#state.master_queue]),
             MasterKeys = ordsets:from_list([Seq || {Seq, _, _, _} <- S#state.master_queue]),
             SourceQueues = [Source#src_state.unacked_objects || {_, Source} <- Sources],
             ExtractSeqs = fun(Elem, Acc) ->
@@ -539,7 +539,8 @@ connect(RemoteName, MasterQueue) ->
     %% ?debugFmt("connect: ~p", [RemoteName]),
     stateful:set(remote, RemoteName),
     %% ?debugMsg("Starting rtsource link"),
-    {ok, SourcePid} = riak_repl2_rtsource_conn:start_link(RemoteName),
+    {ok, _} = riak_repl2_reference_rtq:start_link(RemoteName, 1),
+    {ok, SourcePid} = riak_repl2_rtsource_conn_mgr:start_link(RemoteName),
     %% ?debugFmt("rtsource pid: ~p", [SourcePid]),
     %% ?debugMsg("Waiting for sink_started"),
     _ = wait_for_rtsource_helper(SourcePid),
@@ -558,44 +559,58 @@ connect(RemoteName, MasterQueue) ->
     end.
 
 wait_for_rtsource_helper(SourcePid) ->
-    Status = riak_repl2_rtsource_conn:status(SourcePid),
+    Status = riak_repl2_rtsource_conn_mgr:status(SourcePid),
     wait_for_rtsource_helper(SourcePid, 20, 1000, Status).
 
 wait_for_rtsource_helper(_SourcePid, 0, _Wait, _Status) ->
     {error, rtsource_helper_failed};
 wait_for_rtsource_helper(SourcePid, RetriesLeft, Wait, Status) ->
-    case lists:keyfind(helper_pid, 1, Status) of
-        false ->
-            timer:sleep(Wait),
-            NewStatus = riak_repl2_rtsource_conn:status(SourcePid),
-            wait_for_rtsource_helper(SourcePid, RetriesLeft-1, Wait, NewStatus);
+    FirstStatus = first_or_empty(Status),
+    case lists:keyfind(number_of_connections, 1, FirstStatus) of
+        1 ->
+            ok;
         _ ->
-            ok
+            timer:sleep(Wait),
+            NewStatus = riak_repl2_rtsource_conn_mgr:status(SourcePid),
+            wait_for_rtsource_helper(SourcePid, RetriesLeft-1, Wait, NewStatus)
+    end.
+
+
+first_or_empty(L) ->
+    case L of
+        [] ->
+            [];
+        X ->
+            lists:nth(1,X)
     end.
 
 disconnect(ConnectState) ->
-    {Remote, SrcState} = ConnectState,
+    {_Remote, SrcState} = ConnectState,
     %% ?debugFmt("Disconnecting ~p", [Remote]),
-    #src_state{pids = {Source, Sink}} = SrcState,
+    #src_state{pids = {{Source, SourceName}, Sink}} = SrcState,
     %% ?debugFmt("is Source alive: ~p", [is_process_alive(Source)]),
     %% ?debugFmt("is Sink ~p alive: ~p", [Sink, is_process_alive(Sink)]),
     %% Stop the source, but no need to stop our fake sink
-    riak_repl2_rtsource_conn:stop(Source),
+    catch exit(Source, kill),
     Sink ! stop, %% Reset the fake sink history
-    riak_repl2_rtq:unregister(Remote),
+    riak_repl2_reference_rtq:shutdown(SourceName, 1),
+    riak_repl2_reference_rtq:stop(SourceName, 1),
+    riak_repl2_rtq:unregister(SourceName, 1),
     {Source, Sink}.
     %% [riak_repl_test_util:wait_for_pid(P, 3000) || P <- [Source, Sink]].
 
 push_object(Remotes, RiakObj, State) ->
     %% ?debugFmt("push_object remotes: ~p", [Remotes]),
-    Meta = [{routed_clusters, Remotes}],
-    riak_repl2_rtq:push(1, riak_repl_util:to_wire(w1, [RiakObj]), Meta),
+    Meta = [{routed_clusters, Remotes}, {bucket_name, riak_object:bucket_only(RiakObj)}],
+    riak_repl2_rtq:push(1, 1, riak_repl_util:to_wire(w1, [RiakObj]), Meta),
     rt_source_helpers:wait_for_pushes(State, Remotes),
     {1, RiakObj, Meta}.
 
 ack_objects(NumToAck, {Remote, SrcState}) ->
-    {_, Sink} = SrcState#src_state.pids,
+    {SourceMgr, Sink} = SrcState#src_state.pids,
     ProcessAlive = is_process_alive(Sink),
+    [RSource] = riak_repl2_rtsource_conn_mgr:get_rtsource_conn_pids(SourceMgr),
+    Ref = riak_repl2_rtsource_conn:get_ref(RSource),
     if
         ProcessAlive ->
             {ok, Acked} = gen_server:call(Sink, {ack, NumToAck}),
@@ -603,9 +618,9 @@ ack_objects(NumToAck, {Remote, SrcState}) ->
                 [] ->
                     ok;
                 [{objects_and_meta, {Seq, _, _}} | _] ->
-                    riak_repl2_rtq:ack(Remote, Seq);
+                    riak_repl2_reference_rtq:ack(Remote, 1, Ref, Seq);
                 [{objects, {Seq, _}} | _] ->
-                    riak_repl2_rtq:ack(Remote, Seq)
+                    riak_repl2_reference_rtq:ack(Remote, 1, Ref, Seq)
             end,
             Acked;
         true ->

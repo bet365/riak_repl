@@ -19,3 +19,6 @@ include/riak_repl_pb.hrl
 src/riak_repl_pb.erl
 undefined
 data/*
+*iml
+.idea/
+*coverdata

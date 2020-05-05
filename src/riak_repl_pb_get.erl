@@ -52,7 +52,10 @@ decode(_, Bin) ->
 
 %% @doc encode/1 callback. Encodes an outgoing response message.
 encode(#rpbgetresp{} = Msg) ->
-    {ok, riak_pb_codec:encode(Msg)}.
+    {ok, riak_pb_codec:encode(Msg)};
+encode(#rpbreplgetclusteridresp{} = Msg) ->
+    Resp = riak_repl_pb:encode_rpbreplgetclusteridresp(Msg),
+    {ok, [?PB_MSG_RESP_CLUSTER_ID, Resp]}.
 
 %% Process Protocol Buffer Requests
 %%
@@ -63,7 +66,7 @@ process(#rpbreplgetclusteridreq{}, State) ->
     ClusterId = lists:flatten(
         io_lib:format("~p", [riak_core_ring:cluster_name(Ring)])),
     lager:debug("Repl PB: returning cluster id ~p", [ClusterId]),
-    {reply, #rpbreplgetclusteridresp{cluster_id = ClusterId}, State};
+    {reply, #rpbreplgetclusteridresp{cluster_id = list_to_binary(ClusterId)}, State};
 %% @doc Return Key/Value pair, derived from the KV version
 process(#rpbreplgetreq{bucket=B, key=K, r=R0, pr=PR0, notfound_ok=NFOk,
                        basic_quorum=BQ, if_modified=VClock,

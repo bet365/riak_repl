@@ -76,7 +76,7 @@ started() ->
 ensure_rt(WantEnabled0, WantStarted0) ->
     WantEnabled = lists:usort(WantEnabled0),
     WantStarted = lists:usort(WantStarted0),
-    Status = riak_repl2_rtq:status(),
+    Status = riak_repl2_rtq_sup:status(),
     CStatus = proplists:get_value(consumers, Status, []),
     Enabled = lists:sort([Remote || {Remote, _Stats} <- CStatus]),
     Connections = riak_repl2_rtsource_conn_sup:enabled(),
@@ -97,36 +97,27 @@ ensure_rt(WantEnabled0, WantStarted0) ->
             application:set_env(riak_repl, rtenabled, true)
     end,
 
-    %% For each connection to validate, call maybe_rebalance_delayed to handle 
-    %% the potential need to rebalance connections.
     ToValidate = Started -- ToStop,
-    _ = [case lists:keyfind(Remote, 1, Connections) of
-             {_, PID} ->
-                 riak_repl2_rtsource_conn:maybe_rebalance_delayed(PID);
-             false ->
-                 ok
-         end || Remote <- ToValidate ],
+    riak_repl2_rtsource_conn_sup:maybe_rebalance(ToValidate),
 
     case ToEnable ++ ToDisable ++ ToStart ++ ToStop of
         [] ->
             [];
         _ ->
-            %% Do enables/starts first to capture maximum amount of rtq
 
-            %% Create a registration to begin queuing, rtsource_sup:ensure_started
-            %% will bring up an rtsource process that will re-register
-            _ = [riak_repl2_rtq:register(Remote) || Remote <- ToEnable],
+            %% start the reference queue which will register to the rtq and populate its reference table
+            _ = [riak_repl2_reference_rtq_sup:enable(Remote) || Remote <- ToEnable],
+
+            %% start rtsource_conn_mgr to create connections and consumers
+            %% TODO: change to START
             _ = [riak_repl2_rtsource_conn_sup:enable(Remote) || Remote <- ToStart],
 
-            %% Stop running sources, re-register to get rid of pending
-            %% deliver functions
-            _ = [begin
-                     _ = riak_repl2_rtsource_conn_sup:disable(Remote),
-                     riak_repl2_rtq:register(Remote)
-                 end || Remote <- ToStop],
+            %% stop rtsource_conn_mgr to kill all connections (but remain registered to the queue)
+            %% TODO: change to STOP
+            _ = [riak_repl2_rtsource_conn_sup:disable(Remote) || Remote <- ToStop],
 
-            %% Unregister disabled sources, freeing up the queue
-            _ = [riak_repl2_rtq:unregister(Remote) || Remote <- ToDisable],
+            %% stop the reference queue for a remote which will delete its reference table and unregister from the rtq
+            _ = [riak_repl2_reference_rtq_sup:disable(Remote) || Remote <- ToDisable],
 
             [{enabled, ToEnable},
              {started, ToStart},
@@ -135,11 +126,12 @@ ensure_rt(WantEnabled0, WantStarted0) ->
     end.
 
 register_remote_locator() ->
-    Locator = fun(_, {use_only, Addrs}) ->
-                       {ok, Addrs};
-                 (Name, _Policy) ->
-                       riak_core_cluster_mgr:get_ipaddrs_of_cluster(Name)
-              end,
+    Locator =
+        fun(_, {use_only, Addrs}) ->
+            {ok, Addrs};
+            (Name, legacy) ->
+                riak_core_cluster_mgr:get_ipaddrs_of_cluster_single(Name)
+        end,
     ok = riak_core_connection_mgr:register_locator(rt_repl, Locator).
 
 %% Register an active realtime sink (supervised under ranch)
@@ -173,7 +165,9 @@ postcommit(RObj) ->
             %% during shutdown
             case whereis(riak_repl2_rtq_proxy) of
                 undefined ->
-                    riak_repl2_rtq:push(length(Objects), BinObjs, Meta);
+                    Concurrency = riak_repl_util:get_rtq_concurrency(),
+                    Hash = erlang:phash2(BinObjs, Concurrency) +1,
+                    riak_repl2_rtq:push(Hash, length(Objects), BinObjs, Meta);
                 _ ->
                     %% we're shutting down and repl is stopped or stopping...
                     riak_repl2_rtq_proxy:push(length(Objects), BinObjs, Meta)
@@ -186,23 +180,17 @@ postcommit(RObj) ->
 init([]) ->
     {ok, #state{}}.
 
-handle_call(status, _From, State = #state{sinks = SinkPids}) ->
-    Timeout = app_helper:get_env(riak_repl, status_timeout, 5000),
+handle_call(status, _From, State) ->
     Sources = [try
-                   riak_repl2_rtsource_conn:status(Pid, Timeout)
+                   riak_repl2_rtsource_conn_mgr:status(Pid)
                catch
                    _:_ ->
                        {Remote, Pid, unavailable}
                end || {Remote, Pid} <- riak_repl2_rtsource_conn_sup:enabled()],
-    Sinks = [try
-                 riak_repl2_rtsink_conn:status(Pid, Timeout)
-             catch
-                 _:_ ->
-                     {will_be_remote_name, Pid, unavailable}
-             end || Pid <- SinkPids],
+    Sinks = riak_repl2_rtsink_conn_sup:status(),
     Status = [{enabled, enabled()},
               {started, started()},
-              {q,       riak_repl2_rtq:status()},
+              {q,       riak_repl2_rtq_sup:status()},
               {sources, Sources},
               {sinks, Sinks}],
     {reply, Status, State};
@@ -242,13 +230,15 @@ do_ring_trans(F, A) ->
     end.
 
 set_bucket_meta(Obj) ->
-    M = orddict:new(),
+    M0 = orddict:new(),
+    ObjectFilteringRules = riak_repl2_object_filter:get_realtime_blacklist(Obj),
+    M = orddict:store(?BT_META_BLACKLIST, ObjectFilteringRules, M0),
     case riak_object:bucket(Obj) of
         {Type, _B} ->
             PropsHash = riak_repl_bucket_type_util:property_hash(Type),
             M1 = orddict:store(?BT_META_TYPED_BUCKET, true, M),
             M2 = orddict:store(?BT_META_TYPE, Type, M1),
             orddict:store(?BT_META_PROPS_HASH, PropsHash, M2);
-        _B ->
+        _ ->
             orddict:store(?BT_META_TYPED_BUCKET, false, M)
     end.

@@ -38,245 +38,225 @@
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--export([riak_core_connection_mgr_connect/2]).
+-export([riak_core_connection_mgr_connect/2, start_test/2]).
 -endif.
 
 %% API
--export([start_link/1,
-         stop/1,
-         status/1, status/2,
-         address/1, maybe_rebalance_delayed/1,
-         legacy_status/1, legacy_status/2]).
+-export([
+    start/3,
+    stop/1,
+    get_helper_pid/1,
+    status/1,
+    status/2,
+    get_address/1,
+    get_socketname_primary/1,
+    connected/7,
+    graceful_shutdown/1,
+    object_sent/2,
+    get_latency/2
+]).
 
-%% connection manager callbacks
--export([connected/6,
-         connect_failed/3]).
+-export([get_ref/1]).
+-export([get_heartbeat_timeout/1, get_heartbeat_interval/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--define(DEFAULT_HBINTERVAL, 15).
--define(DEFAULT_HBTIMEOUT, 15).
+-record(state,
+{
+    id,
+    remote,    % remote name
+    address,   % {IP, Port}
+    transport, % transport module
+    socket,    % socket to use with transport
+    peername,  % cached when socket becomes active
+    proto,     % protocol version negotiated
+    ver,       % wire format negotiated
+    helper_pid,% riak_repl2_rtsource_helper pid
+    hb_interval_tref,
+    hb_timeout_tref,% heartbeat timeout timer reference
+    hb_timeout_ref, %% ref used to fix race condition
+    hb_sent_q,   % queue of heartbeats now() that were sent
+    hb_rtt,    % RTT in milliseconds for last completed heartbeat
+    cont = <<>>, % continuation from previous TCP buffer
 
--define(TCP_OPTIONS,  [{keepalive, true},
-                       {nodelay, true},
-                       {packet, 0},
-                       {active, false}]).
+    %% Protocol 4
+    latency = #distribution_collector{},
+    connection_mgr_pid,
+    connection_mgr_ref,
+    shutting_down = false,
+    sink_shutdown = false,
+    expect_seq_v4 = 1,
+    object_sent_time,
+    ref
+}).
 
-%% nodes running 1.3.1 have a bug in the service_mgr module.
-%% this bug prevents it from being able to negotiate a version list longer
-%% than 2. Until we no longer support communicating with that version,
-%% we need to artifically truncate the version list.
-%% TODO: expand version list or remove comment when we no
-%% longer support 1.3.1
-%% prefered version list: [{2,0}, {1,5}, {1,1}, {1,0}]
-
-
--define(CLIENT_SPEC, {{realtime,[{3,0}, {2,0}, {1,5}]},
-                      {?TCP_OPTIONS, ?MODULE, self()}}).
-
--record(state, {remote,    % remote name
-                address,   % {IP, Port}
-                connection_ref, % reference handed out by connection manager
-                transport, % transport module
-                socket,    % socket to use with transport
-                peername,  % cached when socket becomes active
-                proto,     % protocol version negotiated
-                ver,       % wire format negotiated
-                helper_pid,% riak_repl2_rtsource_helper pid
-                hb_interval,% seconds to send new heartbeat after last
-                hb_interval_tref,
-                hb_timeout,% seconds to wait for heartbeat after send
-                hb_timeout_tref,% heartbeat timeout timer reference
-                hb_sent_q,   % queue of heartbeats now() that were sent
-                hb_rtt,    % RTT in milliseconds for last completed heartbeat
-                rb_timeout_tref,% Rebalance timeout timer reference
-                cont = <<>>}). % continuation from previous TCP buffer
-
-%% API - start trying to send realtime repl to remote site
-start_link(Remote) ->
-    gen_server:start_link(?MODULE, [Remote], []).
+start(Remote, Id, ConnMgr) ->
+    gen_server:start(?MODULE, [Remote, Id, ConnMgr], []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop, ?LONG_TIMEOUT).
 
-address(Pid) ->
-    gen_server:call(Pid, address, ?LONG_TIMEOUT).
-
-%% @doc Check if we need to rebalance.
-%% If we do, delay some time, recheck that we still
-%% need to rebalance, and if we still do, then execute
-%% reconnection to the better sink node.
-maybe_rebalance_delayed(Pid) ->
-    gen_server:cast(Pid, rebalance_delayed).
-
 status(Pid) ->
-    status(Pid, infinity).
+    status(Pid, ?LONG_TIMEOUT).
 
 status(Pid, Timeout) ->
-    gen_server:call(Pid, status, Timeout).
+    try
+        gen_server:call(Pid, status, Timeout)
+    catch
+        _:_ ->
+            []
+    end.
 
-%% legacy status -- look like a riak_repl_tcp_server
-legacy_status(Pid) ->
-    legacy_status(Pid, infinity).
-
-legacy_status(Pid, Timeout) ->
-    gen_server:call(Pid, legacy_status, Timeout).
-
-%% connection manager callbacks
-connected(Socket, Transport, Endpoint, Proto, RtSourcePid, _Props) ->
+connected(RtSourcePid, Ref, Socket, Transport, IPPort, Proto, _Props) ->
     Transport:controlling_process(Socket, RtSourcePid),
     Transport:setopts(Socket, [{active, true}]),
     try
-        gen_server:call(RtSourcePid,
-                        {connected, Socket, Transport, Endpoint, Proto},
-                        ?LONG_TIMEOUT)
+        gen_server:call(RtSourcePid, {connected, Ref, Socket, Transport, IPPort, Proto}, ?LONG_TIMEOUT)
     catch
         _:Reason ->
-            lager:warning("Unable to contact RT source connection process (~p). Killing it to force reconnect.",
-                          [RtSourcePid]),
-            exit(RtSourcePid, {unable_to_contact, Reason}),
-            ok
+            lager:warning("Unable to contact RT source connection process (~p). Reason ~p"
+                          "Killing it to force reconnect.",
+                [RtSourcePid, Reason]),
+            error
     end.
 
-connect_failed(_ClientProto, Reason, RtSourcePid) ->
-    gen_server:cast(RtSourcePid, {connect_failed, self(), Reason}).
+get_helper_pid(RtSourcePid) ->
+  gen_server:call(RtSourcePid, get_helper_pid).
+
+get_address(Pid) ->
+  gen_server:call(Pid, address, ?LONG_TIMEOUT).
+
+get_socketname_primary(Pid) ->
+  gen_server:call(Pid, get_socketname_primary).
+
+object_sent(Pid, Time) ->
+    gen_server:call(Pid, {object_sent, Time}, ?LONG_TIMEOUT).
+
+get_latency(Pid, Timeout) ->
+    try
+        gen_server:call(Pid, latency, Timeout)
+    catch
+        _:_ ->
+            error
+    end.
+
+graceful_shutdown(Pid) ->
+    try
+        gen_server:call(Pid, graceful_shutdown)
+    catch
+        _:_  ->
+        busy
+    end.
+
+%% ==============================
+%% For Testing
+%% ==============================
+get_ref(Pid) ->
+    gen_server:call(Pid, get_ref, infinity).
+
+% ======================================================================================================================
 
 %% gen_server callbacks
 
+%% Init for start_test
+init([Remote, Id]) ->
+    {ok, #state{remote = Remote, id = Id}};
+
 %% Initialize
-init([Remote]) ->
-    %% Todo: check for bad remote name
-    lager:debug("connecting to remote ~p", [Remote]),
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC) of
-        {ok, Ref} ->
-            lager:debug("connection ref ~p", [Ref]),
-            {ok, #state{remote = Remote, connection_ref = Ref}};
-        {error, Reason}->
-            lager:warning("Error connecting to remote"),
-            {stop, Reason}
-    end.
+init([Remote, Id, ConnMgr]) ->
+    Ref = erlang:monitor(process, ConnMgr),
+    {ok, #state{remote = Remote, id = Id, connection_mgr_pid = ConnMgr, connection_mgr_ref = Ref}}.
+
+handle_call(get_ref, _From, State = #state{ref = Ref}) ->
+    {reply, Ref, State};
 
 handle_call(stop, _From, State) ->
-    {stop, normal, ok, State};
-handle_call(address, _From, State = #state{ address=A }) ->
-    {reply, {ok, A}, State};
-handle_call(status, _From, State =
-                #state{remote = R, address = _A, transport = T, socket = S,
-                       helper_pid = H,
-                       hb_interval = HBInterval, hb_rtt = HBRTT}) ->
-    Props = case T of
-                undefined ->
-                    [{connected, false}];
-                _ ->
-                    HBStats = case HBInterval of
-                                  undefined ->
-                                      [];
-                                  _ ->
-                                      [{hb_rtt, HBRTT}]
-                              end,
-                    SocketStats = riak_core_tcp_mon:socket_status(S),
+  {stop, shutdown, ok, State};
 
-                    [{connected, true},
-                     %%{address, riak_repl_util:format_ip_and_port(A)},
-                     {transport, T},
-                     %%{socket_raw, S},
-                     {socket,
-                      riak_core_tcp_mon:format_socket_stats(SocketStats, [])},
-                     %%{peername, peername(State)},
-                     {helper_pid, riak_repl_util:safe_pid_to_list(H)}] ++
-                        HBStats
-            end,
-    HelperProps = case H of
-                      undefined ->
-                          [];
-                      _ ->
-                          try
-                              Timeout = app_helper:get_env(
-                                          riak_repl, status_helper_timeout,
-                                          app_helper:get_env(riak_repl, status_timeout, 5000) - 1000),
-                              riak_repl2_rtsource_helper:status(H, Timeout)
-                          catch
-                              _:{timeout, _} ->
-                                  [{helper, timeout}]
-                          end
-                  end,
-    FormattedPid = riak_repl_util:safe_pid_to_list(self()),
-    Status = [{sink, R}, {pid, FormattedPid}] ++ Props ++ HelperProps,
-    {reply, Status, State};
-handle_call(legacy_status, _From, State = #state{remote = Remote}) ->
-    SocketStats = riak_core_tcp_mon:socket_status(State#state.socket),
-    Socket = riak_core_tcp_mon:format_socket_stats(SocketStats, []),
-    RTQStats = [{realtime_queue_stats, riak_repl2_rtq:status()}],
-    Status =
-        [{node, node()},
-         {site, Remote},
-         {strategy, realtime},
-         {socket, Socket}] ++ RTQStats,
-    {reply, {status, Status}, State};
-%% Receive connection from connection manager
-handle_call({connected, Socket, Transport, EndPoint, Proto}, _From,
-            State = #state{remote = Remote}) ->
+handle_call(address, _From, State = #state{address=A}) ->
+    {reply, A, State};
+
+handle_call(get_socketname_primary, _From, State=#state{socket = S}) ->
+  {ok, Peername} = inet:sockname(S),
+  {reply, Peername, State};
+
+handle_call(status, _From, State) ->
+    {reply, get_status(State), State};
+
+handle_call(latency, _From, State = #state{latency = Latency, peername = Peername}) ->
+    #distribution_collector{timestamp = T1} = Latency,
+    ResetAfter = get_consumer_latency_reset(),
+    TimeDiff = timer:now_diff(os:timestamp(), T1) / 1000,
+    case  TimeDiff >= ResetAfter of
+        true ->
+            {reply, {Peername, #distribution_collector{}}, State#state{latency = #distribution_collector{}}};
+        false ->
+            {reply, {Peername, Latency}, State}
+    end;
+
+handle_call({object_sent, Time}, _From, State) ->
+    {reply, ok, State#state{object_sent_time = Time}};
+
+handle_call({connected, Ref, Socket, Transport, EndPoint, Proto}, _From, State) ->
+    #state{remote = Remote, id = Id} = State,
     %% Check the socket is valid, may have been an error
     %% before turning it active (e.g. handoff of riak_core_service_mgr to handler
     case Transport:send(Socket, <<>>) of
         ok ->
             Ver = riak_repl_util:deduce_wire_version_from_proto(Proto),
-            lager:debug("RT source connection negotiated ~p wire format from proto ~p", [Ver, Proto]),
             {_, ClientVer, _} = Proto,
-            {ok, HelperPid} = riak_repl2_rtsource_helper:start_link(Remote, Transport, Socket, ClientVer),
+            {ok, HelperPid} =
+                riak_repl2_rtsource_helper:start_link(Remote, Id, Transport, Socket, ClientVer, Ref, self()),
             SocketTag = riak_repl_util:generate_socket_tag("rt_source", Transport, Socket),
-            lager:debug("Keeping stats for " ++ SocketTag),
-            riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source,
-                                               SocketTag}, Transport),
-            State2 = State#state{transport = Transport,
-                                 socket = Socket,
-                                 address = EndPoint,
-                                 proto = Proto,
-                                 peername = peername(Transport, Socket),
-                                 helper_pid = HelperPid,
-                                 ver = Ver},
-            lager:info("Established realtime connection to site ~p address ~s",
-                       [Remote, peername(State2)]),
-
+            riak_core_tcp_mon:monitor(Socket, {?TCP_MON_RT_APP, source, SocketTag}, Transport),
+            State2 =
+                State#state
+                {
+                    transport = Transport,
+                    socket = Socket,
+                    address = EndPoint,
+                    proto = Proto,
+                    peername = peername(Transport, Socket),
+                    helper_pid = HelperPid,
+                    ver = Ver,
+                    ref = Ref
+                },
             case Proto of
                 {realtime, _OurVer, {1, 0}} ->
                     {reply, ok, State2};
                 _ ->
                     %% 1.1 and above, start with a heartbeat
-                    HBInterval = app_helper:get_env(riak_repl, rt_heartbeat_interval,
-                                                    ?DEFAULT_HBINTERVAL),
-                    HBTimeout = app_helper:get_env(riak_repl, rt_heartbeat_timeout,
-                                                   ?DEFAULT_HBTIMEOUT),
-                    State3 = State2#state{hb_interval = HBInterval,
-                                          hb_timeout = HBTimeout,
-                                          hb_sent_q = queue:new() },
-                    {reply, ok, send_heartbeat(State3)}
+                    State3 = State2#state{hb_sent_q = queue:new()},
+                    case send_heartbeat(State3) of
+                        {ok, State4} ->
+                            {reply, ok, State4};
+                        {error, Reason} ->
+                            {stop, {shutdown , {error, Reason}}, ok, State3}
+                    end
             end;
         ER ->
             {reply, ER, State}
-    end.
+    end;
 
-%% Connection manager failed to make connection
-%% TODO: Consider reissuing connect against another host - maybe that
-%%   functionality should be in the connection manager (I want a connection to site X)
-handle_cast({connect_failed, _HelperPid, Reason},
-            State = #state{remote = Remote}) ->
-    lager:warning("Realtime replication connection to site ~p failed - ~p\n",
-                  [Remote, Reason]),
-    {stop, normal, State};
+handle_call(graceful_shutdown, _From, State) ->
+    NewState = set_shutdown(State),
+    {reply, something, NewState};
 
-handle_cast(rebalance_delayed, State) ->
-    {noreply, maybe_rebalance(State, delayed)}.
+handle_call(get_helper_pid, _From, State=#state{helper_pid = H}) ->
+    {reply, H, State}.
+
+handle_cast(_Request, State) ->
+    {noreply, State}.
 
 
 handle_info({Proto, _S, TcpBin}, State= #state{cont = Cont})
-  when Proto == tcp; Proto == ssl ->
+    when Proto == tcp; Proto == ssl ->
     recv(<<Cont/binary, TcpBin/binary>>, State);
-handle_info({Closed, _S},
-            State = #state{remote = Remote, cont = Cont})
-  when Closed == tcp_closed; Closed == ssl_closed ->
+
+handle_info({Closed, _S}, State = #state{remote = Remote, cont = Cont})
+    when Closed == tcp_closed; Closed == ssl_closed ->
     case size(Cont) of
         0 ->
             ok;
@@ -285,164 +265,64 @@ handle_info({Closed, _S},
             lager:warning("Realtime connection ~s to ~p closed with partial receive of ~b bytes\n",
                           [peername(State), Remote, NumBytes])
     end,
-    %% go to sleep for 1s so a sink that opens the connection ok but then
-    %% dies will not make the server restart too fst.
-    timer:sleep(1000),
-    {stop, normal, State};
-handle_info({Error, _S, Reason},
-            State = #state{remote = Remote, cont = Cont})
+    perform_shutdown(State);
+
+handle_info({Error, _S, Reason}, State = #state{remote = Remote, cont = Cont})
   when Error == tcp_error; Error == ssl_error ->
     riak_repl_stats:rt_source_errors(),
     lager:warning("Realtime connection ~s to ~p network error ~p - ~b bytes pending\n",
                   [peername(State), Remote, Reason, size(Cont)]),
-    {stop, normal, State};
+
+    perform_shutdown(State);
 
 handle_info(send_heartbeat, State) ->
-    {noreply, send_heartbeat(State)};
-handle_info({heartbeat_timeout, HBSent}, State = #state{hb_sent_q = HBSentQ,
-                                                        hb_timeout_tref = HBTRef,
-                                                        hb_timeout = HBTimeout,
-                                                        remote = Remote}) ->
-    TimeSinceTimeout = timer:now_diff(os:timestamp(), HBSent) div 1000,
-
-    %% hb_timeout_tref is the authority of whether we should
-    %% restart the conection on heartbeat timeout or not.
-    case HBTRef of
-        undefined ->
-            lager:info("Realtime connection ~s to ~p heartbeat "
-                       "time since timeout ~p",
-                       [peername(State), Remote, TimeSinceTimeout]),
-            {noreply, State};
-        _ ->
-            lager:warning("Realtime connection ~s to ~p heartbeat timeout "
-                          "after ~p seconds\n",
-                          [peername(State), Remote, HBTimeout]),
-            lager:debug("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
-            {stop, normal, State}
+    case send_heartbeat(State) of
+        {ok, State2} ->
+            {noreply, State2};
+        {error, Reason} ->
+            {stop, {shutdown, {error, Reason}}, State}
     end;
-handle_info(rebalance_now, State) ->
-    {noreply, maybe_rebalance(State#state{rb_timeout_tref = undefined}, now)};
+
+handle_info({heartbeat_timeout, Ref}, State ) ->
+    #state{hb_sent_q = HBSentQ, hb_timeout_ref = SavedRef, remote = Remote} = State,
+
+    %% hb_timeout_ref is the authority of whether we should (it fixes the race condition caused by using the timer ref)
+    %% because the timer ref would get re-populated on a schedule_heartbeat
+    %% restart the conection on heartbeat timeout or not.
+    case Ref == SavedRef of
+        false ->
+            %% old ref, we do not care about (we have had incoming traffic since)
+            {noreply, State};
+        true ->
+            HBTimeout = get_heartbeat_timeout(State#state.remote),
+            lager:warning("Realtime connection ~s to ~p heartbeat timeout after ~p seconds\n",
+                          [peername(State), Remote, HBTimeout]),
+            lager:info("hb_sent_q_len after heartbeat_timeout: ~p", [queue:len(HBSentQ)]),
+            perform_shutdown(State)
+    end;
+
+handle_info({'DOWN', MonitorRef, process, Pid, _Reason},
+    State = #state{connection_mgr_ref = MonitorRef, connection_mgr_pid = Pid}) ->
+    {stop, {shutdown, conn_mgr_died}, State};
+
 handle_info(Msg, State) ->
     lager:warning("Unhandled info:  ~p", [Msg]),
     {noreply, State}.
 
-terminate(_Reason, #state{helper_pid=HelperPid, remote=Remote}) ->
-    riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-    catch riak_repl2_rtsource_helper:stop(HelperPid),
+terminate(Reason, #state{socket = Socket, transport = Transport, address = A}) ->
+    catch Transport:close(Socket),
+    lager:info("rtsource conn terminated due to ~p, Endpoint: ~p", [Reason, A]),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-maybe_rebalance(State, now) ->
-    case should_rebalance(State) of
-        no ->
-            State;
-        {yes, UsefulAddrs} ->
-            reconnect(State, UsefulAddrs)
-    end;
-maybe_rebalance(State, delayed) ->
-    case State#state.rb_timeout_tref of
-        undefined ->
-            RbTimeoutTref = erlang:send_after(rebalance_delay_millis(), self(), rebalance_now),
-            State#state{rb_timeout_tref = RbTimeoutTref};
-        _ ->
-            %% Already sent a "rebalance_now"
-            State
-    end.
-
-should_rebalance(#state{address=ConnectedAddr, remote=Remote}) ->
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    Addrs = riak_repl_ring:get_clusterIpAddrs(Ring, Remote),
-    {ok, ShuffledAddrs} = riak_core_cluster_mgr:shuffle_remote_ipaddrs(Addrs),
-    lager:debug("ShuffledAddrs: ~p, ConnectedAddr: ~p", [ShuffledAddrs, ConnectedAddr]),
-    case (ShuffledAddrs /= []) andalso same_ipaddr(ConnectedAddr, hd(ShuffledAddrs)) of
-        true ->
-            no; % we're already connected to the ideal buddy
-        false ->
-            %% compute the addrs that are "better" than the currently connected addr
-            BetterAddrs = lists:filter(fun(A) -> not same_ipaddr(ConnectedAddr, A) end,
-                                       ShuffledAddrs),
-            %% remove those that are blacklisted anyway
-            UsefulAddrs = riak_core_connection_mgr:filter_blacklisted_ipaddrs(BetterAddrs),
-            lager:debug("BetterAddrs: ~p, UsefulAddrs ~p", [BetterAddrs, UsefulAddrs]),
-            case UsefulAddrs of
-                [] ->
-                    no;
-                UsefulAddrs ->
-                    {yes, UsefulAddrs}
-            end
-    end.
-
-rebalance_delay_millis() ->
-    MaxDelaySecs =
-        app_helper:get_env(riak_repl, realtime_connection_rebalance_max_delay_secs, 5*60),
-    round(MaxDelaySecs * rand:uniform(1000)).
-
-reconnect(State=#state{remote=Remote}, BetterAddrs) ->
-    lager:info("trying reconnect to one of: ~p", [BetterAddrs]),
-
-    %% if we have a pending connection attempt - drop that
-    riak_core_connection_mgr:disconnect({rt_repl, Remote}),
-
-    lager:debug("re-connecting to remote ~p", [Remote]),
-    case riak_core_connection_mgr:connect({rt_repl, Remote}, ?CLIENT_SPEC, {use_only, BetterAddrs}) of
-        {ok, Ref} ->
-            lager:debug("connecting ref ~p", [Ref]),
-            State#state{ connection_ref = Ref};
-        {error, Reason}->
-            lager:warning("Error connecting to remote ~p (ignoring as we're reconnecting)", [Reason]),
-            State
-    end.
-
+%% ================================================================================================================== %%
+%% Internal Functions
+%% ================================================================================================================== %%
 
 cancel_timer(undefined) -> ok;
 cancel_timer(TRef)      -> _ = erlang:cancel_timer(TRef).
-
-recv(TcpBin, State = #state{remote = Name,
-                            hb_sent_q = HBSentQ,
-                            hb_timeout_tref = HBTRef}) ->
-    %% hb_timeout_tref might be undefined if we have are getting
-    %% acks/heartbeats back-to-back and we haven't sent a heartbeat yet.
-    {realtime, {ProtoMajor, _}, {ProtoMajor, _}} = State#state.proto,
-    case riak_repl2_rtframe:decode(TcpBin) of
-        {ok, undefined, Cont} ->
-            {noreply, State#state{cont = Cont}};
-        {ok, {ack, Seq}, Cont} when ProtoMajor >= 2 ->
-            %% TODO: report this better per-remote
-            riak_repl_stats:objects_sent(),
-            ok = riak_repl2_rtq:ack(Name, Seq),
-            %% reset heartbeat timer, since we've seen activity from the peer
-            case HBTRef of
-                undefined ->
-                    recv(Cont, State);
-                _ ->
-                    _ = cancel_timer(HBTRef),
-                    recv(Cont, schedule_heartbeat(State#state{hb_timeout_tref=undefined}))
-            end;
-        {ok, {ack, Seq}, Cont} ->
-            riak_repl2_rtsource_helper:v1_ack(State#state.helper_pid, Seq),
-            %% reset heartbeat timer, since we've seen activity from the peer
-            case HBTRef of
-                undefined ->
-                    recv(Cont, State);
-                _ ->
-                    _ = erlang:cancel_timer(HBTRef),
-                    recv(Cont, schedule_heartbeat(State#state{hb_timeout_tref=undefined}))
-            end;
-        {ok, heartbeat, Cont} ->
-            %% Compute last heartbeat roundtrip in msecs and
-            %% reschedule next.
-            {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
-            lager:debug("got heartbeat, hb_sent: ~w", [HBSent]),
-            HBRTT = timer:now_diff(os:timestamp(), HBSent) div 1000,
-            _ = cancel_timer(HBTRef),
-            State2 = State#state{hb_sent_q = HBSentQ2,
-                                 hb_timeout_tref = undefined,
-                                 hb_rtt = HBRTT},
-            lager:debug("got heartbeat, hb_sent_q_len after heartbeat_recv: ~p", [queue:len(HBSentQ2)]),
-            recv(Cont, schedule_heartbeat(State2))
-    end.
 
 peername(Transport, Socket) ->
     riak_repl_util:peername(Socket, Transport).
@@ -450,58 +330,317 @@ peername(Transport, Socket) ->
 peername(#state{peername = P}) ->
     P.
 
-%% Heartbeat is disabled, do nothing
-send_heartbeat(State = #state{hb_interval = undefined}) ->
+get_status(State) ->
+    #state
+    {
+        remote = R,
+        transport = T,
+        socket = S,
+        expect_seq_v4 = Sent,
+        hb_rtt = HBRTT
+    } = State,
+
+    Props =
+        case T of
+            undefined ->
+                [{connected, false}];
+            _ ->
+                HBStats = [{hb_rtt, HBRTT}],
+                SocketStats = riak_core_tcp_mon:socket_status(S),
+                [
+                    {connected, true},
+                    {transport, T},
+                    {objects, Sent},
+                    {socket, riak_core_tcp_mon:format_socket_stats(SocketStats, [])}
+                ] ++ HBStats
+        end,
+    FormattedPid = riak_repl_util:safe_pid_to_list(self()),
+    [{sink, R}, {pid, FormattedPid}] ++ Props.
+
+%% ================================================================================================================== %%
+%% Receive functionality from sink
+%% ================================================================================================================== %%
+
+recv(TcpBin, State) ->
+    handle_incoming_data(riak_repl2_rtframe:decode(TcpBin), State).
+
+%% more data to be received
+handle_incoming_data({ok, undefined, Cont}, State) ->
+    {noreply, State#state{cont = Cont}};
+
+%% This deals with the incoming heartbeats
+handle_incoming_data({ok, heartbeat, Cont}, State) ->
+    #state{hb_timeout_tref = HBTRef, hb_sent_q = HBSentQ} = State,
+    {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
+    HBRTT = timer:now_diff(now(), HBSent) div 1000,
+    _ = cancel_timer(HBTRef),
+    State2 = State#state{hb_sent_q = HBSentQ2, hb_timeout_tref = undefined, hb_timeout_ref = undefined, hb_rtt = HBRTT},
+    recv(Cont, schedule_heartbeat(State2));
+
+
+handle_incoming_data({ok, node_shutdown, Cont}, State) ->
+    #state{helper_pid = Helper, expect_seq_v4 = ESeq} = State,
+
+    %% inform helper so it does not accept anymore data
+    {ok, Seq} = riak_repl2_rtsource_helper:shutting_down(Helper),
+    NewState = set_sink_shutdown(State),
+
+    %% todo: heartbeat timeout reset
+
+    case (Seq +1 == ESeq) orelse (Seq == 0) of
+        true ->
+            %% we have the ack back for the last sequence number sent by the helper (terminate)
+            perform_shutdown(NewState);
+        false ->
+            recv(Cont, NewState)
+    end;
+
+%% This is the most upto date protocol to be used if all clusters are up to date with repl
+%% Because we are providing in order sequence numbers, it no longer matters on the ProtoMajor version
+%% we can just ack the reference queue, and it shall deal with it correctly.
+
+%% in the old code we used to ack differently (via sink_helper:ack_v1), this is no longer needed of protocol > 2
+handle_incoming_data({ok, {ack, Seq}, Cont}, State = #state{expect_seq_v4 = Seq, object_sent_time = TimeSent}) ->
+    %% update stats
+    Now = os:timestamp(),
+    Diff = timer:now_diff(Now, TimeSent),
+    State1 = update_latency(Diff, State),
+
+    %% update objects sent
+    riak_repl_stats:objects_sent(),
+
+    %% Reset heartbeat timer, since we've seen activity from the peer
+    State2 = reset_heartbeat_timer(State1),
+
+    %% ack the reference queue
+    #state{remote = Remote, id = Id, ref = Ref} = State2,
+    ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
+
+    %% check if we are shutting down gracefully
+    case State1#state.shutting_down of
+        false ->
+            recv(Cont, State1#state{expect_seq_v4 = Seq +1});
+        _ ->
+            perform_shutdown(State1)
+    end;
+
+handle_incoming_data({ok, {retrying, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+    %% Reset heartbeat timer, since we've seen activity from the peer
+    State1 = reset_heartbeat_timer(State),
+    recv(Cont, State1);
+
+handle_incoming_data({ok, {bt_drop, Seq}, Cont}, State = #state{expect_seq_v4 = Seq}) ->
+    riak_repl_stats:objects_sent(),
+    %% Reset heartbeat timer, since we've seen activity from the peer
+    State1 = reset_heartbeat_timer(State),
+
+    %% ack the reference queue
+    #state{remote = Remote, id = Id, ref = Ref} = State,
+    %% TODO: report a drop instead of acking! (new functionality to queue)
+    ok = riak_repl2_reference_rtq:ack(Remote, Id, Ref, Seq),
+
+    %% check if we are shutting down gracefully
+    case State#state.shutting_down of
+        false ->
+            recv(Cont, State1#state{expect_seq_v4 = Seq +1});
+        _ ->
+            perform_shutdown(State)
+    end;
+
+handle_incoming_data({ok, {Type, Seq}, _}, State) ->
+    handle_wrong_seq(Type, Seq, State).
+
+handle_wrong_seq(Type, Seq, State) ->
+    #state{expect_seq_v4 = ESeq, peername = Peername, remote = Remote} = State,
+    %% wrong seq number
+    lager:error("(~p) recevied incorrect sequence from sink: seq: ~p, expected_seq: ~p, peername:~p, remote:~p",
+        [Type, Seq, ESeq, Peername, Remote]),
+    %% we should be doing a shutdown check here to ensure conn_mgr doesn't hit a race condition
+    perform_shutdown(State).
+
+
+reset_heartbeat_timer(State = #state{hb_timeout_tref = undefined, hb_timeout_ref = undefined}) ->
     State;
+reset_heartbeat_timer(State = #state{hb_timeout_tref = Ref1}) ->
+    case Ref1 of
+        undefined ->
+            State#state{hb_timeout_ref = undefined};
+        _ ->
+            _ = cancel_timer(Ref1),
+            schedule_heartbeat(State#state{hb_timeout_tref=undefined, hb_timeout_ref = undefined})
+    end.
+
+
+set_sink_shutdown(State) ->
+    State#state{shutting_down = true, sink_shutdown = true}.
+
+set_shutdown(State) ->
+    State#state{shutting_down = true}.
+
+
+perform_shutdown(State = #state{shutting_down = true, sink_shutdown = true}) ->
+    {stop, {shutdown, sink}, State};
+perform_shutdown(State = #state{shutting_down = true}) ->
+    {stop, {shutdown, source}, State};
+perform_shutdown(State) ->
+    {stop, {shutdown, unexpected}, State}.
+
+%% ================================================================================================================== %%
+%% Heartbeat's
+%% ================================================================================================================== %%
 %% Heartbeat supported and enabled, tell helper to send the message,
 %% and start the timeout.  Managing heartbeat from this process
 %% will catch any bug that causes the helper process to hang as
 %% well as connection issues - either way we want to re-establish.
-send_heartbeat(State = #state{hb_timeout = HBTimeout,
-                              hb_sent_q = SentQ,
-                              helper_pid = HelperPid}) when is_integer(HBTimeout) ->
-
+send_heartbeat(State) ->
+    #state{hb_sent_q = SentQ, transport = T, socket = S} = State,
     % Using now as need a unique reference for this heartbeat
     % to spot late heartbeat timeout messages
-    Now = os:timestamp(),
-
-    riak_repl2_rtsource_helper:send_heartbeat(HelperPid),
-    TRef = erlang:send_after(timer:seconds(HBTimeout), self(), {heartbeat_timeout, Now}),
-    State2 = State#state{hb_interval_tref = undefined, hb_timeout_tref = TRef,
-                         hb_sent_q = queue:in(Now, SentQ)},
-    lager:debug("hb_sent_q_len after sending heartbeat: ~p", [queue:len(SentQ)+1]),
-    State2;
-send_heartbeat(State) ->
-    lager:warning("Heartbeat is misconfigured and is not a valid integer."),
-    State.
+    HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
+    case T:send(S, HBIOL) of
+        ok ->
+            Now = now(),
+            Ref = make_ref(),
+            HBTimeout = get_heartbeat_timeout(State#state.remote),
+            TRef = erlang:send_after(HBTimeout, self(), {heartbeat_timeout, Ref}),
+            State2 = State#state{hb_interval_tref = undefined, hb_timeout_tref = TRef, hb_timeout_ref = Ref, hb_sent_q = queue:in(Now, SentQ)},
+            lager:debug("hb_sent_q_len after sending heartbeat: ~p", [queue:len(SentQ)+1]),
+            {ok, State2};
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 %% Schedule the next heartbeat
-schedule_heartbeat(State = #state{hb_interval_tref = undefined,
-                                  hb_interval = HBInterval}) when is_integer(HBInterval) ->
-    TRef = erlang:send_after(timer:seconds(HBInterval), self(), send_heartbeat),
+schedule_heartbeat(State = #state{hb_interval_tref = undefined}) ->
+    HBInterval = get_heartbeat_interval(State#state.remote),
+    TRef = erlang:send_after(HBInterval, self(), send_heartbeat),
     State#state{hb_interval_tref = TRef};
-
-schedule_heartbeat(State = #state{hb_interval_tref = _TRef,
-                                  hb_interval = HBInterval}) when is_integer(HBInterval) ->
-    lager:debug("hb_interval_tref is not undefined when attempting to schedule new heartbeat."),
-    State;
-
-schedule_heartbeat(State) ->
-    lager:warning("Heartbeat is misconfigured and is not a valid integer."),
+schedule_heartbeat(State = #state{hb_interval_tref = _TRef}) ->
     State.
 
-same_ipaddr({IP,Port}, {IP,Port}) ->
-    true;
-same_ipaddr({_IP1,_Port1}, {_IP2,_Port2}) ->
-    false;
-same_ipaddr(X,Y) ->
-    lager:warning("ipaddrs have unexpected format! ~p, ~p", [X,Y]),
-    false.
+
+get_heartbeat_interval_default() ->
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_interval) of
+        Time when is_integer(Time) -> Time * 1000;
+        _ -> ?RT_HEARTBEAT_DEFAULT_INTERVAL
+    end.
+
+get_heartbeat_timeout_default() ->
+    case app_helper:get_env(riak_repl, default_rt_heartbeat_timeout) of
+        Time when is_integer(Time) -> Time * 1000;
+        _ -> ?RT_HEARTBEAT_DEFAULT_TIMEOUT
+    end.
+
+
+-ifdef(TEST).
+
+get_heartbeat_interval(_) ->
+    case get_heartbeat_interval_default() of
+        undefined ->  ?RT_HEARTBEAT_DEFAULT_INTERVAL;
+        N -> N
+    end.
+
+get_heartbeat_timeout(_) ->
+    case get_heartbeat_timeout_default() of
+        undefined -> ?RT_HEARTBEAT_DEFAULT_TIMEOUT;
+        N -> N
+    end.
+
+-else.
+
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                  Heartbeat Interval
+%% ------------------------------------------------------------------------------------------------------------------ %%
+
+get_heartbeat_interval(RemoteName) ->
+    case get_heartbeat_interval_for_remote(RemoteName) of
+        undefined -> get_heartbeat_interval_default();
+        N -> N
+    end.
+
+get_heartbeat_interval_for_remote(RemoteName) ->
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_interval, RemoteName}) of
+        Interval when is_integer(Interval) -> Interval * 1000;
+        _ -> undefined
+    end.
+
+%% ------------------------------------------------------------------------------------------------------------------ %%
+%%                                  Heartbeat Timeout
+%% ------------------------------------------------------------------------------------------------------------------ %%
+
+get_heartbeat_timeout(RemoteName) ->
+    case get_heartbeat_timeout_for_remote(RemoteName) of
+        undefined -> get_heartbeat_timeout_default();
+        N -> N
+    end.
+
+get_heartbeat_timeout_for_remote(RemoteName) ->
+    case riak_core_metadata:get(?RIAK_REPL2_CONFIG_KEY, {rt_heartbeat_timeout, RemoteName}) of
+        Interval when is_integer(Interval) -> Interval * 1000;
+        _ -> undefined
+    end.
+-endif.
+
+
+%% ===================================================================
+%% Update Latency
+%% ===================================================================
+update_latency(Time, State = #state{latency = #distribution_collector{timestamp = Tstamp}}) ->
+    ResetAfter = get_consumer_latency_reset(),
+    TimeDiff = timer:now_diff(os:timestamp(), Tstamp) / 1000,
+    update_latency(Time, State, TimeDiff >= ResetAfter).
+
+update_latency(Time, State, true) ->
+    Latency = #distribution_collector
+    {
+        timestamp = os:timestamp(),
+        number_data_points = 1,
+        aggregate_values = Time,
+        aggregate_values_sqrd = Time*Time,
+        max = Time
+    },
+    State#state{latency = Latency};
+update_latency(Time, State = #state{latency = Latency}, false) ->
+    #distribution_collector
+    {number_data_points = N1, aggregate_values = AV1, aggregate_values_sqrd = AVS1, max = Max1} = Latency,
+    %% increase the number of data points
+    N2 = N1 +1,
+    %% calculate new aggregate values
+    AV2 = AV1 + Time,
+    %% calculate new aggregate values sqrd
+    AVS2 = AVS1 + (Time*Time),
+    %% calculate new max
+    Max2 = case Time > Max1 of
+               true ->
+                   Time;
+               false ->
+                   Max1
+           end,
+    Latency2 = Latency#distribution_collector
+    {number_data_points = N2, aggregate_values = AV2, aggregate_values_sqrd = AVS2, max = Max2},
+    State#state{latency = Latency2}.
+
+get_consumer_latency_reset() ->
+    case app_helper:get_env(riak_repl, reset_rtsource_conn_latency_stat) of
+        N when is_integer(N), N > 0 -> N * 1000;
+        _ -> ?RESET_CONSUMER_LATENCY_TIMEOUT
+    end.
 
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
 -ifdef(TEST).
+
+-define(TCP_OPTIONS,  [{keepalive, true},
+    {nodelay, true},
+    {packet, 0},
+    {active, false}]).
+
+-define(CLIENT_SPEC, {{realtime,[{4,0}, {3,0}, {2,0}, {1,5}]}, {?TCP_OPTIONS, ?MODULE, self()}}).
+
+start_test(Remote, Id) ->
+    gen_server:start(?MODULE, [Remote, Id], []).
+
 
 riak_repl2_rtsource_conn_test_() ->
     {spawn, [{
@@ -512,105 +651,92 @@ riak_repl2_rtsource_conn_test_() ->
     }]}.
 
 setup() ->
-    % ?debugMsg("enter setup()"),
-    % make sure there aren't leftovers around from prior tests
-    sanitize(),
     % now set up the environment for this test
     process_flag(trap_exit, true),
     riak_repl_test_util:start_test_ring(),
     riak_repl_test_util:abstract_gen_tcp(),
     riak_repl_test_util:abstract_stats(),
     riak_repl_test_util:abstract_stateful(),
-    % ?debugMsg("leave setup()"),
     ok.
 
-cleanup(_Ctx) ->
-    % ?debugFmt("enter cleanup(~p)", [_Ctx]),
-    R = sanitize(),
-    % ?debugFmt("leave cleanup(~p) -> ~p", [_Ctx, R]),
-    R.
-
-sanitize() ->
-    % ?debugMsg("enter sanitize()"),
+cleanup(_) ->
+    application:unset_env(riak_repl, rtq_concurrency),
     rt_source_helpers:kill_fake_sink(),
-    riak_repl_test_util:kill_and_wait([
-        riak_repl2_rt,
-        riak_repl2_rtq,
-        riak_core_tcp_mon]),
-
+    riak_repl_test_util:kill_and_wait([riak_repl2_rt, riak_core_tcp_mon]),
+    riak_repl2_rtq:stop(1),
+    catch riak_repl2_reference_rtq:stop("sink_cluster", 1),
     riak_repl_test_util:stop_test_ring(),
-
-    riak_repl_test_util:maybe_unload_mecks([
-        riak_core_service_mgr,
-        riak_core_connection_mgr,
-        gen_tcp]),
+    riak_repl_test_util:maybe_unload_mecks([riak_core_service_mgr, riak_core_connection_mgr, gen_tcp]),
     meck:unload(),
-    % ?debugMsg("leave sanitize()"),
     ok.
 
 %% test for https://github.com/basho/riak_repl/issues/247
 %% cache the peername so that when the local socket is closed
 %% peername will still be around for logging
 cache_peername_test_case() ->
-    % ?debugMsg("enter cache_peername_test_case()"),
+    RemoteName = "sink_cluster",
     {ok, _RTPid} = rt_source_helpers:start_rt(),
-    {ok, _RTQPid} = rt_source_helpers:start_rtq(),
+    application:set_env(riak_repl, rtq_concurrency, 1),
+    {ok, RTQPid} = riak_repl2_rtq:start_link(1),
+    {ok, RefQPid} = riak_repl2_reference_rtq:start_link(RemoteName, 1),
+    unlink(RTQPid),
+    unlink(RefQPid),
     {ok, _TCPMonPid} = rt_source_helpers:start_tcp_mon(),
     {ok, _FsPid, FsPort} = rt_source_helpers:init_fake_sink(),
-    FsName = {"127.0.0.1", FsPort},
-    ok = setup_connection_for_peername(FsName),
+    Addr = {"127.0.0.1", FsPort},
+    ok = setup_connection_for_peername(Addr),
+    connect(RemoteName),
+    ok.
 
-    ?assertEqual(ok, connect(FsName)).
-    % ?debugMsg("leave cache_peername_test_case()").
+%% Connect to the 'fake' sink
+connect(RemoteName) ->
+    stateful:set(version, {realtime, {1,0}, {1,0}}),
+    stateful:set(remote, RemoteName),
+    _ = riak_core_connection_mgr:connect({rt_repl, RemoteName}, ?CLIENT_SPEC),
+    RTQStats = riak_repl2_rtq_sup:status(),
+    ExpectedRTQStats =
+        [
+            {concurrency, 1},
+            {percent_bytes_used, 0.0},
+            {bytes,0},
+            {max_bytes,104857600},
+            {remotes, [{"sink_cluster", [{bytes,0}, {max_bytes,104857600}, {drops,0}]}]},
+            {trimming_drops, 0},
+            {overload_drops,0}
+        ],
+    ?assertEqual(ExpectedRTQStats, RTQStats).
 
 %% Set up the test
-setup_connection_for_peername(RemoteName) ->
-    % ?debugFmt("enter setup_connection_for_peername(~p)", [RemoteName]),
+setup_connection_for_peername(Addr) ->
     riak_repl_test_util:reset_meck(riak_core_connection_mgr, [no_link, passthrough]),
     meck:expect(riak_core_connection_mgr, connect,
-                fun(_ServiceAndRemote, ClientSpec) ->
-                        proc_lib:spawn_link(?MODULE, riak_core_connection_mgr_connect, [ClientSpec, RemoteName]),
-                        {ok, make_ref()}
-                end).
-riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = RemoteName) ->
+        fun(_ServiceAndRemote, ClientSpec) ->
+            proc_lib:spawn_link(?MODULE, riak_core_connection_mgr_connect, [ClientSpec, Addr]),
+            {ok, make_ref()}
+        end).
+riak_core_connection_mgr_connect(ClientSpec, {RemoteHost, RemotePort} = Addr) ->
     Version = stateful:version(),
-    {_Proto, {TcpOpts, Module, Pid}} = ClientSpec,
+    {_Proto, {TcpOpts, Module, _Pid}} = ClientSpec,
     {ok, Socket} = gen_tcp:connect(RemoteHost, RemotePort, [binary | TcpOpts]),
-
-    ok = Module:connected(Socket, gen_tcp, RemoteName, Version, Pid, []),
+    Ref = make_ref(),
+    {ok, Pid} = riak_repl2_rtsource_conn:start_test("sink_cluster", 1),
+    ok = Module:connected(Pid, Ref, Socket, gen_tcp, Addr, Version, []),
 
     % simulate local socket problem
     inet:close(Socket),
 
     % get the State from the source connection.
     {status,Pid,_,[_,_,_,_,[_,_,{data,[{_,State}]}]]} = sys:get_status(Pid),
+
     % getting the peername from the socket should produce error string
     ?assertEqual("error:einval", peername(inet, Socket)),
 
     % while getting the peername from the State should produce the cached string
     % format the string we expect from peername(State) ...
     {ok, HostIP} = inet:getaddr(RemoteHost, inet),
-    RemoteText = lists:flatten(io_lib:format("~B.~B.~B.~B:~B",
-                    tuple_to_list(HostIP) ++ [RemotePort])),
+    RemoteText = lists:flatten(io_lib:format("~B.~B.~B.~B:~B", tuple_to_list(HostIP) ++ [RemotePort])),
     % ... and hook the function to check for it
-    ?assertEqual(RemoteText, peername(State)).
-
-%% Connect to the 'fake' sink
-connect(RemoteName) ->
-    % ?debugFmt("enter connect(~p)", [RemoteName]),
-
-    stateful:set(version, {realtime, {1,0}, {1,0}}),
-    stateful:set(remote, RemoteName),
-
-    {ok, SourcePid} = riak_repl2_rtsource_conn:start_link(RemoteName),
-
-    {status, Status} = riak_repl2_rtsource_conn:legacy_status(SourcePid),
-    RTQStats = proplists:get_value(realtime_queue_stats, Status),
-
-    ?assertEqual([{percent_bytes_used, 0.0},
-                  {bytes,0},
-                  {max_bytes,104857600},
-                  {consumers,[]},
-                  {overload_drops,0}], RTQStats).
+    ?assertEqual(RemoteText, peername(State)),
+    catch exit(Pid, test_complete).
 
 -endif.

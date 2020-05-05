@@ -47,6 +47,13 @@
 -define(BT_META_TYPE, bucket_type).
 -define(BT_META_PROPS_HASH, properties_hash_val).
 
+-define(BT_META_BLACKLIST, realtime_blacklist).
+-define(RIAK_REPL2_CONFIG_KEY, {riak_repl2, config}).
+
+-define(RT_HEARTBEAT_DEFAULT_TIMEOUT, 60000).
+-define(RT_HEARTBEAT_DEFAULT_INTERVAL, 60000).
+-define(RESET_CONSUMER_LATENCY_TIMEOUT, 60000).
+
 -type(ip_addr_str() :: string()).
 -type(ip_portnum() :: non_neg_integer()).
 -type(repl_addr() :: {ip_addr_str(), ip_portnum()}).
@@ -130,3 +137,13 @@
 -define(LONG_TIMEOUT, 120*1000).
 
 -define(V2REPLDEP, "DEPRECATION NOTICE: The replication protocol you are currently using in this cluster has been deprecated and will be unsupported and removed some time after the Riak Enterprise 2.1 release. Please upgrade to the latest replication protocol as soon as possible. If you need assistance migrating contact Basho Client Services or follow the instructions in our documentation ( http://docs.basho.com/riakee/latest/cookbooks/Multi-Data-Center-Replication-UpgradeV2toV3/ ).").
+
+-record(distribution_collector,
+{
+    timestamp = os:timestamp(),
+    number_data_points = 0,
+    aggregate_values = 0,
+    aggregate_values_sqrd = 0,
+    max = 0
+}).
+

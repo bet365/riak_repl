@@ -48,6 +48,7 @@ coord_for_cluster(Cluster) ->
 
 %% @private
 init(_) ->
+    riak_repl2_fscoordinator:register_remote_locator(),
     {ok, {{one_for_one, 10, 5}, []}}.
 
 make_remote(Remote) ->

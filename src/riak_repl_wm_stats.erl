@@ -98,7 +98,7 @@ get_stats() ->
     Clients = riak_repl_console:client_stats(),
     Coord = riak_repl_console:coordinator_stats(),
     CoordSrv = riak_repl_console:coordinator_srv_stats(),
-    RTQ = [{realtime_queue_stats, riak_repl2_rtq:status()}],
+    RTQ = [{realtime_queue_stats, riak_repl2_rtq_sup:status()}],
     PGStats = riak_repl2_pg:status(),
 
     Most = lists:append([RTRemotesStatus, FSRemotesStatus, Stats1, CMStats,

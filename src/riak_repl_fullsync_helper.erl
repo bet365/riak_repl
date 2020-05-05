@@ -11,7 +11,7 @@
 %% API
 -export([start_link/1,
          stop/1,
-         make_keylist/3,
+         make_keylist/5,
          diff/4,
          diff_stream/5,
          itr_new/2]).
@@ -21,7 +21,7 @@
          terminate/2, code_change/3]).
 
 %% HOFs
--export([keylist_fold/3]).
+-export([keylist_fold/3, diff_keys/3]).
 
 -include("riak_repl.hrl").
 
@@ -59,9 +59,9 @@ stop(Pid) ->
 %% Return {ok, Ref} if build starts successfully, then sends
 %% a gen_fsm_compat event {Ref, keylist_built} to the OwnerFsm or
 %% a {Ref, {error, Reason}} event on failures
-make_keylist(Pid, Partition, Filename) ->
-    riak_core_gen_server:call(Pid, {make_keylist, Partition, Filename}, ?LONG_TIMEOUT).
-   
+make_keylist(Pid, Partition, Filename, FullsyncObjectFilter, ObjectHashVersion) ->
+    riak_core_gen_server:call(Pid, {make_keylist, Partition, Filename, FullsyncObjectFilter, ObjectHashVersion}, ?LONG_TIMEOUT).
+
 %% Computes the difference between two keylist sorted files.
 %% Returns {ok, Ref} or {error, Reason}
 %% Differences are sent as {Ref, {merkle_diff, {Bkey, Vclock}}}
@@ -92,7 +92,7 @@ handle_call(stop, _From, State) ->
     _ = file:delete(State#state.filename),
     {stop, normal, ok, State};
 %% request from client of server to write a keylist of hashed key/value to Filename for Partition
-handle_call({make_keylist, Partition, Filename}, From, State) ->
+handle_call({make_keylist, Partition, Filename, FullsyncObjectFilter, ObjectHashVersion}, From, State) ->
     Ref = make_ref(),
     riak_core_gen_server:reply(From, {ok, Ref}),
 
@@ -109,7 +109,7 @@ handle_call({make_keylist, Partition, Filename}, From, State) ->
                     Req = case riak_core_capability:get({riak_repl, bloom_fold}, false) of
                         true ->
                             riak_core_util:make_fold_req(fun ?MODULE:keylist_fold/3,
-                                                         {Self, 0, 0},
+                                                         {Self, 0, 0, FullsyncObjectFilter, ObjectHashVersion},
                                                          false,
                                                          [{iterator_refresh,
                                                                  true}]);
@@ -133,7 +133,7 @@ handle_call({make_keylist, Partition, Filename}, From, State) ->
                                     %% total is 0, sorry
                                     riak_core_gen_server:cast(Self,
                                                               {kl_finish, 0});
-                                {FoldRef, {Self, _, Total}} ->
+                                {FoldRef, {Self, _Count, Total, _FullsyncObjectFilter, _ObjectHashVersion}} ->
                                     riak_core_gen_server:cast(Self,
                                                               {kl_finish, Total});
                                 {'DOWN', MonRef, process, VNodePid, Reason} ->
@@ -147,7 +147,7 @@ handle_call({make_keylist, Partition, Filename}, From, State) ->
                     end
             end,
             FolderPid = spawn_link(Worker),
-            NewState = State#state{ref = Ref, 
+            NewState = State#state{ref = Ref,
                                    folder_pid = FolderPid,
                                    filename = Filename,
                                    kl_fp = FP},
@@ -175,7 +175,7 @@ handle_call({diff, Partition, RemoteFilename, LocalFilename, Count, NeedVClocks}
             OwnerNode = riak_core_ring:index_owner(Ring, Partition),
             case lists:member(OwnerNode, riak_core_node_watcher:nodes(riak_kv)) of
                 true ->
-                    DiffState = diff_keys(itr_new(RemoteFile, remote_reads),
+                    DiffState = ?MODULE:diff_keys(itr_new(RemoteFile, remote_reads),
                                         itr_new(LocalFile, local_reads),
                                         #diff_state{fsm = State#state.owner_fsm,
                                                     count=Count,
@@ -184,7 +184,7 @@ handle_call({diff, Partition, RemoteFilename, LocalFilename, Count, NeedVClocks}
                                                     need_vclocks = NeedVClocks,
                                                     preflist = {Partition, OwnerNode}}),
                     lager:info("Partition ~p: ~p remote / ~p local: ~p missing, ~p differences.",
-                                        [Partition, 
+                                        [Partition,
                                         erlang:get(remote_reads),
                                         erlang:get(local_reads),
                                         DiffState#diff_state.missing,
@@ -282,12 +282,16 @@ unpack_key(K) ->
 
 %% Hash an object, making sure the vclock is in sorted order
 %% as it varies depending on whether it has been pruned or not
-hash_object(B,K,RObjBin) ->
-    RObj = riak_object:from_binary(B,K,RObjBin),
+hash_object(RObj) ->
+    hash_object(RObj, 0).
+hash_object(RObj, 0) ->
     Vclock = riak_object:vclock(RObj),
     UpdObj = riak_object:set_vclock(RObj, lists:sort(Vclock)),
     %% can't use the new binary version yet
-    erlang:phash2(term_to_binary(UpdObj)).
+    erlang:phash2(term_to_binary(UpdObj));
+hash_object(RObj, 1) ->
+    SortedVclock = lists:sort(riak_object:vclock(RObj)),
+    erlang:phash2(term_to_binary(SortedVclock)).
 
 itr_new(File, Tag) ->
     erlang:put(Tag, 0),
@@ -394,27 +398,28 @@ missing_key(PBKey, DiffState) ->
 %% modules are not the same.
 %%
 %% See http://www.javalimit.com/2010/05/passing-funs-to-other-erlang-nodes.html
-keylist_fold({B,Key}=K, V, {MPid, Count, Total}) ->
+keylist_fold({B,Key}=K, V, {MPid, Count, Total, FullsyncObjectFilter, ObjectHashVersion}) ->
     try
-        H = hash_object(B,Key,V),
-        Bin = term_to_binary({pack_key(K), H}),
-        %% write key/value hash to file
-        riak_core_gen_server:cast(MPid, {keylist, Bin}),
-        case Count of
-            100 ->
-                %% send keylist_ack to "self" every 100 key/value hashes
-                ok = riak_core_gen_server:call(MPid, keylist_ack, infinity),
-                {MPid, 0, Total+1};
-            _ ->
-                {MPid, Count+1, Total+1}
-        end
+        RObj = riak_object:from_binary(B,Key,V),
+        Filtered = case riak_repl2_object_filter:fullsync_filter(FullsyncObjectFilter, RObj) of
+                       true ->
+                           true;
+                       false ->
+                            H = hash_object(RObj),
+                            Bin = term_to_binary({pack_key(K), H}),
+                            %% write key/value hash to file
+                            riak_core_gen_server:cast(MPid, {keylist, Bin}),
+                            false
+                    end,
+        check_keylist_ack({Count, MPid, Total, FullsyncObjectFilter, ObjectHashVersion}, Filtered)
     catch _:_ ->
-            {MPid, Count, Total}
+            {MPid, Count, Total, FullsyncObjectFilter, ObjectHashVersion}
     end;
 %% legacy support for the 2-tuple accumulator in 1.2.0 and earlier
 keylist_fold({B,Key}=K, V, {MPid, Count}) ->
     try
-        H = hash_object(B,Key,V),
+        RObj = riak_object:from_binary(B,Key,V),
+        H = hash_object(RObj),
         Bin = term_to_binary({pack_key(K), H}),
         %% write key/value hash to file
         riak_core_gen_server:cast(MPid, {keylist, Bin}),
@@ -428,4 +433,19 @@ keylist_fold({B,Key}=K, V, {MPid, Count}) ->
         end
     catch _:_ ->
             {MPid, Count}
+    end.
+
+check_keylist_ack({Count, MPid, Total1, FullsyncObjectFilter, ObjectHashVersion}, Filtered) ->
+    Total2 = case Filtered of
+                 true -> Total1;
+                 false -> Total1 +1
+             end,
+
+    case Count of
+        100 ->
+            %% send keylist_ack to "self" every 100 key/value hashes
+            ok = riak_core_gen_server:call(MPid, keylist_ack, infinity),
+            {MPid, 0, Total2, FullsyncObjectFilter, ObjectHashVersion};
+        _ ->
+            {MPid, Count+1, Total2, FullsyncObjectFilter, ObjectHashVersion}
     end.

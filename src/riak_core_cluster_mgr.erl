@@ -54,7 +54,6 @@
 
 -define(SERVER, ?CLUSTER_MANAGER_SERVER).
 -define(MAX_CONS, 20).
--define(CLUSTER_POLLING_INTERVAL, 10 * 1000).
 -define(GC_INTERVAL, infinity).
 -define(PROXY_CALL_TIMEOUT, 30 * 1000).
 
@@ -73,8 +72,8 @@
                 all_member_fun = fun(_Addr) -> [] end,             % return members of local cluster
                 restore_targets_fun = fun() -> [] end,         % returns persisted cluster targets
                 save_members_fun = fun(_C,_M) -> ok end,       % persists remote cluster members
-                balancer_fun = fun(Addrs) -> Addrs end,        % registered balancer function
-                clusters = orddict:new() :: orddict:orddict()  % resolved clusters by name
+                clusters = orddict:new() :: orddict:orddict(),  % resolved clusters by name
+                polling_interval
                }).
 
 -export([start_link/0,
@@ -89,7 +88,8 @@
          add_remote_cluster/1, remove_remote_cluster/1,
          get_known_clusters/0,
          get_connections/0,
-         get_ipaddrs_of_cluster/1,
+         get_unshuffled_ipaddrs_of_cluster/1,
+         get_ipaddrs_of_cluster_single/1,
          set_gc_interval/1,
          stop/0,
          connect_to_clusters/0,
@@ -102,8 +102,7 @@
 
 %% internal functions
 -export([%ctrlService/5, ctrlServiceProcess/5,
-         round_robin_balancer/1, cluster_mgr_sites_fun/0,
-         get_my_members/1, get_all_members/1]).
+         cluster_mgr_sites_fun/0, get_my_members/1, get_all_members/1]).
 
 -export([ensure_valid_ip_addresses/1]).
 
@@ -180,8 +179,15 @@ get_my_members(MyAddr) ->
 get_all_members(MyAddr) ->
     gen_server:call(?SERVER, {get_all_members, MyAddr}, infinity).
 
-%% @doc Return a list of the known IP addresses of all nodes in the remote cluster.
-get_ipaddrs_of_cluster(ClusterName) ->
+get_unshuffled_ipaddrs_of_cluster(ClusterName) ->
+    case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
+        {ok, Reply} ->
+            Reply;
+        _Reply ->
+            []
+    end.
+
+get_ipaddrs_of_cluster_single(ClusterName) ->
     case gen_server:call(?SERVER, {get_known_ipaddrs_of_cluster, {name,ClusterName}}, infinity) of
         {ok, Reply} ->
             shuffle_remote_ipaddrs(Reply);
@@ -215,12 +221,12 @@ init(Defaults) ->
             ok
     end,
     %% schedule a timer to poll remote clusters occasionaly
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
-    BalancerFun = fun(Addr) -> round_robin_balancer(Addr) end,
+    ClusterPollingInterval = app_helper:get_env(riak_repl, realtime_sink_cluster_polling_interval, 10),
+    lager:debug("cluster polling interval: ~p", [ClusterPollingInterval*1000]),
+    erlang:send_after(ClusterPollingInterval*1000, self(), poll_clusters_timer),
     MeNode = node(),
     State = register_defaults(Defaults, #state{
-                is_leader = false,
-                balancer_fun = BalancerFun}),
+                is_leader = false, polling_interval = ClusterPollingInterval*1000}),
 
     %% Schedule a delayed connection to know clusters
     schedule_cluster_connections(),
@@ -288,30 +294,15 @@ handle_call(get_connections, _From, State) ->
             NoLeaderResult = {ok, []},
             proxy_call(get_connections, NoLeaderResult, State)
     end;
-    
+
 
 %% Return possible IP addrs of nodes on the named remote cluster.
 %% If a leader has not been elected yet, return an empty list.
-%% This list will get rotated or randomized depending on the balancer
-%% function installed. Every time we poll the remote cluster or it
-%% pushes an update, the list will get reset to whatever the remote
-%% thinks is the best order. The first call here will return the most
-%% recently updated list and then it will rebalance and save for next time.
-%% So, if no updates come from the remote, we'll just keep cycling through
-%% the list of known members according to the balancer fun.
 handle_call({get_known_ipaddrs_of_cluster, {name, ClusterName}}, _From, State) ->
     case State#state.is_leader of
         true ->
-            %% Call a balancer function that will rotate or randomize
-            %% the list. Return original members and save reblanced ones
-            %% for next iteration.
             Members = members_of_cluster(ClusterName, State),
-            BalancerFun = State#state.balancer_fun,
-            RebalancedMembers = BalancerFun(Members),
-            lager:debug("Rebalancer: ~p -> ~p", [Members, RebalancedMembers]),
-            {reply, {ok, Members},
-             State#state{clusters=add_ips_to_cluster(ClusterName, RebalancedMembers,
-                                                     State#state.clusters)}};
+            {reply, {ok, Members}, State};
         false ->
             NoLeaderResult = {ok, []},
             proxy_call({get_known_ipaddrs_of_cluster, {name, ClusterName}},
@@ -323,10 +314,8 @@ handle_cast({set_leader_node, LeaderNode}, State) ->
     State2 = State#state{leader_node = LeaderNode},
     case node() of
         LeaderNode ->
-            %% oh crap, it's me!
             {noreply, become_leader(State2, LeaderNode)};
         _ ->
-            %% not me.
             {noreply, become_proxy(State2, LeaderNode)}
     end;
 
@@ -403,13 +392,13 @@ handle_cast(_Unhandled, _State) ->
     {error, unhandled}. %% this will crash the server
 
 %% it is time to poll all clusters and get updated member lists
-handle_info(poll_clusters_timer, State) when State#state.is_leader == true ->
+handle_info(poll_clusters_timer, State=#state{polling_interval = PI}) when State#state.is_leader == true ->
     Connections = riak_core_cluster_conn_sup:connections(),
     _ = [Pid ! {self(), poll_cluster} || {_Remote, Pid} <- Connections],
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
+    erlang:send_after(PI, self(), poll_clusters_timer),
     {noreply, State};
-handle_info(poll_clusters_timer, State) ->
-    erlang:send_after(?CLUSTER_POLLING_INTERVAL, self(), poll_clusters_timer),
+handle_info(poll_clusters_timer, State=#state{polling_interval = PI}) ->
+    erlang:send_after(PI, self(), poll_clusters_timer),
     {noreply, State};
 
 %% Remove old clusters that no longer have any IP addresses associated with them.
@@ -617,14 +606,8 @@ remove_remote(RemoteName, State) ->
             State#state{clusters = UpdatedClusters}
     end.
 
-%% Simple Round Robin Balancer moves head to tail each time called.
-round_robin_balancer([]) ->
-    [];
-round_robin_balancer([Addr|Addrs]) ->
-    Addrs ++ [Addr].
-
 %% Convert an inet:address to a string if needed.
-string_of_ip(IP) when is_tuple(IP) ->    
+string_of_ip(IP) when is_tuple(IP) ->
     inet_parse:ntoa(IP);
 string_of_ip(IP) ->
     IP.
@@ -687,10 +670,10 @@ remove_ips_from_all_clusters(Addrs, Clusters) ->
                 Clusters).
 
 %% Add Members to Name'd cluster. Returns revised clusters orddict.
-add_ips_to_cluster(Name, RebalancedMembers, Clusters) ->
+add_ips_to_cluster(Name, Members, Clusters) ->
     orddict:store(Name,
                   #cluster{name = Name,
-                           members = RebalancedMembers,
+                           members = Members,
                            last_conn = os:timestamp()},
                   Clusters).
 
@@ -741,7 +724,7 @@ cluster_mgr_sites_fun() ->
     %% get cluster names from cluster manager
     {ok, Ring} = riak_core_ring_manager:get_my_ring(),
     Clusters = riak_repl_ring:get_clusters(Ring),
-    [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].    
+    [{?CLUSTER_NAME_LOCATOR_TYPE, Name} || {Name, _Addrs} <- Clusters].
 
 %% @doc If the current leader, connect to all clusters that have been
 %%      currently persisted in the ring.
@@ -750,12 +733,13 @@ connect_to_persisted_clusters(State) ->
         true ->
             Fun = State#state.restore_targets_fun,
             ClusterTargets = Fun(),
-            lager:debug("Cluster Manager will connect to clusters: ~p", 
+            lager:debug("Cluster Manager will connect to clusters: ~p",
                         [ClusterTargets]),
             connect_to_targets(ClusterTargets);
         _ ->
             ok
     end.
+
 
 shuffle_with_seed(List, Seed={_,_,_}) ->
     _ = rand:seed(exrop, Seed),
@@ -764,9 +748,8 @@ shuffle_with_seed(List, Seed) ->
     <<_:10,S1:50,S2:50,S3:50>> = crypto:hash(sha, term_to_binary(Seed)),
     shuffle_with_seed(List, {S1,S2,S3}).
 
-
 shuffle_remote_ipaddrs([]) ->
-  {ok, []};
+    {ok, []};
 shuffle_remote_ipaddrs(RemoteUnsorted) ->
     {ok, MyRing} = riak_core_ring_manager:get_my_ring(),
     SortedNodes = lists:sort(riak_core_ring:all_members(MyRing)),
@@ -787,3 +770,4 @@ shuffle_remote_ipaddrs(RemoteUnsorted) ->
         false ->
             {ok, shuffle_with_seed(lists:sort(RemoteUnsorted), node())}
     end.
+

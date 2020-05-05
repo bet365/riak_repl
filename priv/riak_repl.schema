@@ -169,3 +169,34 @@
     {commented, "1m"}
 ]}.
 
+
+%% @doc Each time the repl ring is updated, the rtsource_conn_mgr a delayed rebalance is triggered
+%% This dictates the maximum amount of time rtsource_conn_mgr is delayed before the reblance occurs
+{mapping, "mdc.realtime_connection_rebalance_max_delay_secs", "riak_repl.realtime_connection_rebalance_max_delay_secs", [
+    {datatype, {duration, s}},
+    {default, "60s"}
+]}.
+
+%% @doc cluster polling interval to retrieve sink ip addresses for nodes that are up
+{mapping, "mdc.realtime_sink_cluster_polling_interval", "riak_repl.realtime_sink_cluster_polling_interval", [
+    {datatype, {duration, s}},
+    {default, "10s"}
+]}.
+
+%% @doc riak_repl2_rtsource_conn_data_mgr polling interval to riak_core_capability module to find out when all nodes are upgraded to 2.2.7
+{mapping, "mdc.realtime_core_capability_polling_interval", "riak_repl.realtime_core_capability_polling_interval", [
+    {datatype, {duration, s}},
+    {default, "60s"}
+]}.
+
+%% @doc realtime sink replication minimum workers for poolboy
+{mapping, "mdc.rtsink_min_workers", "riak_repl.rtsink_min_workers", [
+    {datatype, integer},
+    {default, 5}
+]}.
+
+%% @doc realtime sink replication maximum works for poolboy
+{mapping, "mdc.rtsink_max_workers", "riak_repl.rtsink_max_workers", [
+    {datatype, integer},
+    {default, 100}
+]}.

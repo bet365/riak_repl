@@ -372,7 +372,7 @@ handle_incoming_data({ok, undefined, Cont}, State) ->
 handle_incoming_data({ok, heartbeat, Cont}, State) ->
     #state{hb_timeout_tref = HBTRef, hb_sent_q = HBSentQ} = State,
     {{value, HBSent}, HBSentQ2} = queue:out(HBSentQ),
-    HBRTT = timer:now_diff(now(), HBSent) div 1000,
+    HBRTT = timer:now_diff(os:timestamp(), HBSent) div 1000,
     _ = cancel_timer(HBTRef),
     State2 = State#state{hb_sent_q = HBSentQ2, hb_timeout_tref = undefined, hb_timeout_ref = undefined, hb_rtt = HBRTT},
     recv(Cont, schedule_heartbeat(State2));
@@ -499,7 +499,7 @@ send_heartbeat(State) ->
     HBIOL = riak_repl2_rtframe:encode(heartbeat, undefined),
     case T:send(S, HBIOL) of
         ok ->
-            Now = now(),
+            Now = os:timestamp(),
             Ref = make_ref(),
             HBTimeout = get_heartbeat_timeout(State#state.remote),
             TRef = erlang:send_after(HBTimeout, self(), {heartbeat_timeout, Ref}),

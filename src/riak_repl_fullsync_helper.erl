@@ -405,7 +405,7 @@ keylist_fold({B,Key}=K, V, {MPid, Count, Total, FullsyncObjectFilter, ObjectHash
                        true ->
                            true;
                        false ->
-                            H = hash_object(RObj),
+                            H = hash_object(RObj, ObjectHashVersion),
                             Bin = term_to_binary({pack_key(K), H}),
                             %% write key/value hash to file
                             riak_core_gen_server:cast(MPid, {keylist, Bin}),

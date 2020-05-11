@@ -127,8 +127,7 @@ do_repl_put({Object, Meta}) ->
     case repl_helper_recv(Object) of
         ok ->
             ReqId = erlang:phash2({self(), os:timestamp()}),
-            %% {w, W}, {dw, DW} -> do not set these, use the bucket props
-            Opts = [{timeout, ?REPL_FSM_TIMEOUT}, asis, disable_hooks, {update_last_modified, false}],
+            Opts = [{timeout, ?REPL_FSM_TIMEOUT}, asis, disable_hooks, {update_last_modified, false}, {w, all}, {dw, all}],
             From = {raw, ReqId, self()},
 
             %% can be {ok, Pid} | {error, overload} (if its the error its sent back to the client anyway)

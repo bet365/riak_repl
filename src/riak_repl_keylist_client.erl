@@ -95,6 +95,7 @@ wait_for_fullsync(Command, State)
     Remaining = length(Partitions),
     lager:info("Full-sync with site ~p starting; ~p partitions.",
                           [State#state.sitename, Remaining]),
+    timer:sleep(2000),
     gen_fsm_compat:send_event(self(), continue),
     {next_state, request_partition, State#state{partitions=Partitions}};
 wait_for_fullsync({start_fullsync, Partitions}, State) ->
@@ -310,10 +311,8 @@ handle_sync_event(status, _From, StateName, State) ->
             [
                 {fullsync, length(Partitions), left},
                 {partition, State#state.partition},
-                {partition_start,
-                    riak_repl_util:elapsed_secs(State#state.partition_start)},
-                {stage_start,
-                    riak_repl_util:elapsed_secs(State#state.stage_start)}
+                {partition_start, elapsed_secs_undefined(State#state.partition_start)},
+                {stage_start, elapsed_secs_undefined(State#state.stage_start)}
             ]
     end,
     {reply, Res, StateName, State};
@@ -345,3 +344,8 @@ command_verb(cancel_fullsync) ->
     "cancelled";
 command_verb(pause_fullsync) ->
     "paused".
+
+elapsed_secs_undefined(undefined) ->
+    undefined;
+elapsed_secs_undefined(StartTime) ->
+    riak_repl_util:elapsed_secs(StartTime).

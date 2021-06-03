@@ -224,10 +224,12 @@ connecting(_, _From, _State) ->
 
 %% Async message handling for the `waiting_for_cluster_name' state
 waiting_for_cluster_name({cluster_name, NewName}, State=#state{name=undefined}) ->
+    lager:info("waiting_for_cluster_name {cluster_name, ~p} msg received~n", [NewName]),
     UpdState = State#state{name=NewName, previous_name="undefined"},
     _ = request_member_ips(UpdState),
     {next_state, waiting_for_cluster_members, UpdState, ?CONNECTION_SETUP_TIMEOUT};
 waiting_for_cluster_name({cluster_name, NewName}, State=#state{name=Name}) ->
+    lager:info("waiting_for_cluster_name 2 {cluster_name, ~p} msg received~n", [NewName]),
     UpdState = State#state{name=NewName, previous_name=Name},
     _ = request_member_ips(UpdState),
     {next_state, waiting_for_cluster_members, UpdState, ?CONNECTION_SETUP_TIMEOUT};
@@ -242,6 +244,7 @@ waiting_for_cluster_name(_, _From, _State) ->
 
 %% Async message handling for the `waiting_for_cluster_members' state
 waiting_for_cluster_members({cluster_members, NewMembers}, State = #state{ proto_version={1,0} }) ->
+    lager:info("waiting_for_cluster_members {cluster_members} ~n"),
     #state{address=Addr,
            name=Name,
            previous_name=PreviousName,
@@ -288,6 +291,7 @@ waiting_for_cluster_members(Other, _From, State) ->
 
 %% Async message handling for the `connected' state
 connected(poll_cluster, State) ->
+    lager:info("Connected State pollcluster fsm msg"),
     _ = request_cluster_name(State),
     {next_state, waiting_for_cluster_name, State};
 connected(_, State) ->
@@ -323,6 +327,7 @@ handle_sync_event(_Event, _From, StateName, State) ->
 handle_info({TransOK, Socket, Name},
             waiting_for_cluster_name,
             State=#state{socket=Socket, transport_msgs = {TransOK, _, _}}) ->
+    lager:info("HandleInfo 1"),
     gen_fsm_compat:send_event(self(), {cluster_name, binary_to_term(Name)}),
     Transport = State#state.transport,
     _ = Transport:setopts(Socket, [{active, once}]),
@@ -330,6 +335,7 @@ handle_info({TransOK, Socket, Name},
 handle_info({TransOK, Socket, Members},
             waiting_for_cluster_members,
             State=#state{socket=Socket, transport_msgs = {TransOK, _, _}, proto_version={1,0}}) ->
+    lager:info("HandleInfo 2"),
     Transport = State#state.transport,
     gen_fsm_compat:send_event(self(), {cluster_members, binary_to_term(Members)}),
     _ = Transport:setopts(Socket, [{active, once}]),
@@ -337,6 +343,7 @@ handle_info({TransOK, Socket, Members},
 handle_info({TransOK, Socket, Members},
             waiting_for_cluster_members,
             State=#state{socket=Socket, transport_msgs = {TransOK, _, _}}) ->
+    lager:info("HandleInfo 3"),
     Transport = State#state.transport,
     gen_fsm_compat:send_event(self(), {all_cluster_members, binary_to_term(Members)}),
     _ = Transport:setopts(Socket, [{active, once}]),
@@ -347,6 +354,7 @@ handle_info({TransOK, Socket, Data},
                          name=Name,
                          remote=Remote,
                          socket=Socket, transport_msgs = {TransOK, _, _}}) ->
+    lager:info("HandleInfo 5"),
     {cluster_members_changed, Members} = binary_to_term(Data),
     ClusterUpdMsg = {cluster_updated, Name, Name, Members, Addr, Remote},
     gen_server:cast(?CLUSTER_MANAGER_SERVER, ClusterUpdMsg),
@@ -358,17 +366,20 @@ handle_info({TransError, Socket, Error},
             State=#state{remote=Remote,
                          socket=Socket,
                          transport_msgs = {_, _, TransError}}) ->
+    lager:info("HandleInfo 6"),
     _ = lager:error("cluster_conn: connection ~p failed in state ~s because ~p", [Remote, StateName, Error]),
     {stop, Error, State};
 handle_info({TransClosed, Socket} = Msg,
             _StateName,
             State=#state{socket=Socket, transport_msgs = {_, TransClosed, _}}) ->
+    lager:info("HandleInfo 7"),
     % if the connection spuriously closes, it is more likley something is
     % wrong, like the remote node has gone down, than something is normal.
     % thus, we exit abnormally and let the supervisor restart a new us.
     ok = lager:debug("Stopping because it looks like the connect closed: ~p", [Msg]),
     {stop, connection_closed, State};
 handle_info({_ClusterManager, poll_cluster}, StateName, State) ->
+    lager:info("Poll cluster msg received with StateName: ~p~n", [StateName]),
     gen_fsm_compat:send_event(self(), poll_cluster),
     {next_state, StateName, State};
 handle_info(Msg, StateName, State) ->
@@ -398,6 +409,7 @@ request_cluster_name(#state{socket=Socket, transport=Transport}) ->
 request_member_ips(#state{mode=test}) ->
     ok;
 request_member_ips(#state{socket=Socket, transport=Transport, proto_version={1,0}}) ->
+    lager:info("Request Ips about to send back peername~n"),
     Transport:send(Socket, ?CTRL_ASK_MEMBERS),
     %% get the IP we think we've connected to
     {ok, {PeerIP, PeerPort}} = Transport:peername(Socket),

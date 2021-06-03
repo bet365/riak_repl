@@ -259,6 +259,7 @@ connect_failed(_ClientProto, Reason, SourcePid) ->
 
 %% @hidden
 init(Cluster) ->
+    lager:info("FSCOORDINATOR INIT triggered"),
     process_flag(trap_exit, true),
     TcpOptions = [
         {keepalive, true},
@@ -267,6 +268,7 @@ init(Cluster) ->
         {active, false}
     ],
     ClientSpec = {{fs_coordinate, [{1,0}]}, {TcpOptions, ?MODULE, self()}},
+    lager:info("Calling connection_mgr:connect with cluster: ~p~n", [Cluster]),
     case riak_core_connection_mgr:connect({fs_repl, Cluster}, ClientSpec) of
         {ok, Ref} ->
             _ = riak_repl_util:schedule_cluster_fullsync(Cluster),
@@ -696,6 +698,7 @@ handle_socket_msg({location_down, Partition}, #state{whereis_waiting=Waiting} = 
             start_up_reqs(State2)
     end;
 handle_socket_msg({location_down, Partition, _Node}, #state{whereis_waiting=Waiting} = State) ->
+    lager:info("location_down for partition: ~p and state: ~p~n", [Partition, State]),
     case lists:keytake(Partition, #partition_info.index, Waiting) of
         false ->
             State;

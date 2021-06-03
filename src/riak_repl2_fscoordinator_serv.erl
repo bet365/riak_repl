@@ -169,6 +169,7 @@ handle_protocol_msg({whereis, Partition, ConnIP, ConnPort}, State) ->
     {ok, NormIP} = riak_repl_util:normalize_ip(ConnIP),
     %% apply the NAT map
     RealIP = riak_repl2_ip:maybe_apply_nat_map(NormIP, ConnPort, Map),
+    lager:info("Received whereis for Partition: ~p the node it belongs to is: ~p calling reserve", [Partition, Node]),
     Reply = case riak_repl2_fs_node_reserver:reserve(Partition) of
         ok ->
             case get_node_ip_port(Node, RealIP) of
@@ -215,6 +216,7 @@ handle_protocol_msg({whereis, Partition, ConnIP, ConnPort}, State) ->
                 false -> {location_busy, Partition, Node}
             end;
         down ->
+            lager:info("Reserve call marked node as down, anyacompact: ~p~n", [AnyaCompat]),
             case AnyaCompat of
                 true -> {location_down, Partition};
                 false -> {location_down, Partition, Node}

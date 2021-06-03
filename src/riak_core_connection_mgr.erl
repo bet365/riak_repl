@@ -189,9 +189,11 @@ apply_locator(Name, Strategy) ->
 %% is done here.
 %%
 connect(Target, ClientSpec, Strategy) ->
+    lager:info("connect1"),
     gen_server:call(?SERVER, {connect, Target, ClientSpec, Strategy}).
 
 connect(Target, ClientSpec) ->
+    lager:info("connect 2"),
     gen_server:call(?SERVER, {connect, Target, ClientSpec, default}).
 
 %% @doc Disconnect from the remote side.
@@ -507,6 +509,7 @@ start_request(#req{state=cancelled}, State) ->
     State;
 start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strategy},
               State) ->
+    lager:info("Target to find adress: ~p~n", [Target]),
     case locate_endpoints(Target, Strategy, State#state.locators) of
         {ok, []} ->
             %% locators provided no addresses
@@ -517,7 +520,7 @@ start_request(Req = #req{ref=Ref, target=Target, spec=ClientSpec, strategy=Strat
             %% schedule a retry and exit
             schedule_retry(Interval, Ref, State);
         {ok, Addrs} ->
-            lager:debug("Connection Manager located endpoints: ~p", [Addrs]),
+            lager:info("Connection Manager located endpoints: ~p", [Addrs]),
             AllEps = update_endpoints(Addrs, State#state.endpoints),
             TryAddrs = filter_blacklisted_endpoints(Addrs, AllEps),
 
@@ -580,8 +583,8 @@ connection_helper(Ref, Protocol, Strategy, [{Addr, Primary}|Addrs], ConnectedToP
 
     case gen_server:call(?SERVER, {should_try_endpoint, Ref, Addr, ConnectedToPrimary}) of
         true ->
-            lager:debug("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
-            lager:debug("Attempting riak_core_connection:sync_connect/2"),
+            lager:info("Trying connection to: ~p at ~p", [ProtocolId, string_of_ipport(Addr)]),
+            lager:info("Attempting riak_core_connection:sync_connect/2"),
 
             case riak_core_connection:sync_connect(Addr, Primary, Protocol) of
                 ok ->

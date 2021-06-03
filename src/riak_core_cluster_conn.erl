@@ -244,7 +244,7 @@ waiting_for_cluster_name(_, _From, _State) ->
 
 %% Async message handling for the `waiting_for_cluster_members' state
 waiting_for_cluster_members({cluster_members, NewMembers}, State = #state{ proto_version={1,0} }) ->
-    lager:info("waiting_for_cluster_members {cluster_members} ~n"),
+    lager:info("waiting_for_cluster_members {cluster_members} newmembers: ~p~n", [NewMembers]),
     #state{address=Addr,
            name=Name,
            previous_name=PreviousName,
@@ -413,6 +413,7 @@ request_member_ips(#state{socket=Socket, transport=Transport, proto_version={1,0
     Transport:send(Socket, ?CTRL_ASK_MEMBERS),
     %% get the IP we think we've connected to
     {ok, {PeerIP, PeerPort}} = Transport:peername(Socket),
+    lager:info("Request Ips about to send back PeerIp: ~p PeerPort: ~p~n", [PeerIP, PeerPort]),
     %% make it a string
     PeerIPStr = inet_parse:ntoa(PeerIP),
     Transport:send(Socket, term_to_binary({PeerIPStr, PeerPort}));

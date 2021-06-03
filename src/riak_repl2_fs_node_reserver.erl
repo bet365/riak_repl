@@ -89,15 +89,20 @@ handle_call({reserve, Partition}, _From, State) ->
     Max = app_helper:get_env(riak_repl, max_fssink_node, ?DEFAULT_MAX_SINKS_NODE),
     Running = length(Kids),
     Reserved = length(State#state.reservations),
-    if
-        (Running + Reserved) < Max ->
-            Tref = erlang:send_after(?RESERVATION_TIMEOUT, self(), {reservation_expired, Partition}),
-            Reserved2 = [{Partition, Tref} | State#state.reservations],
-            {reply, ok, State#state{reservations = Reserved2}};
-        true ->
-            lager:info("Node busy for partition ~p. running=~p reserved=~p max=~p",
+    case riak_core_node_watcher:node_status() of
+        maint ->
+            {reply, down, State};
+        _ ->
+            if
+                (Running + Reserved) < Max ->
+                    Tref = erlang:send_after(?RESERVATION_TIMEOUT, self(), {reservation_expired, Partition}),
+                    Reserved2 = [{Partition, Tref} | State#state.reservations],
+                    {reply, ok, State#state{reservations = Reserved2}};
+                true ->
+                    lager:info("Node busy for partition ~p. running=~p reserved=~p max=~p",
                         [Partition, Running, Reserved, Max]),
-            {reply, busy, State}
+                    {reply, busy, State}
+            end
     end;
 
 %% @hidden

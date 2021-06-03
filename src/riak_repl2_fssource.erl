@@ -98,6 +98,7 @@ init([Partition, IP, Owner]) ->
     case riak_repl_util:maybe_get_vnode_lock(Partition) of
         ok ->
             %% got the lock, or ignored it.
+            lager:info("calling connect"),
             case connect(IP, SupportedStrategy, Partition) of
                 {error, Reason} ->
                     {stop, Reason};
@@ -380,6 +381,7 @@ connect(IP, Strategy, Partition) ->
     %% 3,0 support for typed buckets
     ClientSpec = {{fullsync,[{3,0}, {2,0}, {1,1}]}, {TcpOptions, ?MODULE, self()}},
 
+    lager:info("fssource IP: ~p Strat; ~p and Partition: ~p calling connect~n", [IP, Strategy, Partition]),
     case riak_core_connection_mgr:connect({identity, IP}, ClientSpec) of
         {ok, Ref} ->
             {ok, #state{strategy = Strategy, ip = IP,

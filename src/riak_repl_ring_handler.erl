@@ -124,7 +124,7 @@ update_leader(Ring) ->
     AllNodes = riak_core_ring:all_members(Ring),
     MaintNodes = riak_core_node_watcher:maintenance_nodes(),
     lager:info("Repl Ring Update leader, AllNodes: ~p MaintNodes: ~p~n", [AllNodes, MaintNodes]),
-    riak_repl2_leader:set_candidates(AllNodes, MaintNodes),
+    riak_repl2_leader:set_candidates(AllNodes -- MaintNodes, MaintNodes),
     case riak_repl_ring:get_repl_config(Ring) of
         undefined ->
             ok;

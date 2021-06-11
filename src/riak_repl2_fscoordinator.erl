@@ -852,26 +852,31 @@ node_available(PartitionInfo, Waiting) ->
     Owners = riak_core_ring:all_owners(Ring),
     LocalNode = proplists:get_value(Partition, Owners),
     Max = app_helper:get_env(riak_repl, max_fssource_node, ?DEFAULT_SOURCE_PER_NODE),
-    try riak_repl2_fssource_sup:enabled(LocalNode) of
-        RunningList ->
-            PartsSameNode = [Part || {Part, PNode} <- Owners, PNode =:= LocalNode],
-            PartsWaiting = [Part || #partition_info{index = Part} <- Waiting, lists:member(Part, PartsSameNode)],
-            if
-                ( length(PartsWaiting) + length(RunningList) ) < Max ->
-                    case proplists:get_value(Partition, RunningList) of
-                        undefined ->
-                            true;
-                        _ ->
-                            false
-                    end;
-                true ->
-                    false
-            end
-    catch
-        exit:{noproc, _} ->
+    case lists:member(LocalNode, riak_core_node_watcher:maintenance_nodes()) of
+        true ->
             skip;
-        exit:{{nodedown, _}, _} ->
-            skip
+        false ->
+            try riak_repl2_fssource_sup:enabled(LocalNode) of
+                RunningList ->
+                    PartsSameNode = [Part || {Part, PNode} <- Owners, PNode =:= LocalNode],
+                    PartsWaiting = [Part || #partition_info{index = Part} <- Waiting, lists:member(Part, PartsSameNode)],
+                    if
+                        ( length(PartsWaiting) + length(RunningList) ) < Max ->
+                            case proplists:get_value(Partition, RunningList) of
+                                undefined ->
+                                    true;
+                                _ ->
+                                    false
+                            end;
+                        true ->
+                            false
+                    end
+            catch
+                exit:{noproc, _} ->
+                    skip;
+                exit:{{nodedown, _}, _} ->
+                    skip
+            end
     end.
 
 remote_node_available(Partition, _Busies) when Partition#partition_info.node =:= undefined ->

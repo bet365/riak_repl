@@ -56,8 +56,7 @@ start_link() ->
 
 %% Set the list of candidate nodes for replication leader
 set_candidates(Candidates, Workers) ->
-    All = Candidates ++ Workers,
-    gen_server:cast(?SERVER, {set_candidates, All, []}).
+    gen_server:cast(?SERVER, {set_candidates, Candidates, Workers}).
 
 %% register a callback for notification of leader changes
 register_notify_fun(Fun) ->
@@ -132,6 +131,8 @@ handle_cast({register_notify_fun, Fun}, State) ->
     {noreply, State#state{notify_funs=State#state.notify_funs ++ [Fun]}};
 
 handle_cast({set_candidates, CandidatesIn, WorkersIn}, State) ->
+    lager:info("set_candidates 2 with state: ~p~n", [State]),
+
     Candidates = lists:sort(CandidatesIn),
     Workers = lists:sort(WorkersIn),
     case {State#state.candidates, State#state.workers} of
@@ -142,6 +143,7 @@ handle_cast({set_candidates, CandidatesIn, WorkersIn}, State) ->
             UpdState2 = UpdState1#state{candidates=Candidates, 
                                         workers=Workers,
                                         leader_node=undefined},
+            lager:info("set_candidates 2 with state: ~p~n", [UpdState2]),
             {noreply, restart_helper(UpdState2)}
     end.
 
@@ -250,6 +252,7 @@ remonitor_leader(LeaderPid, State) ->
 restart_helper(State) ->    
     case State#state.helper_pid of
         undefined -> % no helper running, start one if needed
+            lager:info("Hitting undefined in restart_helper"),
             maybe_start_helper(State);
         {killed, _OldPid} ->
             %% already been killed - waiting for exit
@@ -268,6 +271,7 @@ maybe_start_helper(State) ->
         [] ->
             Pid = undefined;
         Candidates ->
+            lager:info("maybe_start_helper calling _helper start_link with Candidates: ~p and workers: ~p~n", [Candidates, State#state.workers]),
             {ok, Pid} = riak_repl_leader_helper:start_link(?MODULE, self(), Candidates,
                                                            State#state.workers)
     end,

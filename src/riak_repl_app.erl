@@ -195,7 +195,7 @@ prune_old_workdirs(WorkRoot) ->
 %% Get the list of nodes of our ring
 %% This list includes all up-nodes, that host the riak_kv service
 cluster_mgr_member_fun({IP, Port}) ->
-    [ {XIP,XPort} || {_Node,{XIP,XPort}} <- cluster_mgr_members({IP, Port}, riak_core_node_watcher:nodes(riak_kv)),
+    [ {XIP,XPort} || {_Node,{XIP,XPort}} <- cluster_mgr_members({IP, Port}, riak_core_node_watcher:nodes(riak_kv) -- riak_core_node_watcher:maintenance_nodes()),
                                  is_integer(XPort) ].
 
 %% this list includes *all* members of the ring (even those marked down).
@@ -263,10 +263,9 @@ lager:info("fetching IPS, IP: ~p, PORT: ~p Nodes: ~p~n", [IP, Port, Nodes]),
     end.
 
 maybe_retry_ip_rpc(Results, Nodes, BadNodes, Args) ->
-    MaintenanceNodes = riak_core_node_watcher:maintenance_nodes(),
-    Nodes2 = Nodes -- BadNodes -- MaintenanceNodes,
+    Nodes2 = Nodes -- BadNodes,
     Zipped = lists:zip(Results, Nodes2),
-    lager:info("Nodes2: ~p and maintnodes: ~p~n", [Nodes2, MaintenanceNodes]),
+%%    lager:info("Nodes2: ~p and maintnodes: ~p~n", [Nodes2]),
     MaybeRetry = fun
         ({{badrpc, {'EXIT', {undef, _StrackTrace}}}, Node}) ->
             RPCResult = riak_core_util:safe_rpc(Node, riak_repl_app, get_matching_address, Args),

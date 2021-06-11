@@ -48,6 +48,7 @@ start_link(LeaderModule, LeaderPid, Candidates, Workers) ->
     LeaderModuleStr = atom_to_list(LeaderModule),
     RegStr = LeaderModuleStr ++ "_" ++ CandidateHashStr,
     RegName = list_to_atom(RegStr),
+    lager:info("hit start_link 1"),
 
     %% Make sure there is a unique directory for this election
     {ok, DataRootDir} = application:get_env(riak_repl, data_root),
@@ -55,6 +56,7 @@ start_link(LeaderModule, LeaderPid, Candidates, Workers) ->
     ok = filelib:ensure_dir(filename:join(VarDir, ".empty")),
 
     LOpts = [{vardir, VarDir},{workers, Workers}, {bcast_type, all}],
+    lager:info("hit start_link 2"),
     gen_leader:start_link(RegName, Candidates, LOpts, ?MODULE, [LeaderModule, LeaderPid], []).
 
 leader_node(HelperPid) ->
@@ -73,6 +75,7 @@ refresh_leader(HelperPid) ->
 %%%===================================================================
 
 init([LeaderModule, LeaderPid]) ->
+    lager:info("hit init"),
     {ok, #state{leader_mod=LeaderModule, local_pid=LeaderPid}}.
 
 elected(State, _NewElection, _Node) ->

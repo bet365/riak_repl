@@ -34,6 +34,7 @@ handle_event({ring_update, Ring}, State=#state{ring=Ring}) ->
     {ok, State};
 handle_event({ring_update, NewRing}, State=#state{ring=OldRing}) ->
     %% Ring has changed.
+    lager:info("Repl Ring Update"),
     case riak_core_ring:check_lastgasp(NewRing) of
         true ->
             {ok, State};
@@ -119,8 +120,11 @@ update_ring(ReplConfig) ->
 %% Pass updated configuration settings to the leader
 %%
 update_leader(Ring) ->
+    lager:info("Repl Ring Update leader"),
     AllNodes = riak_core_ring:all_members(Ring),
-    riak_repl2_leader:set_candidates(AllNodes, []),
+    MaintNodes = riak_core_node_watcher:maintenance_nodes(),
+    lager:info("Repl Ring Update leader, AllNodes: ~p MaintNodes: ~p~n", [AllNodes, MaintNodes]),
+    riak_repl2_leader:set_candidates(AllNodes, MaintNodes),
     case riak_repl_ring:get_repl_config(Ring) of
         undefined ->
             ok;
@@ -133,14 +137,15 @@ update_leader(Ring) ->
             case {has_sites(RC), has_listeners(RC)} of
                 {_, true} ->
                     Candidates=Listeners,
-                    Workers=NonListeners;
+                    Workers=NonListeners ++ MaintNodes;
                 {true, false} ->
                     Candidates=AllNodes,
-                    Workers=[];
+                    Workers=MaintNodes;
                 {false, false} ->
                     Candidates=[],
                     Workers=[]
             end,
+            %% TODO does this need to use v2 version of the modules as above? Eg; riak_repl2_leader:set_candidates
             riak_repl_listener_sup:ensure_listeners(Ring),
             riak_repl_leader:set_candidates(Candidates, Workers)
     end.

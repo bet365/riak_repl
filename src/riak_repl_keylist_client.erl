@@ -95,7 +95,6 @@ wait_for_fullsync(Command, State)
     Remaining = length(Partitions),
     lager:info("Full-sync with site ~p starting; ~p partitions.",
                           [State#state.sitename, Remaining]),
-    timer:sleep(2000),
     gen_fsm_compat:send_event(self(), continue),
     {next_state, request_partition, State#state{partitions=Partitions}};
 wait_for_fullsync({start_fullsync, Partitions}, State) ->
